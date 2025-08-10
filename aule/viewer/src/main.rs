@@ -31,9 +31,23 @@ fn log_grid_info() {
     } else {
         inter_sizes.iter().sum::<usize>() as f64 / inter_sizes.len() as f64
     };
+    let mut halo_sizes: Vec<usize> = tiling.tiles.iter().map(|t| t.halo.len()).collect();
+    halo_sizes.sort_unstable();
+    let min_h = halo_sizes.first().copied().unwrap_or(0);
+    let max_h = halo_sizes.last().copied().unwrap_or(0);
+    let mean_h = if halo_sizes.is_empty() {
+        0.0
+    } else {
+        halo_sizes.iter().sum::<usize>() as f64 / halo_sizes.len() as f64
+    };
+    let neigh0 = if !tiling.tiles.is_empty() {
+        format!("{:?}", tiling.tiles[0].neighbors.as_slice())
+    } else {
+        "[]".to_string()
+    };
     println!(
-        "[grid] F={} cells={} pentagons={} hexagons={} mean_area={:.6} median_area={:.6} n1[0]={} | tiles={} interior[min/mean/max]=[{}/{:.1}/{}]",
-        f, cells, pent, hex, mean, median, n1_sample, tiles, min_i, mean_i, max_i
+        "[grid] F={} cells={} pentagons={} hexagons={} mean_area={:.6} median_area={:.6} n1[0]={} | tiles={} interior[min/mean/max]=[{}/{:.1}/{}] halo[min/mean/max]=[{}/{:.1}/{}] neighbors(tile0)={}",
+        f, cells, pent, hex, mean, median, n1_sample, tiles, min_i, mean_i, max_i, min_h, mean_h, max_h, neigh0
     );
 }
 
