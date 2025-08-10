@@ -76,7 +76,6 @@ impl<'w> GpuState<'w> {
             .await
             .unwrap_or_else(|| panic!("no suitable GPU adapters"));
 
-        // Request reasonable default limits so storage buffers are available
         let required_limits = wgpu::Limits::default();
 
         let (device, queue) = adapter
