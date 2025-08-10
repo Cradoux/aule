@@ -40,5 +40,3 @@ impl GpuContext {
         Self { instance, device, queue }
     }
 }
-
-

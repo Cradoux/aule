@@ -76,8 +76,8 @@ impl<'w> GpuState<'w> {
             .await
             .unwrap_or_else(|| panic!("no suitable GPU adapters"));
 
-        let required_limits =
-            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        // Request reasonable default limits so storage buffers are available
+        let required_limits = wgpu::Limits::default();
 
         let (device, queue) = adapter
             .request_device(
@@ -181,11 +181,8 @@ fn main() {
         let f: u32 = 64;
         let g_tmp = engine::grid::Grid::new(f);
         let plates = engine::plates::Plates::new(&g_tmp, 8, 12345);
-        let mut mags: Vec<f64> = plates
-            .vel_en
-            .iter()
-            .map(|v| ((v[0] as f64).hypot(v[1] as f64)))
-            .collect();
+        let mut mags: Vec<f64> =
+            plates.vel_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
         mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = mags.len();
         let min_v = *mags.first().unwrap_or(&0.0);
