@@ -1,0 +1,12 @@
+[book]
+title = "Aulë — Procedural Tectonics"
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "light"
+git-repository-url = "https://github.com/Cradoux/aule"
+site-url = "/"
+additional-css = []
+

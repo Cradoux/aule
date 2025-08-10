@@ -1,5 +1,7 @@
 # Aulë
 
+[![Docs](https://img.shields.io/badge/docs-mdBook-blue)](https://cradoux.github.io/aule/)
+
 Quick start
 
 - Install Rust (stable): see `https://rustup.rs`
@@ -9,6 +11,13 @@ Quick start
   - Tests: `cargo test --all`
 - Run the viewer:
   - `cargo run -p viewer`
+
+Docs
+
+- Browse the docs site: https://cradoux.github.io/aule/
+- Build locally:
+  - `cargo install mdbook --locked`
+  - `mdbook serve docs -p 3000`
 
 Notes
 
