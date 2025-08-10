@@ -13,6 +13,7 @@ thiserror.workspace = true
 smallvec = "1.13"
 wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
+rand.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
