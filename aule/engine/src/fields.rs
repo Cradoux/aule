@@ -37,25 +37,37 @@ pub struct ScalarTileView<'a> {
 
 // --------- T-020 GPU SoA buffers (draft) ---------
 
+/// Wrapper for IDs/masks stored as `u32` on GPU.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Zeroable, Pod)]
 pub struct IdMaskU32(pub u32);
 
+/// Device-side structure-of-arrays buffers for core fields.
 pub struct DeviceFields {
+    /// Number of cells represented by all buffers
     pub cells: usize,
-    // continuous SoA buffers
-    pub h: wgpu::Buffer,           // f32
-    pub th_c: wgpu::Buffer,        // f32
-    pub age_ocean: wgpu::Buffer,   // f32
-    pub s: wgpu::Buffer,           // f32 (salinity placeholder)
-    pub v: wgpu::Buffer,           // f32 (velocity mag placeholder)
-    pub plate_id: wgpu::Buffer,    // u32
-    pub b: wgpu::Buffer,           // f32 (bathymetry/elevation)
+    /// Surface height (f32)
+    pub h: wgpu::Buffer,
+    /// Potential temperature at C-point (f32)
+    pub th_c: wgpu::Buffer,
+    /// Ocean age (f32)
+    pub age_ocean: wgpu::Buffer,
+    /// Salinity placeholder (f32)
+    pub s: wgpu::Buffer,
+    /// Velocity magnitude placeholder (f32)
+    pub v: wgpu::Buffer,
+    /// Plate IDs (u32)
+    pub plate_id: wgpu::Buffer,
+    /// Bathymetry/elevation (f32)
+    pub b: wgpu::Buffer,
+    /// Bind group layout for all buffers
     pub bind_group_layout: wgpu::BindGroupLayout,
+    /// Bind group referencing all buffers
     pub bind_group: wgpu::BindGroup,
 }
 
 impl DeviceFields {
+    /// Create new device buffers sized for `cells` and the corresponding bind group.
     pub fn new(device: &wgpu::Device, cells: usize) -> Self {
         fn buf(device: &wgpu::Device, size: usize, label: &str, usage: wgpu::BufferUsages) -> wgpu::Buffer {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -110,6 +122,7 @@ impl DeviceFields {
         wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
     }
 
+    /// Recreate all buffers and bind group if size changes.
     pub fn resize(&mut self, device: &wgpu::Device, new_cells: usize) {
         if new_cells == self.cells { return; }
         *self = Self::new(device, new_cells);
