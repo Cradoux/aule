@@ -7,6 +7,8 @@
 pub mod fields;
 /// Geodesic grid module.
 pub mod grid;
+/// Plates seeding and velocities.
+pub mod plates;
 /// Minimal GPU helper for tests (T-020).
 pub mod gpu;
 
