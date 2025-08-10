@@ -2,13 +2,18 @@
 
 use wgpu::{Device, Instance, Queue};
 
+/// Minimal GPU context for tests and utilities.
 pub struct GpuContext {
+    /// Instance used to create adapters
     pub instance: Instance,
+    /// Logical device
     pub device: Device,
+    /// Submission queue
     pub queue: Queue,
 }
 
 impl GpuContext {
+    /// Create a new GPU context using default instance and a high-performance adapter.
     pub async fn new() -> Self {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -19,7 +24,8 @@ impl GpuContext {
             })
             .await
             .unwrap_or_else(|| panic!("no suitable GPU adapters"));
-        let required_limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        // For tests we need storage buffers; request reasonable defaults.
+        let required_limits = wgpu::Limits::default();
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {

@@ -1,5 +1,7 @@
-use engine::gpu::GpuContext;
 use engine::fields::DeviceFields;
+use engine::gpu::GpuContext;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use wgpu::util::DeviceExt;
 
 fn roundtrip_sizes() -> Vec<usize> { vec![1024, 1536, 2048] }
 
@@ -33,19 +35,15 @@ fn device_fields_roundtrip_and_resize() {
         ctx.queue.submit(Some(encoder.finish()));
         ctx.device.poll(wgpu::Maintain::Wait);
 
-        // Map and compare
+        // Map and compare (no extra deps): use atomic flag + device.poll
+        map_wait(&ctx.device, &h_read);
         {
-            let (s, r) = futures_intrusive::channel::shared::oneshot_channel();
-            h_read.slice(..).map_async(wgpu::MapMode::Read, move |v| s.send(v).ok());
-            pollster::block_on(r.receive());
             let data = h_read.slice(..).get_mapped_range();
             let out: &[f32] = bytemuck::cast_slice(&data);
             assert_eq!(out, &h_host[..]);
         }
+        map_wait(&ctx.device, &pid_read);
         {
-            let (s, r) = futures_intrusive::channel::shared::oneshot_channel();
-            pid_read.slice(..).map_async(wgpu::MapMode::Read, move |v| s.send(v).ok());
-            pollster::block_on(r.receive());
             let data = pid_read.slice(..).get_mapped_range();
             let out: &[u32] = bytemuck::cast_slice(&data);
             assert_eq!(out, &pid_host[..]);
@@ -54,6 +52,15 @@ fn device_fields_roundtrip_and_resize() {
         // Resize grow then shrink
         df.resize(&ctx.device, n + 128);
         df.resize(&ctx.device, n);
+    }
+}
+
+fn map_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_c = done.clone();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |_| { done_c.store(true, Ordering::SeqCst); });
+    while !done.load(Ordering::SeqCst) {
+        device.poll(wgpu::Maintain::Wait);
     }
 }
 
