@@ -11,6 +11,7 @@ fn log_grid_info() {
     let f: u32 = 64;
     // Build or load cache (path-agnostic in engine; here we just build).
     let g = engine::grid::Grid::new(f);
+    let tiling = engine::grid::tile::Tiling::new(&g, 2, 8192);
     let cells = g.cells as u32; // expected 10*F^2+2
     let pent = 12u32;
     let hex = cells.saturating_sub(pent);
@@ -20,9 +21,19 @@ fn log_grid_info() {
     let median = if areas.is_empty() { 0.0 } else { areas[areas.len() / 2] } as f64;
     let n1_sample =
         if !g.n1.is_empty() { format!("{:?}", g.n1[0].as_slice()) } else { "[]".to_string() };
+    let tiles = tiling.tiles.len();
+    let mut inter_sizes: Vec<usize> = tiling.tiles.iter().map(|t| t.interior.len()).collect();
+    inter_sizes.sort_unstable();
+    let min_i = inter_sizes.first().copied().unwrap_or(0);
+    let max_i = inter_sizes.last().copied().unwrap_or(0);
+    let mean_i = if inter_sizes.is_empty() {
+        0.0
+    } else {
+        inter_sizes.iter().sum::<usize>() as f64 / inter_sizes.len() as f64
+    };
     println!(
-        "[grid] F={} cells={} pentagons={} hexagons={} mean_area={:.6} median_area={:.6} n1[0]={}",
-        f, cells, pent, hex, mean, median, n1_sample
+        "[grid] F={} cells={} pentagons={} hexagons={} mean_area={:.6} median_area={:.6} n1[0]={} | tiles={} interior[min/mean/max]=[{}/{:.1}/{}]",
+        f, cells, pent, hex, mean, median, n1_sample, tiles, min_i, mean_i, max_i
     );
 }
 

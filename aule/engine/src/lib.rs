@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+/// Field and tiling views.
+pub mod fields;
 /// Geodesic grid module.
 pub mod grid;
 

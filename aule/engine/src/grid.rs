@@ -1,6 +1,7 @@
 //! Geodesic icosphere grid and adjacency.
 
 pub mod cache;
+pub mod tile;
 
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};

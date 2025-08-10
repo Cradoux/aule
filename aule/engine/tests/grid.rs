@@ -1,5 +1,8 @@
 use engine::grid::{cache::GridError, Grid};
-use std::{env, fs, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    env, fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn grid_constructs() {
