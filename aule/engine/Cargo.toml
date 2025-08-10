@@ -9,6 +9,8 @@ authors.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+thiserror.workspace = true
+smallvec = "1.13"
 
 
 
