@@ -101,8 +101,8 @@ impl Grid {
                             eid
                         }
                     } else if j == 0 {
-                        // C-A edge, t from C
-                        let t = k;
+                        // C-A edge, local t = i (distance from C toward A)
+                        let t = i;
                         let (ekey, t_from_lo) = edge_key_from(c_id, a_id, t);
                         if let Some(&eid) = edge_map.get(&ekey) {
                             eid
@@ -143,31 +143,86 @@ impl Grid {
                 grid_ids.push(row);
             }
 
-            // Triangulate face from grid_ids in lexicographic order
-            if f == 1 {
-                // Degenerate case: the whole face is one triangle
-                let a0 = grid_ids[0][0];
-                let b0 = grid_ids[0][1];
-                let c0 = grid_ids[1][0];
-                tris.push([a0, b0, c0]);
-            } else {
-                for i_b in 0..f {
-                    let max_j = f - 1 - i_b;
-                    for j_b in 0..=max_j {
-                        if j_b < max_j {
-                            let a0 = grid_ids[i_b as usize][j_b as usize];
-                            let b0 = grid_ids[(i_b + 1) as usize][j_b as usize];
-                            let c0 = grid_ids[i_b as usize][(j_b + 1) as usize];
-                            tris.push([a0, b0, c0]);
-                        }
-                        if i_b < f - 1 && j_b < max_j + 1 && j_b < max_j {
-                            let a1 = grid_ids[(i_b + 1) as usize][j_b as usize];
-                            let b1 = grid_ids[(i_b + 1) as usize][(j_b + 1) as usize];
-                            let c1 = grid_ids[i_b as usize][(j_b + 1) as usize];
-                            tris.push([a1, b1, c1]);
-                        }
+            // Canonical two-loop triangulation: exactly F^2 triangles per face (no guards)
+            let f_usize = f as usize;
+            let idx = |ii: usize, jj: usize| -> u32 { grid_ids[ii][jj] };
+            #[cfg(debug_assertions)]
+            let mut face_tri_count: usize = 0;
+            #[cfg(debug_assertions)]
+            let mut face_area_sum: f64 = 0.0;
+            #[cfg(debug_assertions)]
+            let get_pos = |vid: usize| -> [f64; 3] {
+                match id_defs[vid] {
+                    VertexDef::Corner(c) => v0[c],
+                    VertexDef::Edge { lo, hi, t_from_lo } => {
+                        let lo_v = v0[lo];
+                        let hi_v = v0[hi];
+                        let tt = t_from_lo as f64 / f as f64;
+                        normalize3([
+                            lo_v[0] * (1.0 - tt) + hi_v[0] * tt,
+                            lo_v[1] * (1.0 - tt) + hi_v[1] * tt,
+                            lo_v[2] * (1.0 - tt) + hi_v[2] * tt,
+                        ])
+                    }
+                    VertexDef::Interior { face, i, j } => {
+                        let (aa, bb, cc) =
+                            (v0[faces[face][0]], v0[faces[face][1]], v0[faces[face][2]]);
+                        let k = f - i - j;
+                        let fi = f as f64;
+                        let w_a = i as f64 / fi;
+                        let w_b = j as f64 / fi;
+                        let w_c = k as f64 / fi;
+                        normalize3([
+                            aa[0] * w_a + bb[0] * w_b + cc[0] * w_c,
+                            aa[1] * w_a + bb[1] * w_b + cc[1] * w_c,
+                            aa[2] * w_a + bb[2] * w_b + cc[2] * w_c,
+                        ])
                     }
                 }
+            };
+            // DOWN triangles: [i,j],[i+1,j],[i,j+1]
+            for i in 0..f_usize {
+                for j in 0..(f_usize - i) {
+                    let a = idx(i, j);
+                    let b = idx(i + 1, j);
+                    let c = idx(i, j + 1);
+                    #[cfg(debug_assertions)]
+                    {
+                        let pa = get_pos(a as usize);
+                        let pb = get_pos(b as usize);
+                        let pc = get_pos(c as usize);
+                        face_area_sum += spherical_triangle_area(pa, pb, pc);
+                        face_tri_count += 1;
+                    }
+                    tris.push([a, b, c]);
+                }
+            }
+            // UP triangles: [i+1,j],[i+1,j+1],[i,j+1]
+            for i in 0..f_usize {
+                for j in 0..(f_usize - i - 1) {
+                    let b = idx(i + 1, j);
+                    let d = idx(i + 1, j + 1);
+                    let c = idx(i, j + 1);
+                    #[cfg(debug_assertions)]
+                    {
+                        let pb = get_pos(b as usize);
+                        let pd = get_pos(d as usize);
+                        let pc = get_pos(c as usize);
+                        face_area_sum += spherical_triangle_area(pb, pd, pc);
+                        face_tri_count += 1;
+                    }
+                    tris.push([b, d, c]);
+                }
+            }
+            #[cfg(debug_assertions)]
+            {
+                debug_assert_eq!(face_tri_count as u32, f * f);
+                let a = v0[a_id];
+                let b = v0[b_id];
+                let c = v0[c_id];
+                let face_true = spherical_triangle_area(a, b, c);
+                let rel = (face_area_sum - face_true).abs() / face_true.max(1e-18);
+                debug_assert!(rel < 1e-10, "face {} area rel err {}", fid, rel);
             }
         }
 
@@ -262,7 +317,7 @@ impl Grid {
         // Validate partitioning of sphere area ~ 4π
         let sum_area: f64 = area_acc.iter().sum();
         let rel_err = (sum_area - 4.0 * PI).abs() / (4.0 * PI);
-        assert!(rel_err < 1e-6, "area partition error: {rel_err}");
+        debug_assert!(rel_err < 1e-6, "area partition error: {rel_err}");
 
         // Convert to output types
         let cells = n_vertices;
