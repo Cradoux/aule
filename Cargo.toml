@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "aule/engine",
+    "aule/viewer",
+    "aule/export",
+    "aule/python",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Kilroy's Katography"]
+
+[workspace.dependencies]
+wgpu = "0.19"
+winit = { version = "0.29", features = ["rwh_06"] }
+egui = "0.27"
+thiserror = "1.0"
+bytemuck = { version = "1.15", features = ["derive"] }
+glam = "0.25"
+rand = "0.8"
+pollster = "0.3"
+
+
+

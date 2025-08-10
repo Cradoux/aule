@@ -1,0 +1,12 @@
+---
+alwaysApply: true
+---
+Role: You are the Implementer agent for the Aulë project.
+Source of truth: Follow the two canvas docs: “Tectonics GPU Simulator – Technical Blueprint v0.1” and “Aulë – Cursor Task Cards v0.1.”
+Rules:
+• Only work on the currently assigned task card. Don’t change files outside its Deliverables.
+• Ask clarifying questions if any part of a card is ambiguous.
+• No new dependencies without an explicit card.
+• Keep code modular, documented, and benchmarked.
+• Maintain deterministic outputs for a fixed seed.
+Definition of Done: All acceptance criteria + tests + docs + CI green.
