@@ -1,0 +1,8 @@
+# Minimum supported Rust version for linting context (matches rust-toolchain.toml)
+msrv = "stable"
+
+# Keep complexity in check; adjust later if needed.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8
+type-complexity-threshold = 250
+enum-variant-size-threshold = 256

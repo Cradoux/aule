@@ -1,3 +1,6 @@
+//! Aulë viewer binary.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
+
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
@@ -16,7 +19,10 @@ impl<'w> GpuState<'w> {
     async fn new(window: &'w Window) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window).expect("create surface");
+        let surface = match instance.create_surface(window) {
+            Ok(s) => s,
+            Err(e) => panic!("create surface: {e}"),
+        };
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -25,7 +31,7 @@ impl<'w> GpuState<'w> {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("no suitable GPU adapters");
+            .unwrap_or_else(|| panic!("no suitable GPU adapters"));
 
         let required_limits =
             wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
@@ -40,7 +46,7 @@ impl<'w> GpuState<'w> {
                 None,
             )
             .await
-            .expect("request device");
+            .unwrap_or_else(|e| panic!("request device: {e}"));
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -62,13 +68,7 @@ impl<'w> GpuState<'w> {
         };
         surface.configure(&device, &config);
 
-        Self {
-            _instance: instance,
-            surface,
-            device,
-            queue,
-            config,
-        }
+        Self { _instance: instance, surface, device, queue, config }
     }
 
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -81,15 +81,11 @@ impl<'w> GpuState<'w> {
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("encoder"),
-            });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
 
         {
             let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -120,12 +116,12 @@ impl<'w> GpuState<'w> {
     }
 }
 fn main() {
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = EventLoop::new().unwrap_or_else(|e| panic!("event loop: {e}"));
     let title = format!("Aulë Viewer v{}", engine::version());
     let window_init = WindowBuilder::new()
         .with_title(title)
         .build(&event_loop)
-        .expect("create window");
+        .unwrap_or_else(|e| panic!("create window: {e}"));
 
     // Leak the window to obtain a 'static reference for the surface lifetime without unsafe.
     let window: &'static Window = Box::leak(Box::new(window_init));
@@ -133,28 +129,26 @@ fn main() {
     let mut _egui_ctx = egui::Context::default();
 
     event_loop
-        .run(move |event, elwt| {
-            match event {
-                Event::AboutToWait => {
-                    window.request_redraw();
+        .run(move |event, elwt| match event {
+            Event::AboutToWait => {
+                window.request_redraw();
+            }
+            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Resized(size) => {
+                    gpu.resize(size);
                 }
-                Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
-                    WindowEvent::Resized(size) => {
-                        gpu.resize(size);
+                WindowEvent::RedrawRequested => match gpu.render() {
+                    Ok(()) => {}
+                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        gpu.resize(window.inner_size())
                     }
-                    WindowEvent::RedrawRequested => match gpu.render() {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            gpu.resize(window.inner_size())
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(wgpu::SurfaceError::Timeout) => {}
-                    },
-                    _ => {}
+                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                    Err(wgpu::SurfaceError::Timeout) => {}
                 },
                 _ => {}
-            }
+            },
+            _ => {}
         })
-        .expect("run app");
+        .unwrap_or_else(|e| panic!("run app: {e}"));
 }
