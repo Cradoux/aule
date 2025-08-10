@@ -15,3 +15,5 @@ Notes
 - The viewer opens a window and targets ~60 FPS idle via vsync.
 - Engine and export crates are stubs for now; Python crate is a placeholder with optional bindings not enabled by default.
 
+See CONTRIBUTING.md for coding standards and PR flow.
+
