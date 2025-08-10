@@ -170,6 +170,12 @@ fn main() {
     let window: &'static Window = Box::leak(Box::new(window_init));
     let mut gpu = pollster::block_on(GpuState::new(window));
     let mut _egui_ctx = egui::Context::default();
+    // T-020: Construct device field buffers sized to the grid (then drop)
+    {
+        let f: u32 = 64;
+        let g_tmp = engine::grid::Grid::new(f);
+        let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
+    }
     log_grid_info();
 
     event_loop
