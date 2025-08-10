@@ -3,6 +3,9 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+/// Geodesic grid module.
+pub mod grid;
+
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

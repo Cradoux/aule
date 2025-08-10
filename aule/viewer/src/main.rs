@@ -7,6 +7,24 @@ use winit::{
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
+fn log_grid_info() {
+    let f: u32 = 64;
+    // Build or load cache (path-agnostic in engine; here we just build).
+    let g = engine::grid::Grid::new(f);
+    let cells = g.cells as u32; // expected 10*F^2+2
+    let pent = 12u32;
+    let hex = cells.saturating_sub(pent);
+    let mean: f64 = g.area.iter().map(|a| *a as f64).sum::<f64>() / g.area.len() as f64;
+    let mut areas: Vec<f32> = g.area.clone();
+    areas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if areas.is_empty() { 0.0 } else { areas[areas.len() / 2] } as f64;
+    let n1_sample =
+        if !g.n1.is_empty() { format!("{:?}", g.n1[0].as_slice()) } else { "[]".to_string() };
+    println!(
+        "[grid] F={} cells={} pentagons={} hexagons={} mean_area={:.6} median_area={:.6} n1[0]={}",
+        f, cells, pent, hex, mean, median, n1_sample
+    );
+}
 
 struct GpuState<'w> {
     _instance: wgpu::Instance,
@@ -127,6 +145,7 @@ fn main() {
     let window: &'static Window = Box::leak(Box::new(window_init));
     let mut gpu = pollster::block_on(GpuState::new(window));
     let mut _egui_ctx = egui::Context::default();
+    log_grid_info();
 
     event_loop
         .run(move |event, elwt| match event {
