@@ -34,238 +34,174 @@ impl Grid {
         // Canonical icosahedron (unit sphere)
         let (v0, faces) = icosahedron();
 
-        // Vertex indexing maps for determinism
-        let mut global_pos: Vec<[f64; 3]> = Vec::new();
-        // Map base corner id -> global id
+        // Canonical ID space built in two phases: assign IDs deterministically, then emit positions.
+        // Vertex definition per ID for later position emission
+        enum VertexDef {
+            Corner(usize),
+            Edge { lo: usize, hi: usize, t_from_lo: u32 },
+            Interior { face: usize, i: u32, j: u32 },
+        }
+        let mut id_defs: Vec<VertexDef> = Vec::new();
+
+        // Corner map: base corner index -> global id
         let mut corner_map: HashMap<usize, u32> = HashMap::new();
         for i in 0..v0.len() {
-            let id = global_pos.len() as u32;
+            let id = id_defs.len() as u32;
             corner_map.insert(i, id);
-            global_pos.push(v0[i]);
+            id_defs.push(VertexDef::Corner(i));
         }
 
-        // Edge map: (min_corner, max_corner, t) with 1..F-1
-        #[derive(Hash, Eq, PartialEq)]
+        // Edge map: (lo, hi, t_from_lo) with 1..F-1
+        #[derive(Hash, Eq, PartialEq, Copy, Clone)]
         struct EdgeKey(u32, u32, u32);
         let mut edge_map: HashMap<EdgeKey, u32> = HashMap::new();
 
-        // Face interior map: (face_id, i, j) with i>=1, j>=1, k>=1, i+j+k=F
-        #[derive(Hash, Eq, PartialEq)]
-        struct FaceKey(u32, u32, u32);
-        let mut face_map: HashMap<FaceKey, u32> = HashMap::new();
-
-        // Helper to add or fetch subdivided vertex on an edge
-        let mut edge_point = |a_id: usize, b_id: usize, t: u32| -> u32 {
-            let (lo, hi) =
-                if a_id < b_id { (a_id as u32, b_id as u32) } else { (b_id as u32, a_id as u32) };
-            let key = EdgeKey(lo, hi, t);
-            if let Some(&gid) = edge_map.get(&key) {
-                return gid;
-            }
-            let a = v0[a_id];
-            let b = v0[b_id];
-            let tt = t as f64 / f as f64;
-            let p = normalize3([
-                a[0] * (1.0 - tt) + b[0] * tt,
-                a[1] * (1.0 - tt) + b[1] * tt,
-                a[2] * (1.0 - tt) + b[2] * tt,
-            ]);
-            let gid = global_pos.len() as u32;
-            edge_map.insert(key, gid);
-            global_pos.push(p);
-            gid
+        // Utility to produce an EdgeKey from an ordered pair (a,b) and a parameter t from A
+        let edge_key_from = |a_id: usize, b_id: usize, t_from_a: u32| -> (EdgeKey, u32) {
+            let (lo_usize, hi_usize, t_from_lo) = if a_id < b_id {
+                (a_id, b_id, t_from_a)
+            } else {
+                // distance from lo when lo is b
+                (b_id, a_id, f - t_from_a)
+            };
+            (EdgeKey(lo_usize as u32, hi_usize as u32, t_from_lo), t_from_lo)
         };
 
-        // Helper to add or fetch interior vertex
-        let mut face_interior = |face_id: usize,
-                                 i: u32,
-                                 j: u32,
-                                 k: u32,
-                                 a: [f64; 3],
-                                 b: [f64; 3],
-                                 c: [f64; 3]|
-         -> u32 {
-            let key = FaceKey(face_id as u32, i, j);
-            if let Some(&gid) = face_map.get(&key) {
-                return gid;
-            }
-            let fi = f as f64;
-            let w_a = i as f64 / fi;
-            let w_b = j as f64 / fi;
-            let w_c = k as f64 / fi;
-            let p = normalize3([
-                a[0] * w_a + b[0] * w_b + c[0] * w_c,
-                a[1] * w_a + b[1] * w_b + c[1] * w_c,
-                a[2] * w_a + b[2] * w_b + c[2] * w_c,
-            ]);
-            let gid = global_pos.len() as u32;
-            face_map.insert(key, gid);
-            global_pos.push(p);
-            gid
-        };
-
-        // Build subdivided faces (small triangles) referencing global vertex ids
+        // ID assignment grid per face
         let mut tris: Vec<[u32; 3]> = Vec::new();
         for (fid, face) in faces.iter().enumerate() {
             let (a_id, b_id, c_id) = (face[0], face[1], face[2]);
-            let (a, b, c) = (v0[a_id], v0[b_id], v0[c_id]);
-
-            // Generate grid points on this face
-            // Barycentric i,j,k with i+j+k=F
-            // Corners
-            let a_gid = corner_map[&a_id];
-            let b_gid = corner_map[&b_id];
-            let c_gid = corner_map[&c_id];
-
-            // Edge points
-            // AB: t = 1..F-1
-            let mut ab: Vec<u32> = Vec::new();
-            for t in 1..f {
-                ab.push(edge_point(a_id, b_id, t));
-            }
-            // BC
-            let mut bc: Vec<u32> = Vec::new();
-            for t in 1..f {
-                bc.push(edge_point(b_id, c_id, t));
-            }
-            // CA
-            let mut ca: Vec<u32> = Vec::new();
-            for t in 1..f {
-                ca.push(edge_point(c_id, a_id, t));
-            }
-
-            // Interior points per (i,j) with i>=1, j>=1, k>=1
-            let mut interior_rows: Vec<Vec<u32>> = Vec::new();
-            for i in 1..f {
-                // i from 1..F-1
-                let max_j = f - i;
-                let mut row: Vec<u32> = Vec::new();
-                for j in 1..max_j {
-                    // j from 1..F-i-1, but include up to max_j-1 ensures k>=1
+            // Build grid_ids for this face
+            let mut grid_ids: Vec<Vec<u32>> = Vec::with_capacity((f as usize) + 1);
+            for i in 0..=f {
+                let mut row: Vec<u32> = Vec::with_capacity((f - i) as usize + 1);
+                for j in 0..=(f - i) {
                     let k = f - i - j;
-                    if k == 0 {
-                        continue;
-                    }
-                    row.push(face_interior(fid, i, j, k, a, b, c));
+                    let id = if j == 0 && k == 0 {
+                        corner_map[&a_id]
+                    } else if i == 0 && k == 0 {
+                        corner_map[&b_id]
+                    } else if i == 0 && j == 0 {
+                        corner_map[&c_id]
+                    } else if k == 0 {
+                        // AB edge, t from A
+                        let t = j;
+                        let (ekey, t_from_lo) = edge_key_from(a_id, b_id, t);
+                        if let Some(&eid) = edge_map.get(&ekey) {
+                            eid
+                        } else {
+                            let eid = id_defs.len() as u32;
+                            edge_map.insert(ekey, eid);
+                            id_defs.push(VertexDef::Edge {
+                                lo: ekey.0 as usize,
+                                hi: ekey.1 as usize,
+                                t_from_lo,
+                            });
+                            eid
+                        }
+                    } else if j == 0 {
+                        // C-A edge, t from C
+                        let t = k;
+                        let (ekey, t_from_lo) = edge_key_from(c_id, a_id, t);
+                        if let Some(&eid) = edge_map.get(&ekey) {
+                            eid
+                        } else {
+                            let eid = id_defs.len() as u32;
+                            edge_map.insert(ekey, eid);
+                            id_defs.push(VertexDef::Edge {
+                                lo: ekey.0 as usize,
+                                hi: ekey.1 as usize,
+                                t_from_lo,
+                            });
+                            eid
+                        }
+                    } else if i == 0 {
+                        // B-C edge, t from B
+                        let t = k;
+                        let (ekey, t_from_lo) = edge_key_from(b_id, c_id, t);
+                        if let Some(&eid) = edge_map.get(&ekey) {
+                            eid
+                        } else {
+                            let eid = id_defs.len() as u32;
+                            edge_map.insert(ekey, eid);
+                            id_defs.push(VertexDef::Edge {
+                                lo: ekey.0 as usize,
+                                hi: ekey.1 as usize,
+                                t_from_lo,
+                            });
+                            eid
+                        }
+                    } else {
+                        // Interior unique to this face
+                        let nid = id_defs.len() as u32;
+                        id_defs.push(VertexDef::Interior { face: fid, i, j });
+                        nid
+                    };
+                    row.push(id);
                 }
-                if !row.is_empty() {
-                    interior_rows.push(row);
-                }
+                grid_ids.push(row);
             }
 
-            // Build small triangles in lexicographic order
-            // We create a 2D grid layering from A->B along AB and A->C along AC.
-            // Helper to index points on lattice rows
-            // For each strip s = 0..F-1, we form two triangle types.
-
-            // Precompute border arrays including corners for convenience
-            let ab_full = {
-                let mut v = Vec::with_capacity((f + 1) as usize);
-                v.push(a_gid);
-                v.extend(ab.iter().copied());
-                v.push(b_gid);
-                v
-            };
-            let bc_full = {
-                let mut v = Vec::with_capacity((f + 1) as usize);
-                v.push(b_gid);
-                v.extend(bc.iter().copied());
-                v.push(c_gid);
-                v
-            };
-            let ca_full = {
-                let mut v = Vec::with_capacity((f + 1) as usize);
-                v.push(c_gid);
-                v.extend(ca.iter().copied());
-                v.push(a_gid);
-                v
-            };
-
-            // Function to get point at barycentric (i,j,k) on this face mapped to global id
-            let get_point = |i: u32, j: u32, k: u32| -> u32 {
-                // corners
-                if j == 0 && k == 0 {
-                    return a_gid;
-                }
-                if i == 0 && k == 0 {
-                    return b_gid;
-                }
-                if i == 0 && j == 0 {
-                    return c_gid;
-                }
-                // edges
-                if k == 0 {
-                    // on AB: j in 1..F-1, i in 1..F-1 where j = t, i = F - t
-                    let t = j; // distance from A
-                    return ab_full[t as usize];
-                }
-                if j == 0 {
-                    // on CA from C to A: k=t => index along CA_full from C
-                    let t = k; // distance from C
-                    return ca_full[t as usize];
-                }
-                if i == 0 {
-                    // on BC from B to C: k=t => index along BC_full from B
-                    let t = k; // distance from B to C
-                    return bc_full[t as usize];
-                }
-                // interior: lookup from face_map using earlier insertion
-                // We inserted only when i,j,k>=1
-                let key = FaceKey(fid as u32, i, j);
-                face_map[&key]
-            };
-
-            // Now create small triangles. For row r from 0..F-1, and column s from 0..(F-1-r)
-            for i_b in 0..f {
-                // i_b = barycentric i on A side for the strip
-                let max_j = f - 1 - i_b;
-                for j_b in 0..=max_j {
-                    // Two triangles within the rhombus defined by (i,j) and (i+1,j)
-                    if j_b < max_j {
-                        // lower-left triangle: (i,j,k) - (i+1,j,k-1) - (i,j+1,k-1)
-                        let i0 = i_b;
-                        let j0 = j_b;
-                        let k0 = f - i0 - j0;
-                        if k0 == 0 {
-                            continue;
-                        }
-                        let i1 = i_b + 1;
-                        let j1 = j_b;
-                        let k1 = f - i1 - j1;
-                        let i2 = i_b;
-                        let j2 = j_b + 1;
-                        let k2 = f - i2 - j2;
-                        if k1 == 0 || k2 == 0 {
-                            continue;
-                        }
-                        let a0 = get_point(i0, j0, k0);
-                        let b0 = get_point(i1, j1, k1);
-                        let c0 = get_point(i2, j2, k2);
-                        tris.push([a0, b0, c0]);
-                    }
-                    if i_b < f - 1 && j_b < max_j + 1 {
-                        // upper-right triangle: (i+1,j,k-1) - (i+1,j+1,k-2) - (i,j+1,k-1)
+            // Triangulate face from grid_ids in lexicographic order
+            if f == 1 {
+                // Degenerate case: the whole face is one triangle
+                let a0 = grid_ids[0][0];
+                let b0 = grid_ids[0][1];
+                let c0 = grid_ids[1][0];
+                tris.push([a0, b0, c0]);
+            } else {
+                for i_b in 0..f {
+                    let max_j = f - 1 - i_b;
+                    for j_b in 0..=max_j {
                         if j_b < max_j {
-                            let i1 = i_b + 1;
-                            let j1 = j_b;
-                            let k1 = f - i1 - j1;
-                            let i2 = i_b + 1;
-                            let j2 = j_b + 1;
-                            let k2 = f - i2 - j2;
-                            let i3 = i_b;
-                            let j3 = j_b + 1;
-                            let k3 = f - i3 - j3;
-                            if k1 == 0 || k2 == 0 || k3 == 0 {
-                                continue;
-                            }
-                            let a1 = get_point(i1, j1, k1);
-                            let b1 = get_point(i2, j2, k2);
-                            let c1 = get_point(i3, j3, k3);
+                            let a0 = grid_ids[i_b as usize][j_b as usize];
+                            let b0 = grid_ids[(i_b + 1) as usize][j_b as usize];
+                            let c0 = grid_ids[i_b as usize][(j_b + 1) as usize];
+                            tris.push([a0, b0, c0]);
+                        }
+                        if i_b < f - 1 && j_b < max_j + 1 && j_b < max_j {
+                            let a1 = grid_ids[(i_b + 1) as usize][j_b as usize];
+                            let b1 = grid_ids[(i_b + 1) as usize][(j_b + 1) as usize];
+                            let c1 = grid_ids[i_b as usize][(j_b + 1) as usize];
                             tris.push([a1, b1, c1]);
                         }
                     }
                 }
             }
+        }
+
+        // Emit positions for all IDs
+        let n_vertices = id_defs.len();
+        let mut global_pos: Vec<[f64; 3]> = vec![[0.0, 0.0, 1.0]; n_vertices];
+        for (id, def) in id_defs.iter().enumerate() {
+            let pos = match *def {
+                VertexDef::Corner(c) => v0[c],
+                VertexDef::Edge { lo, hi, t_from_lo } => {
+                    let lo_v = v0[lo];
+                    let hi_v = v0[hi];
+                    let tt = t_from_lo as f64 / f as f64;
+                    normalize3([
+                        lo_v[0] * (1.0 - tt) + hi_v[0] * tt,
+                        lo_v[1] * (1.0 - tt) + hi_v[1] * tt,
+                        lo_v[2] * (1.0 - tt) + hi_v[2] * tt,
+                    ])
+                }
+                VertexDef::Interior { face, i, j } => {
+                    let (a_id, b_id, c_id) = (faces[face][0], faces[face][1], faces[face][2]);
+                    let (a, b, c) = (v0[a_id], v0[b_id], v0[c_id]);
+                    let k = f - i - j;
+                    let fi = f as f64;
+                    let w_a = i as f64 / fi;
+                    let w_b = j as f64 / fi;
+                    let w_c = k as f64 / fi;
+                    normalize3([
+                        a[0] * w_a + b[0] * w_b + c[0] * w_c,
+                        a[1] * w_a + b[1] * w_b + c[1] * w_c,
+                        a[2] * w_a + b[2] * w_b + c[2] * w_c,
+                    ])
+                }
+            };
+            global_pos[id] = pos;
         }
 
         // Build 1-ring adjacency from triangles
@@ -380,7 +316,7 @@ fn icosahedron() -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
     let phi = (1.0 + 5.0_f64.sqrt()) * 0.5;
     let a = 1.0;
     let b = 1.0 / phi;
-    let mut verts = vec![
+    let verts = vec![
         normalize3([-a, b, 0.0]),
         normalize3([a, b, 0.0]),
         normalize3([-a, -b, 0.0]),
@@ -417,5 +353,5 @@ fn icosahedron() -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
         [8, 6, 7],
         [9, 8, 1],
     ];
-    (verts.drain(..).collect(), faces)
+    (verts, faces)
 }

@@ -9,10 +9,13 @@ use super::Grid;
 /// Errors related to grid cache I/O.
 #[derive(thiserror::Error, Debug)]
 pub enum GridError {
+    /// Wrapper for standard I/O errors
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Cache file has wrong magic or version
     #[error("bad magic or version")]
     BadHeader,
+    /// Unexpected data length
     #[error("unexpected data length")]
     BadLength,
 }

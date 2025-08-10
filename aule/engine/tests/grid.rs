@@ -1,4 +1,5 @@
 use engine::grid::{cache::GridError, Grid};
+use std::{env, fs, time::{SystemTime, UNIX_EPOCH}};
 
 #[test]
 fn grid_constructs() {
@@ -14,8 +15,8 @@ fn grid_constructs() {
 #[test]
 fn cache_round_trip_minimal() -> Result<(), GridError> {
     let g = Grid::new(0);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("grid.cache");
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let path = env::temp_dir().join(format!("grid_{}_{}.cache", std::process::id(), ts));
     g.save_cache(&path)?;
     let g2 = Grid::load_cache(&path)?;
     assert_eq!(g.cells, g2.cells);
@@ -24,5 +25,6 @@ fn cache_round_trip_minimal() -> Result<(), GridError> {
     assert_eq!(g.area, g2.area);
     assert_eq!(g.n1, g2.n1);
     assert_eq!(g.n2, g2.n2);
+    let _ = fs::remove_file(&path);
     Ok(())
 }
