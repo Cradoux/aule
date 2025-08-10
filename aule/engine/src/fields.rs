@@ -69,7 +69,12 @@ pub struct DeviceFields {
 impl DeviceFields {
     /// Create new device buffers sized for `cells` and the corresponding bind group.
     pub fn new(device: &wgpu::Device, cells: usize) -> Self {
-        fn buf(device: &wgpu::Device, size: usize, label: &str, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        fn buf(
+            device: &wgpu::Device,
+            size: usize,
+            label: &str,
+            usage: wgpu::BufferUsages,
+        ) -> wgpu::Buffer {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: size as u64,
@@ -79,7 +84,9 @@ impl DeviceFields {
         }
         let bytes_f32 = cells * std::mem::size_of::<f32>();
         let bytes_u32 = cells * std::mem::size_of::<u32>();
-        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
         let h = buf(device, bytes_f32, "h", usage);
         let th_c = buf(device, bytes_f32, "th_c", usage);
         let age_ocean = buf(device, bytes_f32, "age_ocean", usage);
@@ -91,7 +98,13 @@ impl DeviceFields {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fields-bgl"),
             entries: &[
-                Self::entry(0), Self::entry(1), Self::entry(2), Self::entry(3), Self::entry(4), Self::entry(5), Self::entry(6),
+                Self::entry(0),
+                Self::entry(1),
+                Self::entry(2),
+                Self::entry(3),
+                Self::entry(4),
+                Self::entry(5),
+                Self::entry(6),
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -114,17 +127,23 @@ impl DeviceFields {
         wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         }
     }
-    fn bg_entry<'a>(binding: u32, buffer: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
+    fn bg_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
     }
 
     /// Recreate all buffers and bind group if size changes.
     pub fn resize(&mut self, device: &wgpu::Device, new_cells: usize) {
-        if new_cells == self.cells { return; }
+        if new_cells == self.cells {
+            return;
+        }
         *self = Self::new(device, new_cells);
     }
 }

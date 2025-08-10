@@ -5,10 +5,10 @@
 
 /// Field and tiling views.
 pub mod fields;
-/// Geodesic grid module.
-pub mod grid;
 /// Minimal GPU helper for tests (T-020).
 pub mod gpu;
+/// Geodesic grid module.
+pub mod grid;
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {
