@@ -11,6 +11,11 @@ path = "src/lib.rs"
 [dependencies]
 thiserror.workspace = true
 smallvec = "1.13"
+wgpu.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+pollster.workspace = true
 
 
 
