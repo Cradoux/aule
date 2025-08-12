@@ -36,6 +36,12 @@ pub struct OverlayState {
     pub show_age_depth: bool,
     pub plot_sample_cap: u32,
     pub plot_bin_width_myr: f32,
+
+    // Subduction bands
+    pub show_subduction: bool,
+    pub subd_trench: Option<Vec<Shape>>,
+    pub subd_arc: Option<Vec<Shape>>,
+    pub subd_backarc: Option<Vec<Shape>>,
 }
 
 impl Default for OverlayState {
@@ -70,6 +76,10 @@ impl Default for OverlayState {
             show_age_depth: false,
             plot_sample_cap: 5000,
             plot_bin_width_myr: 5.0,
+            show_subduction: false,
+            subd_trench: None,
+            subd_arc: None,
+            subd_backarc: None,
         }
     }
 }
