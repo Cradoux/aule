@@ -86,7 +86,7 @@ pub fn build_age_depth_plot(
         }
     }
     let mut bpts: Vec<[f64; 2]> = Vec::new();
-    for (_i, (sum_d, sum_a, n)) in bins.iter().copied().enumerate() {
+    for (sum_d, sum_a, n) in bins.iter().copied() {
         if n == 0 {
             continue;
         }
