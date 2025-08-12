@@ -291,7 +291,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
@@ -312,8 +312,8 @@ fn main() {
                                     ));
                                     ui.separator();
                                     ui.label(format!(
-                                        "max arrows={} max strokes={}  scale={:.2} px/cm/yr  v_floor={:.2} cm/yr  FPS: {:.0}",
-                                        ov.max_arrows_slider, ov.max_bounds_slider, ov.vel_scale_px_per_cm_yr, ov.v_floor_cm_per_yr, fps
+                                        "max arrows={} max strokes={} max subd={}  scale={:.2} px/cm/yr  v_floor={:.2} cm/yr  FPS: {:.0}",
+                                        ov.max_arrows_slider, ov.max_bounds_slider, ov.max_subd_slider, ov.vel_scale_px_per_cm_yr, ov.v_floor_cm_per_yr, fps
                                     ));
                                 });
                                 ui.separator();
@@ -328,12 +328,15 @@ fn main() {
                                     let bounds_cap = egui::Slider::new(&mut ov.max_bounds_slider, 500..=20_000)
                                         .text("Max boundaries").step_by(500.0);
                                     ui.add(bounds_cap);
+                                    let subd_cap = egui::Slider::new(&mut ov.max_subd_slider, 500..=20_000)
+                                        .text("Max subduction points").step_by(500.0);
+                                    ui.add(subd_cap);
                                 });
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut ov.adaptive_cap, "Adaptive cap (16.6 ms target)");
                                     ui.label(format!(
-                                        "live arrows={} live boundaries={}",
-                                        ov.live_arrows_cap, ov.live_bounds_cap
+                                        "live arrows={} live boundaries={} live subd={}",
+                                        ov.live_arrows_cap, ov.live_bounds_cap, ov.live_subd_cap
                                     ));
                                 });
                                 ui.separator();
@@ -378,6 +381,7 @@ fn main() {
                                         plot::AgeDepthPlotParams { sample_cap: ov.plot_sample_cap as usize, bin_width_myr: ov.plot_bin_width_myr },
                                         &|age| engine::age::depth_from_age(age, d0, a, b),
                                     );
+                                    ui.label("Sample cap = #points plotted (subsampled).\nBin width = age range per bin for the yellow binned mean curve; smaller = more detailed/noisier.");
                                     ui.horizontal(|ui| {
                                         ui.label(format!("RMS: {:.2} m  N={}  age[min/max]={:.2}/{:.2} Myr  depth[min/max]={:.0}/{:.0} m",
                                             pdata.stats.rms_m, pdata.stats.n_samples,
@@ -402,7 +406,8 @@ fn main() {
                                 // Ensure caches are valid for current params
                                 let eff_ar = ov.effective_arrows_cap();
                                 let eff_bd = ov.effective_bounds_cap();
-                                ov.ensure_params_and_invalidate_if_needed(rect, eff_ar, eff_bd);
+                                let eff_sd = ov.effective_subd_cap();
+                                ov.ensure_params_and_invalidate_if_needed(rect, eff_ar, eff_bd, eff_sd);
                                 if ov.show_plates {
                                     for s in ov.shapes_for_plates(rect, &g_view.latlon, &plates.plate_id) { painter.add(s.clone()); }
                                 }
@@ -419,6 +424,14 @@ fn main() {
                                 if ov.show_bathy {
                                     if ov.bathy_cache.is_none() { ov.rebuild_bathy_shapes(rect, &g_view.latlon, &age_out.depth_m); }
                                     for s in ov.bathy_shapes() { painter.add(s.clone()); }
+                                }
+                                if ov.show_subduction {
+                                    if ov.subd_trench.is_none() && ov.subd_arc.is_none() && ov.subd_backarc.is_none() {
+                                        ov.rebuild_subduction_meshes(rect, &g_view.latlon, &sub_res.masks);
+                                    }
+                                    if let Some(v) = &ov.subd_trench { for s in v { painter.add(s.clone()); } }
+                                    if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
+                                    if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
                                 }
                             });
                         });

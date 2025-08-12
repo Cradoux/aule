@@ -1,4 +1,7 @@
-use egui::{epaint::Shape, Color32, Pos2, Rect, Stroke, Vec2};
+use egui::{
+    epaint::{Mesh, Shape, Vertex, WHITE_UV},
+    Color32, Pos2, Rect, Stroke, Vec2,
+};
 
 pub struct OverlayState {
     pub show_hud: bool,
@@ -19,6 +22,7 @@ pub struct OverlayState {
     last_vel_scale: f32,
     last_arrows_cap: u32,
     last_bounds_cap: u32,
+    last_subd_cap: u32,
     pub(crate) plates_cache: Option<Vec<Shape>>,
     pub(crate) vel_cache: Option<Vec<Shape>>,
     pub(crate) bounds_cache: Option<Vec<Shape>>,
@@ -42,6 +46,8 @@ pub struct OverlayState {
     pub subd_trench: Option<Vec<Shape>>,
     pub subd_arc: Option<Vec<Shape>>,
     pub subd_backarc: Option<Vec<Shape>>,
+    pub max_subd_slider: u32,
+    pub live_subd_cap: u32,
 }
 
 impl Default for OverlayState {
@@ -63,6 +69,7 @@ impl Default for OverlayState {
             last_vel_scale: vel_scale_default,
             last_arrows_cap: max_default,
             last_bounds_cap: max_default,
+            last_subd_cap: 10_000,
             plates_cache: None,
             vel_cache: None,
             bounds_cache: None,
@@ -80,6 +87,8 @@ impl Default for OverlayState {
             subd_trench: None,
             subd_arc: None,
             subd_backarc: None,
+            max_subd_slider: 10_000,
+            live_subd_cap: 10_000,
         }
     }
 }
@@ -179,12 +188,20 @@ impl OverlayState {
             self.max_bounds_slider
         }
     }
+    pub fn effective_subd_cap(&self) -> u32 {
+        if self.adaptive_cap {
+            self.live_subd_cap
+        } else {
+            self.max_subd_slider
+        }
+    }
 
     pub fn ensure_params_and_invalidate_if_needed(
         &mut self,
         rect: Rect,
         arrows_cap: u32,
         bounds_cap: u32,
+        subd_cap: u32,
     ) {
         let rk = rect_key(rect);
         if self.last_rect_key.map_or(true, |k| k != rk) {
@@ -192,6 +209,9 @@ impl OverlayState {
             self.plates_cache = None;
             self.vel_cache = None;
             self.bounds_cache = None;
+            self.subd_trench = None;
+            self.subd_arc = None;
+            self.subd_backarc = None;
         }
         if (self.last_vel_scale - self.vel_scale_px_per_cm_yr).abs() > f32::EPSILON
             || self.last_arrows_cap != arrows_cap
@@ -204,9 +224,16 @@ impl OverlayState {
             self.last_bounds_cap = bounds_cap;
             self.bounds_cache = None;
         }
+        if self.last_subd_cap != subd_cap {
+            self.last_subd_cap = subd_cap;
+            self.subd_trench = None;
+            self.subd_arc = None;
+            self.subd_backarc = None;
+        }
         // Clamp live caps into slider ranges in case sliders changed
         self.live_arrows_cap = self.live_arrows_cap.clamp(self.min_cap(), self.max_cap_arrows());
         self.live_bounds_cap = self.live_bounds_cap.clamp(self.min_cap(), self.max_cap_bounds());
+        self.live_subd_cap = self.live_subd_cap.clamp(self.min_cap(), self.max_cap_subd());
         // Age/bathy caches are invalidated by rect changes (recompute positions)
         if self.last_rect_key.is_none() {
             self.age_cache = None;
@@ -222,6 +249,9 @@ impl OverlayState {
     }
     fn max_cap_bounds(&self) -> u32 {
         self.max_bounds_slider.max(500)
+    }
+    fn max_cap_subd(&self) -> u32 {
+        self.max_subd_slider.max(500)
     }
 
     pub fn shapes_for_plates(
@@ -267,6 +297,7 @@ impl OverlayState {
         if !self.adaptive_cap {
             self.live_arrows_cap = self.max_arrows_slider.max(500);
             self.live_bounds_cap = self.max_bounds_slider.max(500);
+            self.live_subd_cap = self.max_subd_slider.max(500);
             return;
         }
         // Simple ±10% adjustment per frame toward 16.6 ms target
@@ -275,26 +306,40 @@ impl OverlayState {
             let dec = |x: u32| ((x as f32) * 0.9).round() as u32;
             let new_ar = dec(self.live_arrows_cap).max(self.min_cap());
             let new_bd = dec(self.live_bounds_cap).max(self.min_cap());
+            let new_sd = dec(self.live_subd_cap).max(self.min_cap());
             if new_ar != self.live_arrows_cap {
                 self.vel_cache = None;
             }
             if new_bd != self.live_bounds_cap {
                 self.bounds_cache = None;
             }
+            if new_sd != self.live_subd_cap {
+                self.subd_trench = None;
+                self.subd_arc = None;
+                self.subd_backarc = None;
+            }
             self.live_arrows_cap = new_ar.min(self.max_cap_arrows());
             self.live_bounds_cap = new_bd.min(self.max_cap_bounds());
+            self.live_subd_cap = new_sd.min(self.max_cap_subd());
         } else {
             let inc = |x: u32| ((x as f32) * 1.1).round() as u32;
             let new_ar = inc(self.live_arrows_cap).min(self.max_cap_arrows());
             let new_bd = inc(self.live_bounds_cap).min(self.max_cap_bounds());
+            let new_sd = inc(self.live_subd_cap).min(self.max_cap_subd());
             if new_ar != self.live_arrows_cap {
                 self.vel_cache = None;
             }
             if new_bd != self.live_bounds_cap {
                 self.bounds_cache = None;
             }
+            if new_sd != self.live_subd_cap {
+                self.subd_trench = None;
+                self.subd_arc = None;
+                self.subd_backarc = None;
+            }
             self.live_arrows_cap = new_ar.max(self.min_cap());
             self.live_bounds_cap = new_bd.max(self.min_cap());
+            self.live_subd_cap = new_sd.max(self.min_cap());
         }
     }
 }
@@ -375,5 +420,88 @@ impl OverlayState {
     }
     pub fn bathy_shapes(&self) -> &[Shape] {
         self.bathy_cache.as_deref().unwrap_or_default()
+    }
+
+    fn mesh_add_dot(mesh: &mut Mesh, p: Pos2, r: f32, color: Color32) {
+        let base = mesh.vertices.len() as u32;
+        let v0 = Vertex { pos: [p.x - r, p.y - r].into(), uv: WHITE_UV, color };
+        let v1 = Vertex { pos: [p.x + r, p.y - r].into(), uv: WHITE_UV, color };
+        let v2 = Vertex { pos: [p.x + r, p.y + r].into(), uv: WHITE_UV, color };
+        let v3 = Vertex { pos: [p.x - r, p.y + r].into(), uv: WHITE_UV, color };
+        mesh.vertices.extend_from_slice(&[v0, v1, v2, v3]);
+        mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Build subduction point meshes (one mesh per color), subsampled to a cap.
+    pub fn rebuild_subduction_meshes(
+        &mut self,
+        rect: Rect,
+        latlon: &[[f32; 2]],
+        masks: &engine::subduction::SubductionMasks,
+    ) {
+        let cap = self.effective_subd_cap().max(1) as usize;
+        let mut idx_trench: Vec<usize> = Vec::new();
+        let mut idx_arc: Vec<usize> = Vec::new();
+        let mut idx_back: Vec<usize> = Vec::new();
+        for i in 0..latlon.len() {
+            if i >= masks.trench.len() {
+                break;
+            }
+            if masks.trench[i] {
+                idx_trench.push(i);
+            } else if masks.arc[i] {
+                idx_arc.push(i);
+            } else if masks.backarc[i] {
+                idx_back.push(i);
+            }
+        }
+        let total = idx_trench.len() + idx_arc.len() + idx_back.len();
+        let total = total.max(1);
+        let budget_t =
+            ((cap as f32) * (idx_trench.len() as f32) / (total as f32)).round().max(1.0) as usize;
+        let budget_a =
+            ((cap as f32) * (idx_arc.len() as f32) / (total as f32)).round().max(1.0) as usize;
+        let budget_b =
+            ((cap as f32) * (idx_back.len() as f32) / (total as f32)).round().max(1.0) as usize;
+        let stride_t = (idx_trench.len() / budget_t.max(1)).max(1);
+        let stride_a = (idx_arc.len() / budget_a.max(1)).max(1);
+        let stride_b = (idx_back.len() / budget_b.max(1)).max(1);
+
+        let mut mesh_t = Mesh::default();
+        let mut mesh_a = Mesh::default();
+        let mut mesh_b = Mesh::default();
+        let col_t = Color32::from_rgb(255, 0, 255); // magenta
+        let col_a = Color32::from_rgb(255, 165, 0); // orange
+        let col_b = Color32::from_rgb(0, 200, 0); // green
+        let r = 1.5;
+
+        for &i in idx_trench.iter().step_by(stride_t) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_t, p, r, col_t);
+        }
+        for &i in idx_arc.iter().step_by(stride_a) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_a, p, r, col_a);
+        }
+        for &i in idx_back.iter().step_by(stride_b) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_b, p, r, col_b);
+        }
+
+        let mut shapes_t = Vec::new();
+        let mut shapes_a = Vec::new();
+        let mut shapes_b = Vec::new();
+        if !mesh_t.vertices.is_empty() {
+            shapes_t.push(Shape::mesh(mesh_t));
+        }
+        if !mesh_a.vertices.is_empty() {
+            shapes_a.push(Shape::mesh(mesh_a));
+        }
+        if !mesh_b.vertices.is_empty() {
+            shapes_b.push(Shape::mesh(mesh_b));
+        }
+        self.subd_trench = Some(shapes_t);
+        self.subd_arc = Some(shapes_a);
+        self.subd_backarc = Some(shapes_b);
     }
 }
