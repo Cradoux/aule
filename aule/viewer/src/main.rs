@@ -3,6 +3,7 @@
 
 mod overlay;
 mod plot;
+mod plot_flexure;
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
@@ -182,6 +183,7 @@ fn main() {
     let surface_format = gpu.config.format;
     let mut egui_renderer = EguiRenderer::new(&gpu.device, surface_format, None, 1);
     let mut ov = overlay::OverlayState::default();
+    let mut flex = plot_flexure::FlexureUI::default();
     // T-020: Construct device field buffers sized to the grid (then drop)
     {
         let f: u32 = 64;
@@ -249,6 +251,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
@@ -393,6 +396,12 @@ fn main() {
                                             plot_ui.line(pdata.binned);
                                             plot_ui.line(pdata.reference);
                                         });
+                                });
+                            }
+
+                            if flex.show {
+                                egui::TopBottomPanel::bottom("flexure_panel").show(ctx, |ui| {
+                                    flex.ui(ui);
                                 });
                             }
 

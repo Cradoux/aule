@@ -9,6 +9,8 @@ pub mod age;
 pub mod boundaries;
 /// Field and tiling views.
 pub mod fields;
+/// 1D elastic plate flexure (CPU reference; analytic + CG solver).
+pub mod flexure;
 /// Geometric utilities used by solvers.
 pub mod geo;
 /// Minimal GPU helper for tests (T-020).
