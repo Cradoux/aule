@@ -251,6 +251,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
@@ -303,6 +304,32 @@ fn main() {
                                     ui.add(egui::Slider::new(&mut dt_myr, 0.1..=5.0).text("dt (Myr)"));
                                     ui.add(egui::Slider::new(&mut steps_per_sec, 1..=30).text("speed (steps/sec)"));
                                     ui.label(format!("t={:.1} Myr  step={}", world.clock.t_myr, world.clock.step_idx));
+                                });
+                                ui.separator();
+                                ui.collapsing("Sea level (L)", |ui| {
+                                    let mut changed = false;
+                                    changed |= ui.checkbox(&mut ov.apply_sea_level, "Apply global sea level").changed();
+                                    ui.horizontal(|ui| {
+                                        ui.label("Target ocean fraction");
+                                        // store temporarily in locked_depth_min/max sliders below if needed
+                                    });
+                                    changed |= ui.add(
+                                        egui::Slider::new(&mut ov.target_ocean_fraction, 0.05..=0.95)
+                                            .text("Target ocean fraction")
+                                            .clamp_to_range(true)
+                                    ).changed();
+                                    changed |= ui.add(
+                                        egui::Slider::new(&mut ov.extra_offset_m, -4000.0..=4000.0)
+                                            .text("Extra Δoffset (m)")
+                                    ).changed();
+                                    ui.separator();
+                                    ui.checkbox(&mut ov.lock_bathy_scale, "Lock bathy colour scale");
+                                    ui.add(egui::DragValue::new(&mut ov.bathy_min_max.0).speed(10.0).prefix("min "));
+                                    ui.add(egui::DragValue::new(&mut ov.bathy_min_max.1).speed(10.0).prefix("max "));
+                                    if changed {
+                                        // Invalidate cache; recompute below in central panel
+                                        ov.bathy_cache = None;
+                                    }
                                 });
                                 ui.separator();
                                 ui.collapsing("Transforms (0)", |ui| {
@@ -427,7 +454,9 @@ fn main() {
                                     for s in ov.age_shapes() { painter.add(s.clone()); }
                                 }
                                 if ov.show_bathy {
-                                    if ov.bathy_cache.is_none() { ov.rebuild_bathy_shapes(rect, &world.grid.latlon, &world.depth_m); }
+                                        if ov.bathy_cache.is_none() {
+                                        ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
+                                    }
                                     for s in ov.bathy_shapes() { painter.add(s.clone()); }
                                 }
                                 if ov.show_subduction {
@@ -461,7 +490,7 @@ fn main() {
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
                                 }
-                                if ov.show_transforms {
+                                if ov.show_transforms || ov.apply_sea_level {
                                     if ov.trans_pull.is_none() && ov.trans_rest.is_none() {
                                         // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
                                         // Baseline from age
@@ -470,6 +499,15 @@ fn main() {
                                             let mut d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
                                             if !d.is_finite() { d = 6000.0; }
                                             *db = d.clamp(0.0, 6000.0);
+                                        }
+                                        // Capture reference ocean volume once (before subduction/transforms)
+                                        if world.sea_level_ref.is_none() {
+                                            const R_EARTH_M: f64 = 6_371_000.0;
+                                            let scale = 4.0 * std::f64::consts::PI * R_EARTH_M * R_EARTH_M;
+                                            let mut area_m2: Vec<f32> = Vec::with_capacity(world.grid.cells);
+                                            for &a in &world.grid.area { area_m2.push((a as f64 * scale) as f32); }
+                                            let (v0, a0) = engine::isostasy::ocean_volume_from_depth(&depth_base, &area_m2);
+                                            world.sea_level_ref = Some(engine::world::SeaLevelRef { volume_m3: v0, ocean_area_m2: a0 });
                                         }
                                         // Subduction on baseline
                                         let mut depth_subd = depth_base.clone();
@@ -515,7 +553,41 @@ fn main() {
                                                 final_depth[i] += delta_t;
                                             }
                                         }
+                                        // Apply global sea level if requested
+                                        if ov.apply_sea_level {
+                                            let area_sum: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                            if let Some(ref_ref) = world.sea_level_ref {
+                                                let frac_ref = if area_sum > 0.0 { ref_ref.ocean_area_m2 / area_sum } else { 0.0 };
+                                                let target_frac = (ov.target_ocean_fraction as f64).clamp(0.01, 0.99);
+                                                let target_volume = ref_ref.volume_m3 * (target_frac / frac_ref.max(1e-12));
+                                                let before = final_depth.clone();
+                                                let off = engine::isostasy::solve_offset_for_volume(&final_depth, &world.area_m2, target_volume, 1e6, 64);
+                                                // Manual extra offset for exploration
+                                                let total_off = off + (ov.extra_offset_m as f64);
+                                                engine::isostasy::apply_sea_level_offset(&mut final_depth, total_off);
+                                                ov.last_isostasy_offset_m = total_off as f64;
+                                                let (v_b, a_b) = engine::isostasy::ocean_volume_from_depth(&before, &world.area_m2);
+                                                let (v_a, a_a) = engine::isostasy::ocean_volume_from_depth(&final_depth, &world.area_m2);
+                                                println!(
+                                                    "[isostasy] solved={:+.1} m  extra={:+.1} m  total={:+.1} m  ocean_frac: {:.3} → {:.3}  volume: {:.3e} → {:.3e} (target={:.3e})",
+                                                    off, ov.extra_offset_m, total_off, a_b/area_sum, a_a/area_sum, v_b, v_a, target_volume
+                                                );
+                                            } else {
+                                                // Show helper to force first land for visibility
+                                                let min_d = final_depth.iter().cloned().fold(f32::INFINITY, f32::min);
+                                                let off_first_land = (-(min_d as f64) + 1.0).max(0.0);
+                                                println!("[isostasy] Offset to first land: {:.0} m", off_first_land);
+                                            }
+                                        }
                                         world.depth_m = final_depth;
+                                        // Update bathy scale
+                                        if ov.lock_bathy_scale { ov.depth_minmax = ov.bathy_min_max; }
+                                        else {
+                                            // recompute dynamic scale
+                                            let mut dmin = f32::INFINITY; let mut dmax = f32::NEG_INFINITY;
+                                            for &d in &world.depth_m { if d.is_finite() { if d < dmin { dmin = d; } if d > dmax { dmax = d; } } }
+                                            if dmin.is_finite() && dmax.is_finite() { ov.depth_minmax = (dmin, dmax); }
+                                        }
                                         ov.bathy_cache = None;
                                     }
                                     if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }

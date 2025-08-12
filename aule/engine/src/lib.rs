@@ -19,6 +19,8 @@ pub mod geo;
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
+/// Global sea-level (isostasy MVP) utilities.
+pub mod isostasy;
 /// Plates seeding and velocities.
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
