@@ -248,6 +248,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
@@ -263,8 +264,9 @@ fn main() {
                                     ));
                                     ui.separator();
                                     ui.label(format!(
-                                        "boundaries: div={} conv={} trans={}",
-                                        world.boundaries.stats.divergent, world.boundaries.stats.convergent, world.boundaries.stats.transform
+                                        "boundaries: div={} conv={} trans={} | transforms: pull_apart={} restraining={}",
+                                        world.boundaries.stats.divergent, world.boundaries.stats.convergent, world.boundaries.stats.transform,
+                                        ov.trans_pull_count, ov.trans_rest_count
                                     ));
                                     ui.separator();
                                     if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
@@ -298,6 +300,23 @@ fn main() {
                                     ui.add(egui::Slider::new(&mut dt_myr, 0.1..=5.0).text("dt (Myr)"));
                                     ui.add(egui::Slider::new(&mut steps_per_sec, 1..=30).text("speed (steps/sec)"));
                                     ui.label(format!("t={:.1} Myr  step={}", world.clock.t_myr, world.clock.step_idx));
+                                });
+                                ui.separator();
+                                ui.collapsing("Transforms (0)", |ui| {
+                                    ui.label("Active if |tangential| ≥ min_tangential & |normal| ≤ τ_open");
+                                    ui.label("Cyan = pull-apart (deeper), Brown = restraining (shallower)");
+                                    ui.label("Width = half-width from the fault trace (km)");
+                                    let mut changed = false;
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_min_tangential_m_per_yr, 0.0001..=0.03).logarithmic(true).text("min tangential (m/yr)")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_tau_open_m_per_yr, 0.002..=0.02).logarithmic(true).text("τ_open (m/yr)")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_basin_half_width_km, 10.0..=60.0).text("Half-width (km)")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_basin_deepen_m, 100.0..=1000.0).text("Basin deepen (m)")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_ridge_like_uplift_m, -800.0..=-50.0).text("Restraining uplift (m)")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.trans_max_points, 500..=20_000).text("Max points")).changed();
+                                    if changed {
+                                        // Invalidate caches so we recompute once below
+                                        ov.trans_pull=None; ov.trans_rest=None; ov.bathy_cache=None;
+                                    }
                                 });
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut ov.adaptive_cap, "Adaptive cap (16.6 ms target)");
@@ -432,6 +451,66 @@ fn main() {
                                     if let Some(v) = &ov.subd_trench { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
+                                }
+                                if ov.show_transforms {
+                                    if ov.trans_pull.is_none() && ov.trans_rest.is_none() {
+                                        // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
+                                        // Baseline from age
+                                        let mut depth_base = vec![0.0f32; world.grid.cells];
+                                        for (i, db) in depth_base.iter_mut().enumerate().take(world.grid.cells) {
+                                            let mut d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+                                            if !d.is_finite() { d = 6000.0; }
+                                            *db = d.clamp(0.0, 6000.0);
+                                        }
+                                        // Subduction on baseline
+                                        let mut depth_subd = depth_base.clone();
+                                        let sub_res = engine::subduction::apply_subduction(
+                                            &world.grid, &world.boundaries, &world.plates.plate_id,
+                                            &world.age_myr, &world.v_en, &mut depth_subd,
+                                            engine::subduction::SubductionParams {
+                                                tau_conv_m_per_yr: 0.005,
+                                                trench_half_width_km: 50.0,
+                                                arc_offset_km: 150.0,
+                                                arc_half_width_km: 30.0,
+                                                backarc_width_km: 150.0,
+                                                trench_deepen_m: 3000.0,
+                                                arc_uplift_m: -500.0,
+                                                backarc_uplift_m: -200.0,
+                                                rollback_offset_m: 0.0,
+                                                rollback_rate_km_per_myr: 0.0,
+                                                backarc_extension_mode: false,
+                                                backarc_extension_deepen_m: 600.0,
+                                            },
+                                        );
+                                        // Transforms: compute delta from baseline
+                                        let mut depth_trans = depth_base.clone();
+                                        let (trans_masks, trans_stats) = engine::transforms::apply_transforms(
+                                            &world.grid, &world.boundaries, &world.plates.plate_id, &world.v_en, &mut depth_trans,
+                                            engine::transforms::TransformParams {
+                                                tau_open_m_per_yr: ov.trans_tau_open_m_per_yr as f64,
+                                                min_tangential_m_per_yr: ov.trans_min_tangential_m_per_yr as f64,
+                                                basin_half_width_km: ov.trans_basin_half_width_km as f64,
+                                                ridge_like_uplift_m: ov.trans_ridge_like_uplift_m,
+                                                basin_deepen_m: ov.trans_basin_deepen_m,
+                                            }
+                                        );
+                                        println!("[transforms] bands: pull_apart={} restraining={}", trans_stats.pull_apart_cells, trans_stats.restraining_cells);
+                                        ov.rebuild_transform_meshes(rect, &world.grid.latlon, &trans_masks);
+                                        ov.trans_pull_count = trans_stats.pull_apart_cells;
+                                        ov.trans_rest_count = trans_stats.restraining_cells;
+                                        let mut final_depth = depth_subd;
+                                        for i in 0..world.grid.cells {
+                                            let delta_t = depth_trans[i] - depth_base[i];
+                                            // avoid overlap with subduction masks
+                                            if !sub_res.masks.trench[i] && !sub_res.masks.arc[i] && !sub_res.masks.backarc[i] {
+                                                final_depth[i] += delta_t;
+                                            }
+                                        }
+                                        world.depth_m = final_depth;
+                                        ov.bathy_cache = None;
+                                    }
+                                    if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
+                                    if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
                                 }
                             });
                         });

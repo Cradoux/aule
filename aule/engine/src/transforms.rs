@@ -44,12 +44,14 @@ pub struct TransformStats {
 pub fn apply_transforms(
     grid: &Grid,
     boundaries: &Boundaries,
+    plate_id: &[u16],
     v_en: &[[f32; 2]],
     depth_m: &mut [f32],
     params: TransformParams,
 ) -> (TransformMasks, TransformStats) {
     assert_eq!(v_en.len(), grid.cells);
     assert_eq!(depth_m.len(), grid.cells);
+    assert_eq!(plate_id.len(), grid.cells);
 
     // Precompute unit positions and world velocities
     let mut rhat: Vec<[f64; 3]> = Vec::with_capacity(grid.cells);
@@ -63,10 +65,21 @@ pub fn apply_transforms(
     let mut seeds_pull: Vec<u32> = Vec::new();
     let mut seeds_rest: Vec<u32> = Vec::new();
 
+    // Diagnostics accumulators
+    let mut from_boundaries: u32 = 0;
+    let mut passing: u32 = 0;
+    let mut t_min = f64::INFINITY;
+    let mut t_max = 0.0_f64;
+    let mut t_sum = 0.0_f64;
+    let mut n_min = f64::INFINITY;
+    let mut n_max = 0.0_f64;
+    let mut n_sum = 0.0_f64;
+
     for &(u, v, class) in &boundaries.edges {
         if class != 3 {
             continue; // transform only
         }
+        from_boundaries += 1;
         let u_idx = u as usize;
         let v_idx = v as usize;
         let rh_u = rhat[u_idx];
@@ -89,18 +102,44 @@ pub fn apply_transforms(
         ));
         let t_comp = geo::dot(dv, t_dir).abs();
         let n_comp = geo::dot(dv, n_hat).abs();
-        if t_comp >= params.min_tangential_m_per_yr && n_comp <= params.tau_open_m_per_yr {
+        t_min = t_min.min(t_comp);
+        t_max = t_max.max(t_comp);
+        t_sum += t_comp;
+        n_min = n_min.min(n_comp);
+        n_max = n_max.max(n_comp);
+        n_sum += n_comp;
+        // Treat boundary classification as ground truth for transform.
+        // Only gate by tangential magnitude to drop numerically dead edges.
+        if t_comp >= params.min_tangential_m_per_yr {
+            passing += 1;
             // Shear sense using signed projection onto t_dir from u->v
             let shear_sign = geo::dot(dv, t_dir);
             if shear_sign >= 0.0 {
+                // pull on u side, restraining on v side
                 seeds_pull.push(u);
-                seeds_pull.push(v);
+                seeds_rest.push(v);
             } else {
                 seeds_rest.push(u);
-                seeds_rest.push(v);
+                seeds_pull.push(v);
             }
         }
     }
+
+    // Print diagnostics once per recompute
+    let denom = from_boundaries.max(1) as f64;
+    println!(
+        "[transforms.diag] from_boundaries={} passing={} |t| min/mean/max={:.6}/{:.6}/{:.6} |n| min/mean/max={:.6}/{:.6}/{:.6}",
+        from_boundaries,
+        passing,
+        if t_min.is_finite() { t_min } else { 0.0 },
+        t_sum / denom,
+        t_max,
+        if n_min.is_finite() { n_min } else { 0.0 },
+        n_sum / denom,
+        n_max
+    );
+
+    // No relaxation loop anymore; boundaries classification is source of truth
 
     #[derive(Copy, Clone)]
     struct QItem {
@@ -144,8 +183,12 @@ pub fn apply_transforms(
             if d > dist[u] {
                 continue;
             }
+            let pid = plate_id[u];
             for &vn in &grid.n1[u] {
                 let v = vn as usize;
+                if plate_id[v] != pid {
+                    continue;
+                }
                 let s_m = geo::great_circle_arc_len_m(rhat[u], rhat[v], RADIUS_M);
                 let nd = d + s_m;
                 if nd < dist[v] {
@@ -155,6 +198,12 @@ pub fn apply_transforms(
             }
         }
     };
+
+    println!(
+        "[transforms] seeds: pull_apart={} restraining={}",
+        seeds_pull.len(),
+        seeds_rest.len()
+    );
 
     if !seeds_pull.is_empty() {
         run_dijkstra(&mut dist_pull, &seeds_pull);
@@ -181,7 +230,7 @@ pub fn apply_transforms(
         }
     }
 
-    // Apply bathy edits where not already changed by caller (viewer can enforce priority externally)
+    // Edits are additive; caller is expected to recompute baseline depth from age first
     for (i, d) in depth_m.iter_mut().enumerate() {
         if masks.pull_apart[i] {
             *d += params.basin_deepen_m;
