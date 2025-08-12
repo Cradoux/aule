@@ -5,7 +5,7 @@ use rand::{RngCore, SeedableRng};
 
 const RADIUS_M: f64 = 6_371_000.0;
 
-/// Plate model results.
+/// Plate model results computed from a deterministic seed.
 pub struct Plates {
     /// Plate seed unit vectors (f64)
     pub seeds: Vec<[f64; 3]>,
@@ -20,7 +20,7 @@ pub struct Plates {
 }
 
 impl Plates {
-    /// Build plates and velocities for N plates with a deterministic seed.
+    /// Build plates and velocities for `num_plates` with a deterministic `seed`.
     pub fn new(grid: &Grid, num_plates: u32, seed: u64) -> Self {
         let seeds = farthest_point_seeds(grid, num_plates, seed ^ 0x0070_6c61_7465);
         let plate_id = assign_voronoi(grid, &seeds);
@@ -31,27 +31,19 @@ impl Plates {
 }
 
 fn farthest_point_seeds(grid: &Grid, k: u32, seed: u64) -> Vec<[f64; 3]> {
-    // Deterministic RNG selection of the first seed
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let first = (rng.next_u32() as usize) % grid.cells;
-    // unit vectors list of seeds
-    let mut seeds_axes: Vec<[f64; 3]> = vec![[
-        grid.pos_xyz[first][0] as f64,
-        grid.pos_xyz[first][1] as f64,
-        grid.pos_xyz[first][2] as f64,
-    ]];
-    // Precompute positions in f64
-    let mut pos: Vec<[f64; 3]> = Vec::with_capacity(grid.cells);
-    for p in &grid.pos_xyz {
-        pos.push([p[0] as f64, p[1] as f64, p[2] as f64]);
-    }
+
+    let pos: Vec<[f64; 3]> =
+        grid.pos_xyz.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+
+    let mut seeds_axes: Vec<[f64; 3]> = vec![pos[first]];
     let mut best_cos: Vec<f64> = vec![-1.0; grid.cells];
-    // Initialize best_cos with first seed
     for i in 0..grid.cells {
         best_cos[i] = dot(pos[i], pos[first]);
     }
+
     while (seeds_axes.len() as u32) < k {
-        // pick the cell with the smallest cosine (largest angle) to its nearest seed
         let mut min_cos = 1.0;
         let mut min_idx = 0usize;
         for (i, &c) in best_cos.iter().enumerate().take(grid.cells) {
