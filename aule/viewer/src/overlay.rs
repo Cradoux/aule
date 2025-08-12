@@ -23,6 +23,7 @@ pub struct OverlayState {
     last_arrows_cap: u32,
     last_bounds_cap: u32,
     last_subd_cap: u32,
+    last_trans_cap: u32,
     pub(crate) plates_cache: Option<Vec<Shape>>,
     pub(crate) vel_cache: Option<Vec<Shape>>,
     pub(crate) bounds_cache: Option<Vec<Shape>>,
@@ -50,10 +51,23 @@ pub struct OverlayState {
     pub live_subd_cap: u32,
 
     // Subduction params (viewer-controlled)
-    pub rollback_offset_km: f32,
-    pub rollback_rate_km_per_myr: f32,
-    pub backarc_extension_mode: bool,
-    pub backarc_extension_deepen_m: f32,
+    pub _rollback_offset_km: f32,
+    pub _rollback_rate_km_per_myr: f32,
+    pub _backarc_extension_mode: bool,
+    pub _backarc_extension_deepen_m: f32,
+
+    // Transforms
+    pub show_transforms: bool,
+    pub trans_pull: Option<Vec<Shape>>,
+    pub trans_rest: Option<Vec<Shape>>,
+    pub trans_tau_open_m_per_yr: f32,
+    pub trans_min_tangential_m_per_yr: f32,
+    pub trans_basin_half_width_km: f32,
+    pub trans_basin_deepen_m: f32,
+    pub trans_ridge_like_uplift_m: f32,
+    pub trans_max_points: u32,
+    pub trans_pull_count: u32,
+    pub trans_rest_count: u32,
 }
 
 impl Default for OverlayState {
@@ -76,6 +90,7 @@ impl Default for OverlayState {
             last_arrows_cap: max_default,
             last_bounds_cap: max_default,
             last_subd_cap: 10_000,
+            last_trans_cap: 10_000,
             plates_cache: None,
             vel_cache: None,
             bounds_cache: None,
@@ -95,10 +110,21 @@ impl Default for OverlayState {
             subd_backarc: None,
             max_subd_slider: 10_000,
             live_subd_cap: 10_000,
-            rollback_offset_km: 0.0,
-            rollback_rate_km_per_myr: 0.0,
-            backarc_extension_mode: false,
-            backarc_extension_deepen_m: 600.0,
+            _rollback_offset_km: 0.0,
+            _rollback_rate_km_per_myr: 0.0,
+            _backarc_extension_mode: false,
+            _backarc_extension_deepen_m: 600.0,
+            show_transforms: false,
+            trans_pull: None,
+            trans_rest: None,
+            trans_tau_open_m_per_yr: 0.01,
+            trans_min_tangential_m_per_yr: 0.002,
+            trans_basin_half_width_km: 60.0,
+            trans_basin_deepen_m: 400.0,
+            trans_ridge_like_uplift_m: -300.0,
+            trans_max_points: 10_000,
+            trans_pull_count: 0,
+            trans_rest_count: 0,
         }
     }
 }
@@ -239,6 +265,13 @@ impl OverlayState {
             self.subd_trench = None;
             self.subd_arc = None;
             self.subd_backarc = None;
+            self.trans_pull = None;
+            self.trans_rest = None;
+        }
+        if self.last_trans_cap != self.trans_max_points {
+            self.last_trans_cap = self.trans_max_points;
+            self.trans_pull = None;
+            self.trans_rest = None;
         }
         // Clamp live caps into slider ranges in case sliders changed
         self.live_arrows_cap = self.live_arrows_cap.clamp(self.min_cap(), self.max_cap_arrows());
@@ -513,5 +546,59 @@ impl OverlayState {
         self.subd_trench = Some(shapes_t);
         self.subd_arc = Some(shapes_a);
         self.subd_backarc = Some(shapes_b);
+    }
+
+    /// Build transform point meshes (cyan for pull-apart, brown for restraining).
+    pub fn rebuild_transform_meshes(
+        &mut self,
+        rect: Rect,
+        latlon: &[[f32; 2]],
+        masks: &engine::transforms::TransformMasks,
+    ) {
+        let cap = self.trans_max_points.max(1) as usize;
+        let mut idx_pull: Vec<usize> = Vec::new();
+        let mut idx_rest: Vec<usize> = Vec::new();
+        for i in 0..latlon.len() {
+            if i >= masks.pull_apart.len() {
+                break;
+            }
+            if masks.pull_apart[i] {
+                idx_pull.push(i);
+            }
+            if masks.restraining[i] {
+                idx_rest.push(i);
+            }
+        }
+        let total = (idx_pull.len() + idx_rest.len()).max(1);
+        let budget_p =
+            ((cap as f32) * (idx_pull.len() as f32) / (total as f32)).round().max(1.0) as usize;
+        let budget_r =
+            ((cap as f32) * (idx_rest.len() as f32) / (total as f32)).round().max(1.0) as usize;
+        let stride_p = (idx_pull.len() / budget_p.max(1)).max(1);
+        let stride_r = (idx_rest.len() / budget_r.max(1)).max(1);
+
+        let mut mesh_p = Mesh::default();
+        let mut mesh_r = Mesh::default();
+        let col_p = Color32::from_rgb(0, 255, 255); // cyan
+        let col_r = Color32::from_rgb(150, 75, 0); // brown
+        let r = 1.5;
+        for &i in idx_pull.iter().step_by(stride_p) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_p, p, r, col_p);
+        }
+        for &i in idx_rest.iter().step_by(stride_r) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_r, p, r, col_r);
+        }
+        let mut shapes_p = Vec::new();
+        let mut shapes_r = Vec::new();
+        if !mesh_p.vertices.is_empty() {
+            shapes_p.push(Shape::mesh(mesh_p));
+        }
+        if !mesh_r.vertices.is_empty() {
+            shapes_r.push(Shape::mesh(mesh_r));
+        }
+        self.trans_pull = Some(shapes_p);
+        self.trans_rest = Some(shapes_r);
     }
 }
