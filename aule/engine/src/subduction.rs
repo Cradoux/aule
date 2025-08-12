@@ -114,10 +114,12 @@ pub fn apply_subduction(
     // Seeds from convergent edges
     let mut sub_seeds: Vec<u32> = Vec::new();
     let mut over_seeds: Vec<u32> = Vec::new();
-    for &(u, v, class) in &boundaries.edges {
-        if class != 2 {
+    for ek in &boundaries.edge_kin {
+        if ek.class as u8 != 2 {
             continue;
         } // convergent
+        let u = ek.u;
+        let v = ek.v;
         let au = age_myr[u as usize] as f64;
         let av = age_myr[v as usize] as f64;
         let (s, o) = if (au > av) || (au == av && plate_id[u as usize] > plate_id[v as usize]) {

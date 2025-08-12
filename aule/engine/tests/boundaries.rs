@@ -1,4 +1,8 @@
-use engine::{boundaries::Boundaries, grid::Grid};
+use engine::{
+    boundaries::Boundaries,
+    geo::{cross, dot, normalize},
+    grid::Grid,
+};
 
 #[test]
 fn determinism_symmetry_basic() {
@@ -11,6 +15,8 @@ fn determinism_symmetry_basic() {
     assert_eq!(b1.b, b2.b);
     assert_eq!(b1.edges, b2.edges);
     assert_eq!(b1.stats, b2.stats);
+    // edge_kin populated and aligned
+    assert_eq!(b1.edge_kin.len(), b1.edges.len());
 
     // Symmetry: each edge sets bits on both endpoints
     for (u, v, class) in b1.edges {
@@ -40,4 +46,56 @@ fn threshold_monotonicity() {
         lo.stats.divergent + lo.stats.convergent + lo.stats.transform
             >= hi.stats.divergent + hi.stats.convergent
     );
+}
+
+#[test]
+fn edge_kin_consistency_spotcheck() {
+    let f = 16u32;
+    let g = Grid::new(f);
+    let plates = engine::plates::Plates::new(&g, 8, 7);
+    let b = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.005);
+    assert_eq!(b.edge_kin.len(), b.edges.len());
+    let take = b.edges.len().min(10);
+    for i in 0..take {
+        let (u, v, class) = b.edges[i];
+        let ek = &b.edge_kin[i];
+        assert_eq!(ek.u, u);
+        assert_eq!(ek.v, v);
+        assert_eq!(ek.class as u8, class);
+        // recompute dv·n_hat and dv·t_hat quickly
+        let ru = [
+            g.pos_xyz[u as usize][0] as f64,
+            g.pos_xyz[u as usize][1] as f64,
+            g.pos_xyz[u as usize][2] as f64,
+        ];
+        let rv = [
+            g.pos_xyz[v as usize][0] as f64,
+            g.pos_xyz[v as usize][1] as f64,
+            g.pos_xyz[v as usize][2] as f64,
+        ];
+        let rm = normalize([ru[0] + rv[0], ru[1] + rv[1], ru[2] + rv[2]]);
+        let ggc = normalize(cross(ru, rv));
+        let t_hat = normalize(cross(ggc, rm));
+        let mut n_hat = normalize(cross(rm, t_hat));
+        if dot(n_hat, [rv[0] - ru[0], rv[1] - ru[1], rv[2] - ru[2]]) < 0.0 {
+            n_hat = [-n_hat[0], -n_hat[1], -n_hat[2]];
+        }
+        let en_to_w = |idx: usize| {
+            let r = [g.pos_xyz[idx][0] as f64, g.pos_xyz[idx][1] as f64, g.pos_xyz[idx][2] as f64];
+            let e = normalize(cross([0.0, 0.0, 1.0], r));
+            let n = normalize(cross(r, e));
+            [
+                (plates.vel_en[idx][0] as f64) * e[0] + (plates.vel_en[idx][1] as f64) * n[0],
+                (plates.vel_en[idx][0] as f64) * e[1] + (plates.vel_en[idx][1] as f64) * n[1],
+                (plates.vel_en[idx][0] as f64) * e[2] + (plates.vel_en[idx][1] as f64) * n[2],
+            ]
+        };
+        let vu = en_to_w(u as usize);
+        let vv = en_to_w(v as usize);
+        let dv = [vu[0] - vv[0], vu[1] - vv[1], vu[2] - vv[2]];
+        let n = dot(dv, n_hat) as f32;
+        let t = dot(dv, t_hat).abs() as f32;
+        assert!((n - ek.n_m_per_yr).abs() < 1e-5);
+        assert!((t - ek.t_m_per_yr).abs() < 1e-5);
+    }
 }
