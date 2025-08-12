@@ -19,6 +19,8 @@ pub mod grid;
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// Subduction bands and bathymetry adjustments (CPU pass).
+pub mod subduction;
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {

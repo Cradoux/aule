@@ -236,6 +236,32 @@ fn main() {
     ov.age_minmax = age_out.min_max_age;
     ov.depth_minmax = age_out.min_max_depth;
 
+    // Subduction CPU pass: compute bands and edit depth in-place
+    let sub_p = engine::subduction::SubductionParams {
+        tau_conv_m_per_yr: 0.005,
+        trench_half_width_km: 50.0,
+        arc_offset_km: 150.0,
+        arc_half_width_km: 30.0,
+        backarc_width_km: 150.0,
+        trench_deepen_m: 3000.0,
+        arc_uplift_m: -500.0,
+        backarc_uplift_m: -200.0,
+    };
+    let mut depth_with_subd = age_out.depth_m.clone();
+    let sub_res = engine::subduction::apply_subduction(
+        &g_view,
+        &bounds,
+        &plates.plate_id,
+        &age_out.age_myr,
+        &plates.vel_en,
+        &mut depth_with_subd,
+        sub_p,
+    );
+    println!(
+        "[subduction] trench={} arc={} backarc={}",
+        sub_res.stats.trench_cells, sub_res.stats.arc_cells, sub_res.stats.backarc_cells
+    );
+
     log_grid_info();
 
     let mut last_frame = std::time::Instant::now();
@@ -265,11 +291,12 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  H: HUD");
+                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  H: HUD");
                                     ui.separator();
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
