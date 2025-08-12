@@ -23,6 +23,8 @@ pub mod ridge;
 pub mod stepper;
 /// Subduction bands and bathymetry adjustments (CPU pass).
 pub mod subduction;
+/// Transform pull-apart/restraining bands (CPU pass).
+pub mod transforms;
 /// World state.
 pub mod world;
 
