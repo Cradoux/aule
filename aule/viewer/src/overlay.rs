@@ -34,6 +34,12 @@ pub struct OverlayState {
     pub v_floor_cm_per_yr: f32,
     pub age_minmax: (f32, f32),
     pub depth_minmax: (f32, f32),
+    pub lock_bathy_scale: bool,
+    pub bathy_min_max: (f32, f32),
+    pub target_ocean_fraction: f32,
+    pub extra_offset_m: f32,
+    pub apply_sea_level: bool,
+    pub last_isostasy_offset_m: f64,
     pub(crate) age_cache: Option<Vec<Shape>>,
     pub(crate) bathy_cache: Option<Vec<Shape>>,
 
@@ -99,6 +105,12 @@ impl Default for OverlayState {
             v_floor_cm_per_yr: 0.5,
             age_minmax: (0.0, 0.0),
             depth_minmax: (0.0, 0.0),
+            lock_bathy_scale: false,
+            bathy_min_max: (2600.0, 6000.0),
+            target_ocean_fraction: 0.70,
+            extra_offset_m: 0.0,
+            apply_sea_level: false,
+            last_isostasy_offset_m: 0.0,
             age_cache: None,
             bathy_cache: None,
             show_age_depth: false,
@@ -447,14 +459,36 @@ impl OverlayState {
         self.age_cache = Some(shapes);
     }
 
-    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, latlon: &[[f32; 2]], depth_m: &[f32]) {
-        let mut shapes = Vec::with_capacity(latlon.len());
+    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
+        let mut shapes = Vec::with_capacity(grid.latlon.len());
         let (dmin, dmax) = self.depth_minmax;
-        for i in 0..latlon.len() {
-            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+        for i in 0..grid.latlon.len() {
+            let p = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
             let col = blue_ramp(depth_m[i], dmin, dmax);
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }
+        // Draw 0 m coastline as thin black segments where any neighbor crosses zero
+        let mut coast = Vec::new();
+        for i in 0..grid.latlon.len() {
+            let di = depth_m[i];
+            for &n in &grid.n1[i] {
+                let j = n as usize;
+                let dj = depth_m[j];
+                if (di > 0.0 && dj <= 0.0) || (di <= 0.0 && dj > 0.0) {
+                    let pu = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
+                    let pv = project_equirect(grid.latlon[j][0], grid.latlon[j][1], rect);
+                    let center = Pos2::new((pu.x + pv.x) * 0.5, (pu.y + pv.y) * 0.5);
+                    let dir = (pv - pu).normalized();
+                    let orth = Vec2::new(-dir.y, dir.x);
+                    let half = orth * 1.0;
+                    coast.push(Shape::line_segment(
+                        [center - half, center + half],
+                        Stroke::new(1.0, Color32::BLACK),
+                    ));
+                }
+            }
+        }
+        shapes.extend(coast);
         self.bathy_cache = Some(shapes);
     }
 
