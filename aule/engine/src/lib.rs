@@ -19,8 +19,12 @@ pub mod grid;
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// World stepper.
+pub mod stepper;
 /// Subduction bands and bathymetry adjustments (CPU pass).
 pub mod subduction;
+/// World state.
+pub mod world;
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {
