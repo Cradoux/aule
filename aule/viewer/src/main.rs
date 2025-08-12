@@ -188,12 +188,11 @@ fn main() {
         let g_tmp = engine::grid::Grid::new(f);
         let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
     }
-    // Build data for overlays once
+    // Build world state and initial overlay data
     let f: u32 = 64;
-    let g_view = engine::grid::Grid::new(f);
-    let plates = engine::plates::Plates::new(&g_view, 8, 12345);
+    let mut world = engine::world::World::new(f, 8, 12345);
     let mut mags: Vec<f64> =
-        plates.vel_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
+        world.v_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
     mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = mags.len();
     let min_v = *mags.first().unwrap_or(&0.0);
@@ -203,70 +202,27 @@ fn main() {
         "[plates] N={} |V| min/mean/max = {:.3} / {:.3} / {:.3} m/yr",
         8, min_v, mean_v, max_v
     );
-    let bounds =
-        engine::boundaries::Boundaries::classify(&g_view, &plates.plate_id, &plates.vel_en, 0.005);
     println!(
         "[boundaries] div={} conv={} trans={} (τ=0.5 cm/yr)",
-        bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
+        world.boundaries.stats.divergent,
+        world.boundaries.stats.convergent,
+        world.boundaries.stats.transform
     );
-
-    // Ridge CPU pass: initialize a host age buffer and apply births + fringe
-    let mut age_ocean = vec![10.0f32; g_view.cells];
-    let ridge_stats = engine::ridge::apply_ridge(
-        &g_view,
-        &bounds,
-        &mut age_ocean,
-        engine::ridge::RidgeParams { fringe_age_myr: 0.2 },
-    );
-    println!(
-        "[ridge] births={} fringe={} (fringe_age={} Myr)",
-        ridge_stats.births, ridge_stats.fringe, 0.2
-    );
-
-    // Compute steady-state age/bathymetry once (CPU)
-    let age_params =
-        engine::age::AgeParams { v_floor_m_per_yr: (ov.v_floor_cm_per_yr as f64) * 0.01 };
-    let age_out = engine::age::compute_age_and_bathymetry(
-        &g_view,
-        &bounds,
-        &plates.plate_id,
-        &plates.vel_en,
-        age_params,
-    );
-    ov.age_minmax = age_out.min_max_age;
-    ov.depth_minmax = age_out.min_max_depth;
-
-    // Subduction CPU pass: compute bands and edit depth in-place
-    let sub_p = engine::subduction::SubductionParams {
-        tau_conv_m_per_yr: 0.005,
-        trench_half_width_km: 50.0,
-        arc_offset_km: 150.0,
-        arc_half_width_km: 30.0,
-        backarc_width_km: 150.0,
-        trench_deepen_m: 3000.0,
-        arc_uplift_m: -500.0,
-        backarc_uplift_m: -200.0,
-    };
-    let mut depth_with_subd = age_out.depth_m.clone();
-    let sub_res = engine::subduction::apply_subduction(
-        &g_view,
-        &bounds,
-        &plates.plate_id,
-        &age_out.age_myr,
-        &plates.vel_en,
-        &mut depth_with_subd,
-        sub_p,
-    );
-    println!(
-        "[subduction] trench={} arc={} backarc={}",
-        sub_res.stats.trench_cells, sub_res.stats.arc_cells, sub_res.stats.backarc_cells
-    );
+    // Initialize overlay ranges
+    ov.age_minmax = (0.0, 100.0);
+    ov.depth_minmax = (2600.0, 6000.0);
 
     log_grid_info();
 
     let mut last_frame = std::time::Instant::now();
     let mut fps: f32 = 0.0;
-    let nplates: usize = plates.pole_axis.len();
+    let nplates: usize = world.plates.pole_axis.len();
+
+    // Playback state
+    let mut playing: bool = false;
+    let mut dt_myr: f32 = 1.0;
+    let mut steps_per_sec: u32 = 5;
+    let mut step_accum_s: f32 = 0.0;
 
     event_loop
     .run(move |event, elwt| {
@@ -308,8 +264,15 @@ fn main() {
                                     ui.separator();
                                     ui.label(format!(
                                         "boundaries: div={} conv={} trans={}",
-                                        bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
+                                        world.boundaries.stats.divergent, world.boundaries.stats.convergent, world.boundaries.stats.transform
                                     ));
+                                    ui.separator();
+                                    if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
+                                    if ui.button("⏭").clicked() {
+                                        let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
+                                        let _ = engine::stepper::step(&mut world, &p);
+                                        ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
+                                    }
                                     ui.separator();
                                     ui.label(format!(
                                         "max arrows={} max strokes={} max subd={}  scale={:.2} px/cm/yr  v_floor={:.2} cm/yr  FPS: {:.0}",
@@ -331,6 +294,10 @@ fn main() {
                                     let subd_cap = egui::Slider::new(&mut ov.max_subd_slider, 500..=20_000)
                                         .text("Max subduction points").step_by(500.0);
                                     ui.add(subd_cap);
+                                    ui.separator();
+                                    ui.add(egui::Slider::new(&mut dt_myr, 0.1..=5.0).text("dt (Myr)"));
+                                    ui.add(egui::Slider::new(&mut steps_per_sec, 1..=30).text("speed (steps/sec)"));
+                                    ui.label(format!("t={:.1} Myr  step={}", world.clock.t_myr, world.clock.step_idx));
                                 });
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut ov.adaptive_cap, "Adaptive cap (16.6 ms target)");
@@ -341,19 +308,29 @@ fn main() {
                                 });
                                 ui.separator();
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label(format!(
-                                        "age min/mean/max = {:.2}/{:.2}/{:.2} Myr",
-                                        age_out.min_max_age.0,
-                                        (age_out.age_myr.iter().sum::<f32>() / age_out.age_myr.len().max(1) as f32),
-                                        age_out.min_max_age.1
-                                    ));
+                                    let (mut amin, mut amax) = (f32::INFINITY, f32::NEG_INFINITY);
+                                    let (mut dmin, mut dmax) = (f32::INFINITY, f32::NEG_INFINITY);
+                                    for &a in &world.age_myr {
+                                        if a.is_finite() {
+                                            if a < amin { amin = a; }
+                                            if a > amax { amax = a; }
+                                        }
+                                    }
+                                    for &d in &world.depth_m {
+                                        if d.is_finite() {
+                                            if d < dmin { dmin = d; }
+                                            if d > dmax { dmax = d; }
+                                        }
+                                    }
+                                    let amin = if amin.is_finite() { amin } else { 0.0 };
+                                    let amax = if amax.is_finite() { amax } else { 0.0 };
+                                    let dmin = if dmin.is_finite() { dmin } else { 0.0 };
+                                    let dmax = if dmax.is_finite() { dmax } else { 0.0 };
+                                    let amean = world.age_myr.iter().copied().sum::<f32>() / world.age_myr.len().max(1) as f32;
+                                    let dmean = world.depth_m.iter().copied().sum::<f32>() / world.depth_m.len().max(1) as f32;
+                                    ui.label(format!("age min/mean/max = {:.2}/{:.2}/{:.2} Myr", amin, amean, amax));
                                     ui.separator();
-                                    ui.label(format!(
-                                        "depth min/mean/max = {:.0}/{:.0}/{:.0} m",
-                                        age_out.min_max_depth.0,
-                                        (age_out.depth_m.iter().sum::<f32>() / age_out.depth_m.len().max(1) as f32),
-                                        age_out.min_max_depth.1
-                                    ));
+                                    ui.label(format!("depth min/mean/max = {:.0}/{:.0}/{:.0} m", dmin, dmean, dmax));
                                 });
                             });
 
@@ -376,8 +353,8 @@ fn main() {
                                     let a = 350.0_f64;
                                     let b = 0.0_f64;
                                     let pdata = plot::build_age_depth_plot(
-                                        &age_out.age_myr,
-                                        &age_out.depth_m,
+                                        &world.age_myr,
+                                        &world.depth_m,
                                         plot::AgeDepthPlotParams { sample_cap: ov.plot_sample_cap as usize, bin_width_myr: ov.plot_bin_width_myr },
                                         &|age| engine::age::depth_from_age(age, d0, a, b),
                                     );
@@ -409,25 +386,44 @@ fn main() {
                                 let eff_sd = ov.effective_subd_cap();
                                 ov.ensure_params_and_invalidate_if_needed(rect, eff_ar, eff_bd, eff_sd);
                                 if ov.show_plates {
-                                    for s in ov.shapes_for_plates(rect, &g_view.latlon, &plates.plate_id) { painter.add(s.clone()); }
+                                    for s in ov.shapes_for_plates(rect, &world.grid.latlon, &world.plates.plate_id) { painter.add(s.clone()); }
                                 }
                                 if ov.show_vel {
-                                    for s in ov.shapes_for_velocities(rect, &g_view.latlon, &plates.vel_en) { painter.add(s.clone()); }
+                                    for s in ov.shapes_for_velocities(rect, &world.grid.latlon, &world.v_en) { painter.add(s.clone()); }
                                 }
                                 if ov.show_bounds {
-                                    for s in ov.shapes_for_boundaries(rect, &g_view.latlon, &bounds.edges) { painter.add(s.clone()); }
+                                    for s in ov.shapes_for_boundaries(rect, &world.grid.latlon, &world.boundaries.edges) { painter.add(s.clone()); }
                                 }
                                 if ov.show_age {
-                                    if ov.age_cache.is_none() { ov.rebuild_age_shapes(rect, &g_view.latlon, &age_out.age_myr); }
+                                    if ov.age_cache.is_none() { ov.rebuild_age_shapes(rect, &world.grid.latlon, &world.age_myr); }
                                     for s in ov.age_shapes() { painter.add(s.clone()); }
                                 }
                                 if ov.show_bathy {
-                                    if ov.bathy_cache.is_none() { ov.rebuild_bathy_shapes(rect, &g_view.latlon, &age_out.depth_m); }
+                                    if ov.bathy_cache.is_none() { ov.rebuild_bathy_shapes(rect, &world.grid.latlon, &world.depth_m); }
                                     for s in ov.bathy_shapes() { painter.add(s.clone()); }
                                 }
                                 if ov.show_subduction {
                                     if ov.subd_trench.is_none() && ov.subd_arc.is_none() && ov.subd_backarc.is_none() {
-                                        ov.rebuild_subduction_meshes(rect, &g_view.latlon, &sub_res.masks);
+                                        let mut tmp_depth = vec![0.0f32; world.grid.cells];
+                                        let sub_res = engine::subduction::apply_subduction(
+                                            &world.grid,
+                                            &world.boundaries,
+                                            &world.plates.plate_id,
+                                            &world.age_myr,
+                                            &world.v_en,
+                                            &mut tmp_depth,
+                                            engine::subduction::SubductionParams {
+                                                tau_conv_m_per_yr: 0.005,
+                                                trench_half_width_km: 50.0,
+                                                arc_offset_km: 150.0,
+                                                arc_half_width_km: 30.0,
+                                                backarc_width_km: 150.0,
+                                                trench_deepen_m: 3000.0,
+                                                arc_uplift_m: -500.0,
+                                                backarc_uplift_m: -200.0,
+                                            },
+                                        );
+                                        ov.rebuild_subduction_meshes(rect, &world.grid.latlon, &sub_res.masks);
                                     }
                                     if let Some(v) = &ov.subd_trench { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
@@ -495,6 +491,22 @@ fn main() {
                         if dt > 0.0 { fps = 0.9 * fps + 0.1 * (1.0 / dt); }
                         // Update adaptive caps using frame time in ms
                         ov.update_adaptive_caps(dt * 1000.0);
+                        // Playback ticking
+                        if playing {
+                            step_accum_s += dt;
+                            let step_interval = 1.0f32 / (steps_per_sec.max(1) as f32);
+                            let mut steps_this_frame = 0u32;
+                            let max_steps_frame = 4u32; // clamp to keep FPS ~60
+                            while step_accum_s >= step_interval && steps_this_frame < max_steps_frame {
+                                let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
+                                let _ = engine::stepper::step(&mut world, &p);
+                                step_accum_s -= step_interval;
+                                steps_this_frame += 1;
+                            }
+                            if steps_this_frame > 0 {
+                                ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
+                            }
+                        }
                     }
                     _ => {}
                 }
