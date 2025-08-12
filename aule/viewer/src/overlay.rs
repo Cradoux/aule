@@ -31,6 +31,11 @@ pub struct OverlayState {
     pub depth_minmax: (f32, f32),
     pub(crate) age_cache: Option<Vec<Shape>>,
     pub(crate) bathy_cache: Option<Vec<Shape>>,
+
+    // Age–Depth plot controls
+    pub show_age_depth: bool,
+    pub plot_sample_cap: u32,
+    pub plot_bin_width_myr: f32,
 }
 
 impl Default for OverlayState {
@@ -62,6 +67,9 @@ impl Default for OverlayState {
             depth_minmax: (0.0, 0.0),
             age_cache: None,
             bathy_cache: None,
+            show_age_depth: false,
+            plot_sample_cap: 5000,
+            plot_bin_width_myr: 5.0,
         }
     }
 }

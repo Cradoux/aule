@@ -34,6 +34,12 @@ pub struct AgeOutputs {
     /// Min/max of depth
     pub min_max_depth: (f32, f32),
 }
+/// Compute bathymetry depth (m, +down) from age (Myr) using a simple
+/// Parsons–Sclater style curve (no clamping).
+#[inline]
+pub fn depth_from_age(age_myr: f64, d0: f64, a: f64, b: f64) -> f64 {
+    d0 + a * age_myr.sqrt() + b * age_myr
+}
 
 #[derive(Copy, Clone, Debug)]
 struct QueueItem {
@@ -142,7 +148,7 @@ pub fn compute_age_and_bathymetry(
     let (d0, a_coef, b_coef) = (2600.0_f64, 350.0_f64, 0.0_f64);
     for t in &dist_yr {
         let t_myr = if t.is_finite() { (*t / 1.0e6) as f32 } else { f32::INFINITY };
-        let mut depth = (d0 + a_coef * (t_myr as f64).sqrt() + b_coef * (t_myr as f64)) as f32;
+        let mut depth = depth_from_age(t_myr as f64, d0, a_coef, b_coef) as f32;
         if !depth.is_finite() {
             depth = 6000.0;
         }
