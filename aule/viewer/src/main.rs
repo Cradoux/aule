@@ -191,6 +191,17 @@ fn main() {
             "[plates] N={} |V| min/mean/max = {:.3} / {:.3} / {:.3} m/yr",
             8, min_v, mean_v, max_v
         );
+        // T-040: boundaries stats
+        let bounds = engine::boundaries::Boundaries::classify(
+            &g_tmp,
+            &plates.plate_id,
+            &plates.vel_en,
+            0.005,
+        );
+        println!(
+            "[boundaries] div={} conv={} trans={} (τ=0.5 cm/yr)",
+            bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
+        );
     }
 
     log_grid_info();

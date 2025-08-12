@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+/// Plate boundary classification.
+pub mod boundaries;
 /// Field and tiling views.
 pub mod fields;
 /// Minimal GPU helper for tests (T-020).
