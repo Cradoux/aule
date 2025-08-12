@@ -1,6 +1,11 @@
 //! Aulë viewer binary.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+mod overlay;
+
+use egui_wgpu::Renderer as EguiRenderer;
+use egui_wgpu::ScreenDescriptor;
+use egui_winit::State as EguiWinitState;
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
@@ -59,6 +64,7 @@ struct GpuState<'w> {
     config: wgpu::SurfaceConfiguration,
 }
 impl<'w> GpuState<'w> {
+    #[allow(dead_code)]
     async fn new(window: &'w Window) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
@@ -121,6 +127,7 @@ impl<'w> GpuState<'w> {
         }
     }
 
+    #[allow(dead_code)]
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -168,65 +175,196 @@ fn main() {
     // Leak the window to obtain a 'static reference for the surface lifetime without unsafe.
     let window: &'static Window = Box::leak(Box::new(window_init));
     let mut gpu = pollster::block_on(GpuState::new(window));
-    let mut _egui_ctx = egui::Context::default();
+    let egui_ctx = egui::Context::default();
+    let mut egui_state =
+        EguiWinitState::new(egui_ctx.clone(), egui::ViewportId::ROOT, &event_loop, None, None);
+    let surface_format = gpu.config.format;
+    let mut egui_renderer = EguiRenderer::new(&gpu.device, surface_format, None, 1);
+    let mut ov = overlay::OverlayState::default();
     // T-020: Construct device field buffers sized to the grid (then drop)
     {
         let f: u32 = 64;
         let g_tmp = engine::grid::Grid::new(f);
         let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
     }
-    // T-030: Minimal plates log
-    {
-        let f: u32 = 64;
-        let g_tmp = engine::grid::Grid::new(f);
-        let plates = engine::plates::Plates::new(&g_tmp, 8, 12345);
-        let mut mags: Vec<f64> =
-            plates.vel_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
-        mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = mags.len();
-        let min_v = *mags.first().unwrap_or(&0.0);
-        let max_v = *mags.last().unwrap_or(&0.0);
-        let mean_v = if n == 0 { 0.0 } else { mags.iter().sum::<f64>() / n as f64 };
-        println!(
-            "[plates] N={} |V| min/mean/max = {:.3} / {:.3} / {:.3} m/yr",
-            8, min_v, mean_v, max_v
-        );
-        // T-040: boundaries stats
-        let bounds = engine::boundaries::Boundaries::classify(
-            &g_tmp,
-            &plates.plate_id,
-            &plates.vel_en,
-            0.005,
-        );
-        println!(
-            "[boundaries] div={} conv={} trans={} (τ=0.5 cm/yr)",
-            bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
-        );
-    }
+    // Build data for overlays once
+    let f: u32 = 64;
+    let g_view = engine::grid::Grid::new(f);
+    let plates = engine::plates::Plates::new(&g_view, 8, 12345);
+    let mut mags: Vec<f64> =
+        plates.vel_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
+    mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = mags.len();
+    let min_v = *mags.first().unwrap_or(&0.0);
+    let max_v = *mags.last().unwrap_or(&0.0);
+    let mean_v = if n == 0 { 0.0 } else { mags.iter().sum::<f64>() / n as f64 };
+    println!(
+        "[plates] N={} |V| min/mean/max = {:.3} / {:.3} / {:.3} m/yr",
+        8, min_v, mean_v, max_v
+    );
+    let bounds =
+        engine::boundaries::Boundaries::classify(&g_view, &plates.plate_id, &plates.vel_en, 0.005);
+    println!(
+        "[boundaries] div={} conv={} trans={} (τ=0.5 cm/yr)",
+        bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
+    );
 
     log_grid_info();
 
+    let mut last_frame = std::time::Instant::now();
+    let mut fps: f32 = 0.0;
+    let nplates: usize = plates.pole_axis.len();
+
     event_loop
-        .run(move |event, elwt| match event {
+    .run(move |event, elwt| {
+        match event {
             Event::AboutToWait => {
                 window.request_redraw();
             }
-            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::Resized(size) => {
-                    gpu.resize(size);
-                }
-                WindowEvent::RedrawRequested => match gpu.render() {
-                    Ok(()) => {}
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                        gpu.resize(window.inner_size())
+            Event::WindowEvent { event, window_id } if window_id == window.id() => {
+                // forward events to egui (note: window, not context)
+                let _ = egui_state.on_window_event(window, &event);
+                match event {
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::Resized(size) => {
+                        gpu.resize(size);
                     }
-                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                    Err(wgpu::SurfaceError::Timeout) => {}
-                },
-                _ => {}
-            },
+                    WindowEvent::RedrawRequested => {
+                        let raw_input = egui_state.take_egui_input(window);
+                        let full_output = egui_ctx.run(raw_input, |ctx| {
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
+
+                            egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("1: Plates  2: Velocities  3: Boundaries  H: HUD");
+                                    ui.separator();
+                                    ui.label(format!(
+                                        "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
+                                        nplates,
+                                        min_v * 100.0,
+                                        mean_v * 100.0,
+                                        max_v * 100.0
+                                    ));
+                                    ui.separator();
+                                    ui.label(format!(
+                                        "boundaries: div={} conv={} trans={}",
+                                        bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
+                                    ));
+                                    ui.separator();
+                                    ui.label(format!(
+                                        "max arrows={} max strokes={}  scale={:.2} px/cm/yr  FPS: {:.0}",
+                                        ov.max_arrows_slider, ov.max_bounds_slider, ov.vel_scale_px_per_cm_yr, fps
+                                    ));
+                                });
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Slider::new(&mut ov.vel_scale_px_per_cm_yr, 0.1..=2.0)
+                                            .text("Vel scale (px per cm/yr)")
+                                    );
+                                    let arrows = egui::Slider::new(&mut ov.max_arrows_slider, 500..=20_000)
+                                        .text("Max arrows").step_by(500.0);
+                                    ui.add(arrows);
+                                    let bounds_cap = egui::Slider::new(&mut ov.max_bounds_slider, 500..=20_000)
+                                        .text("Max boundaries").step_by(500.0);
+                                    ui.add(bounds_cap);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut ov.adaptive_cap, "Adaptive cap (16.6 ms target)");
+                                    ui.label(format!(
+                                        "live arrows={} live boundaries={}",
+                                        ov.live_arrows_cap, ov.live_bounds_cap
+                                    ));
+                                });
+                            });
+
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                let rect = ui.available_rect_before_wrap();
+                                let painter = ui.painter_at(rect);
+                                // Ensure caches are valid for current params
+                                let eff_ar = ov.effective_arrows_cap();
+                                let eff_bd = ov.effective_bounds_cap();
+                                ov.ensure_params_and_invalidate_if_needed(rect, eff_ar, eff_bd);
+                                if ov.show_plates {
+                                    for s in ov.shapes_for_plates(rect, &g_view.latlon, &plates.plate_id) { painter.add(s.clone()); }
+                                }
+                                if ov.show_vel {
+                                    for s in ov.shapes_for_velocities(rect, &g_view.latlon, &plates.vel_en) { painter.add(s.clone()); }
+                                }
+                                if ov.show_bounds {
+                                    for s in ov.shapes_for_boundaries(rect, &g_view.latlon, &bounds.edges) { painter.add(s.clone()); }
+                                }
+                            });
+                        });
+
+                        for (id, image_delta) in &full_output.textures_delta.set {
+                            egui_renderer.update_texture(&gpu.device, &gpu.queue, *id, image_delta);
+                        }
+                        for id in &full_output.textures_delta.free {
+                            egui_renderer.free_texture(id);
+                        }
+                        let ppp = window.scale_factor() as f32;
+                        let paint_jobs = egui_ctx.tessellate(full_output.shapes, ppp);
+
+                        let frame = match gpu.surface.get_current_texture() {
+                            Ok(f) => f,
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => { gpu.resize(window.inner_size()); return; }
+                            Err(wgpu::SurfaceError::OutOfMemory) => { elwt.exit(); return; }
+                            Err(wgpu::SurfaceError::Timeout) => { return; }
+                        };
+                        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut encoder = gpu
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+
+                        let screen_desc = ScreenDescriptor {
+                            size_in_pixels: [gpu.config.width, gpu.config.height],
+                            pixels_per_point: ppp,
+                        };
+                        egui_renderer.update_buffers(
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut encoder,
+                            &paint_jobs,
+                            &screen_desc,
+                        );
+
+                        {
+                            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("egui pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None,
+                                timestamp_writes: None,
+                            });
+                            egui_renderer.render(&mut rpass, &paint_jobs, &screen_desc);
+                        }
+                        gpu.queue.submit(std::iter::once(encoder.finish()));
+                        frame.present();
+
+                        egui_state.handle_platform_output(window, full_output.platform_output);
+                        let now = std::time::Instant::now();
+                        let dt = now.duration_since(last_frame).as_secs_f32();
+                        last_frame = now;
+                        if dt > 0.0 { fps = 0.9 * fps + 0.1 * (1.0 / dt); }
+                        // Update adaptive caps using frame time in ms
+                        ov.update_adaptive_caps(dt * 1000.0);
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
-        })
-        .unwrap_or_else(|e| panic!("run app: {e}"));
+        }
+    })
+    .unwrap_or_else(|e| panic!("run app: {e}"));
 }
