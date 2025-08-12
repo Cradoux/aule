@@ -9,6 +9,8 @@ authors.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 egui.workspace = true
+egui-winit = { version = "0.27", default-features = false, features = ["clipboard"] }
+egui-wgpu = { version = "0.27", default-features = false }
 pollster.workspace = true
 engine = { path = "../engine" }
 
