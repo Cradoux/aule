@@ -1,5 +1,5 @@
-use egui::{Color32, Vec2};
-use egui_plot::{Line, Plot, PlotPoints, Points};
+use egui::Color32;
+use egui_plot::{Line, PlotPoints, Points};
 
 pub struct AgeDepthPlotParams {
     pub sample_cap: usize,
@@ -86,7 +86,7 @@ pub fn build_age_depth_plot(
         }
     }
     let mut bpts: Vec<[f64; 2]> = Vec::new();
-    for (i, (sum_d, sum_a, n)) in bins.iter().copied().enumerate() {
+    for (_i, (sum_d, sum_a, n)) in bins.iter().copied().enumerate() {
         if n == 0 {
             continue;
         }
