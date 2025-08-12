@@ -1,6 +1,6 @@
 # Aulë
 
-[![Docs](https://img.shields.io/badge/docs-mdBook-blue)](https://cradoux.github.io/aule/)
+[![Docs](https://img.shields.io/badge/Docs-GitHub%20Pages-blue)](https://cradoux.github.io/aule/)
 
 Quick start
 
