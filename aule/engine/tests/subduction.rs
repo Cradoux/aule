@@ -31,6 +31,10 @@ fn determinism_and_idempotence() {
         trench_deepen_m: 100.0,
         arc_uplift_m: -20.0,
         backarc_uplift_m: -10.0,
+        rollback_offset_m: 0.0,
+        rollback_rate_km_per_myr: 0.0,
+        backarc_extension_mode: false,
+        backarc_extension_deepen_m: 600.0,
     };
     let r1 = subduction::apply_subduction(
         &g,
@@ -80,6 +84,10 @@ fn bathy_signs() {
         trench_deepen_m: 500.0,
         arc_uplift_m: -100.0,
         backarc_uplift_m: -50.0,
+        rollback_offset_m: 0.0,
+        rollback_rate_km_per_myr: 0.0,
+        backarc_extension_mode: false,
+        backarc_extension_deepen_m: 600.0,
     };
     let base = depth.clone();
     let r = subduction::apply_subduction(
