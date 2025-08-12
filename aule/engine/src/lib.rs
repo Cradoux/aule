@@ -13,6 +13,8 @@ pub mod gpu;
 pub mod grid;
 /// Plates seeding and velocities.
 pub mod plates;
+/// Ridge births and fringe assignment (CPU pass).
+pub mod ridge;
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {

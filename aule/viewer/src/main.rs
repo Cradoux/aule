@@ -209,6 +209,19 @@ fn main() {
         bounds.stats.divergent, bounds.stats.convergent, bounds.stats.transform
     );
 
+    // Ridge CPU pass: initialize a host age buffer and apply births + fringe
+    let mut age_ocean = vec![10.0f32; g_view.cells];
+    let ridge_stats = engine::ridge::apply_ridge(
+        &g_view,
+        &bounds,
+        &mut age_ocean,
+        engine::ridge::RidgeParams { fringe_age_myr: 0.2 },
+    );
+    println!(
+        "[ridge] births={} fringe={} (fringe_age={} Myr)",
+        ridge_stats.births, ridge_stats.fringe, 0.2
+    );
+
     log_grid_info();
 
     let mut last_frame = std::time::Instant::now();
