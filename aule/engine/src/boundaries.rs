@@ -20,12 +20,55 @@ impl BoundaryStats {
     }
 }
 
+/// Boundary edge class.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeClass {
+    /// Divergent boundary
+    Divergent = 1,
+    /// Convergent boundary
+    Convergent = 2,
+    /// Transform boundary
+    Transform = 3,
+}
+
+impl From<u8> for EdgeClass {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => Self::Divergent,
+            2 => Self::Convergent,
+            3 => Self::Transform,
+            _ => Self::Transform,
+        }
+    }
+}
+
+/// Per-edge stored kinematics.
+pub struct EdgeKin {
+    /// First cell index (u < v)
+    pub u: u32,
+    /// Second cell index
+    pub v: u32,
+    /// Edge class
+    pub class: EdgeClass,
+    /// Across-boundary unit normal in world coords
+    pub n_hat: [f32; 3],
+    /// Along-boundary unit tangent in world coords
+    pub t_hat: [f32; 3],
+    /// Normal component of relative velocity (m/yr), signed (positive opening)
+    pub n_m_per_yr: f32,
+    /// Tangential component magnitude of relative velocity (m/yr)
+    pub t_m_per_yr: f32,
+}
+
 /// Classified boundaries.
 pub struct Boundaries {
     /// Per-cell bitmask: bit0=div, bit1=conv, bit2=trans.
     pub b: Vec<u8>,
     /// Optional compact undirected edge list (u < v), class in {1:div,2:conv,3:trans}.
     pub edges: Vec<(u32, u32, u8)>,
+    /// Persisted per-edge kinematics
+    pub edge_kin: Vec<EdgeKin>,
     /// Summary statistics.
     pub stats: BoundaryStats,
 }
@@ -61,6 +104,7 @@ impl Boundaries {
         let mut b = vec![0u8; grid.cells];
         let mut edges: Vec<(u32, u32, u8)> = Vec::new();
         let mut stats = BoundaryStats::zero();
+        let mut edge_kin: Vec<EdgeKin> = Vec::new();
 
         for u in 0..grid.cells as u32 {
             for &v in &grid.n1[u as usize] {
@@ -134,11 +178,20 @@ impl Boundaries {
                         _ => {}
                     }
                     edges.push((u, v, class));
+                    edge_kin.push(EdgeKin {
+                        u,
+                        v,
+                        class: EdgeClass::from(class),
+                        n_hat: [n_hat[0] as f32, n_hat[1] as f32, n_hat[2] as f32],
+                        t_hat: [t_hat[0] as f32, t_hat[1] as f32, t_hat[2] as f32],
+                        n_m_per_yr: n as f32,
+                        t_m_per_yr: t as f32,
+                    });
                 }
             }
         }
 
-        Self { b, edges, stats }
+        Self { b, edges, edge_kin, stats }
     }
 }
 

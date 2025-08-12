@@ -75,10 +75,12 @@ pub fn apply_transforms(
     let mut n_max = 0.0_f64;
     let mut n_sum = 0.0_f64;
 
-    for &(u, v, class) in &boundaries.edges {
-        if class != 3 {
+    for ek in &boundaries.edge_kin {
+        if ek.class as u8 != 3 {
             continue; // transform only
         }
+        let u = ek.u;
+        let v = ek.v;
         from_boundaries += 1;
         let u_idx = u as usize;
         let v_idx = v as usize;
