@@ -3,10 +3,14 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+/// Steady-state oceanic age and bathymetry mapping.
+pub mod age;
 /// Plate boundary classification.
 pub mod boundaries;
 /// Field and tiling views.
 pub mod fields;
+/// Geometric utilities used by solvers.
+pub mod geo;
 /// Minimal GPU helper for tests (T-020).
 pub mod gpu;
 /// Geodesic grid module.

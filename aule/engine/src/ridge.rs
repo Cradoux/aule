@@ -64,8 +64,8 @@ pub fn apply_ridge(
     let mut fringe: u32 = 0;
     if params.fringe_age_myr > 0.0 {
         let mut touched = vec![false; n_cells];
-        for u in 0..n_cells {
-            if !is_ridge[u] {
+        for (u, &ridge) in is_ridge.iter().enumerate() {
+            if !ridge {
                 continue;
             }
             for &n in &grid.n1[u] {

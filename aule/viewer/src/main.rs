@@ -222,6 +222,19 @@ fn main() {
         ridge_stats.births, ridge_stats.fringe, 0.2
     );
 
+    // Compute steady-state age/bathymetry once (CPU)
+    let age_params =
+        engine::age::AgeParams { v_floor_m_per_yr: (ov.v_floor_cm_per_yr as f64) * 0.01 };
+    let age_out = engine::age::compute_age_and_bathymetry(
+        &g_view,
+        &bounds,
+        &plates.plate_id,
+        &plates.vel_en,
+        age_params,
+    );
+    ov.age_minmax = age_out.min_max_age;
+    ov.depth_minmax = age_out.min_max_depth;
+
     log_grid_info();
 
     let mut last_frame = std::time::Instant::now();
@@ -245,14 +258,16 @@ fn main() {
                     WindowEvent::RedrawRequested => {
                         let raw_input = egui_state.take_egui_input(window);
                         let full_output = egui_ctx.run(raw_input, |ctx| {
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("1: Plates  2: Velocities  3: Boundaries  H: HUD");
+                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  H: HUD");
                                     ui.separator();
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
@@ -268,8 +283,8 @@ fn main() {
                                     ));
                                     ui.separator();
                                     ui.label(format!(
-                                        "max arrows={} max strokes={}  scale={:.2} px/cm/yr  FPS: {:.0}",
-                                        ov.max_arrows_slider, ov.max_bounds_slider, ov.vel_scale_px_per_cm_yr, fps
+                                        "max arrows={} max strokes={}  scale={:.2} px/cm/yr  v_floor={:.2} cm/yr  FPS: {:.0}",
+                                        ov.max_arrows_slider, ov.max_bounds_slider, ov.vel_scale_px_per_cm_yr, ov.v_floor_cm_per_yr, fps
                                     ));
                                 });
                                 ui.separator();
@@ -292,6 +307,22 @@ fn main() {
                                         ov.live_arrows_cap, ov.live_bounds_cap
                                     ));
                                 });
+                                ui.separator();
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(format!(
+                                        "age min/mean/max = {:.2}/{:.2}/{:.2} Myr",
+                                        age_out.min_max_age.0,
+                                        (age_out.age_myr.iter().sum::<f32>() / age_out.age_myr.len().max(1) as f32),
+                                        age_out.min_max_age.1
+                                    ));
+                                    ui.separator();
+                                    ui.label(format!(
+                                        "depth min/mean/max = {:.0}/{:.0}/{:.0} m",
+                                        age_out.min_max_depth.0,
+                                        (age_out.depth_m.iter().sum::<f32>() / age_out.depth_m.len().max(1) as f32),
+                                        age_out.min_max_depth.1
+                                    ));
+                                });
                             });
 
                             egui::CentralPanel::default().show(ctx, |ui| {
@@ -309,6 +340,14 @@ fn main() {
                                 }
                                 if ov.show_bounds {
                                     for s in ov.shapes_for_boundaries(rect, &g_view.latlon, &bounds.edges) { painter.add(s.clone()); }
+                                }
+                                if ov.show_age {
+                                    if ov.age_cache.is_none() { ov.rebuild_age_shapes(rect, &g_view.latlon, &age_out.age_myr); }
+                                    for s in ov.age_shapes() { painter.add(s.clone()); }
+                                }
+                                if ov.show_bathy {
+                                    if ov.bathy_cache.is_none() { ov.rebuild_bathy_shapes(rect, &g_view.latlon, &age_out.depth_m); }
+                                    for s in ov.bathy_shapes() { painter.add(s.clone()); }
                                 }
                             });
                         });
