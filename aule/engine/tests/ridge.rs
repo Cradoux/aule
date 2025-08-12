@@ -29,16 +29,6 @@ fn births_and_fringe_correctness_and_idempotence() {
 
     // Fringe neighbors must be <= fringe cap only for neighbors of ridge cells
     let mut neighbor_mask = vec![false; g.cells];
-    for u in 0..g.cells {
-        // identify ridge cells
-        let mut is_ridge = false;
-        for &n in &g.n1[u] {
-            // Note: ridge defined by divergent edges; check edges to see if this cell is on any divergent edge
-            // Conservatively build ridge mask from edges
-            // We'll just scan edges once per test for simplicity
-            let _ = n; // silence unused in this loop
-        }
-    }
     let mut is_ridge_cell = vec![false; g.cells];
     for &(u, v, class) in &b.edges {
         if class == 1 {
@@ -46,8 +36,8 @@ fn births_and_fringe_correctness_and_idempotence() {
             is_ridge_cell[v as usize] = true;
         }
     }
-    for u in 0..g.cells {
-        if is_ridge_cell[u] {
+    for (u, &is_r) in is_ridge_cell.iter().enumerate() {
+        if is_r {
             for &n in &g.n1[u] {
                 neighbor_mask[n as usize] = true;
             }

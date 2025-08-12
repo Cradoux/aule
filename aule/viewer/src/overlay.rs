@@ -19,9 +19,18 @@ pub struct OverlayState {
     last_vel_scale: f32,
     last_arrows_cap: u32,
     last_bounds_cap: u32,
-    plates_cache: Option<Vec<Shape>>,
-    vel_cache: Option<Vec<Shape>>,
-    bounds_cache: Option<Vec<Shape>>,
+    pub(crate) plates_cache: Option<Vec<Shape>>,
+    pub(crate) vel_cache: Option<Vec<Shape>>,
+    pub(crate) bounds_cache: Option<Vec<Shape>>,
+
+    // Age/bathymetry layers
+    pub show_age: bool,
+    pub show_bathy: bool,
+    pub v_floor_cm_per_yr: f32,
+    pub age_minmax: (f32, f32),
+    pub depth_minmax: (f32, f32),
+    pub(crate) age_cache: Option<Vec<Shape>>,
+    pub(crate) bathy_cache: Option<Vec<Shape>>,
 }
 
 impl Default for OverlayState {
@@ -46,6 +55,13 @@ impl Default for OverlayState {
             plates_cache: None,
             vel_cache: None,
             bounds_cache: None,
+            show_age: false,
+            show_bathy: false,
+            v_floor_cm_per_yr: 0.5,
+            age_minmax: (0.0, 0.0),
+            depth_minmax: (0.0, 0.0),
+            age_cache: None,
+            bathy_cache: None,
         }
     }
 }
@@ -173,6 +189,11 @@ impl OverlayState {
         // Clamp live caps into slider ranges in case sliders changed
         self.live_arrows_cap = self.live_arrows_cap.clamp(self.min_cap(), self.max_cap_arrows());
         self.live_bounds_cap = self.live_bounds_cap.clamp(self.min_cap(), self.max_cap_bounds());
+        // Age/bathy caches are invalidated by rect changes (recompute positions)
+        if self.last_rect_key.is_none() {
+            self.age_cache = None;
+            self.bathy_cache = None;
+        }
     }
 
     fn min_cap(&self) -> u32 {
@@ -194,10 +215,7 @@ impl OverlayState {
         if self.plates_cache.is_none() {
             self.plates_cache = Some(build_plate_points(rect, latlon, plate_id));
         }
-        match self.plates_cache.as_deref() {
-            Some(s) => s,
-            None => &[],
-        }
+        self.plates_cache.as_deref().unwrap_or_default()
     }
 
     pub fn shapes_for_velocities(
@@ -211,10 +229,7 @@ impl OverlayState {
             self.vel_cache =
                 Some(build_velocity_arrows(rect, latlon, vel_en, cap, self.vel_scale_px_per_cm_yr));
         }
-        match self.vel_cache.as_deref() {
-            Some(s) => s,
-            None => &[],
-        }
+        self.vel_cache.as_deref().unwrap_or_default()
     }
 
     pub fn shapes_for_boundaries(
@@ -227,10 +242,7 @@ impl OverlayState {
             let cap = self.effective_bounds_cap() as usize;
             self.bounds_cache = Some(build_boundary_strokes(rect, latlon, edges, cap));
         }
-        match self.bounds_cache.as_deref() {
-            Some(s) => s,
-            None => &[],
-        }
+        self.bounds_cache.as_deref().unwrap_or_default()
     }
 
     pub fn update_adaptive_caps(&mut self, dt_ms: f32) {
@@ -266,5 +278,84 @@ impl OverlayState {
             self.live_arrows_cap = new_ar.max(self.min_cap());
             self.live_bounds_cap = new_bd.max(self.min_cap());
         }
+    }
+}
+
+#[inline]
+fn sat01(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
+}
+
+/// Viridis-like ramp
+pub fn viridis_color32(t: f32) -> Color32 {
+    const C: [(u8, u8, u8); 9] = [
+        (68, 1, 84),
+        (71, 44, 122),
+        (59, 81, 139),
+        (44, 113, 142),
+        (33, 144, 141),
+        (39, 173, 129),
+        (92, 200, 99),
+        (170, 220, 50),
+        (253, 231, 37),
+    ];
+    let t = sat01(t);
+    let segs = (C.len() - 1) as f32;
+    let x = t * segs;
+    let i = x.floor() as usize;
+    let f = x - (i as f32);
+    if i >= C.len() - 1 {
+        let (r, g, b) = C[C.len() - 1];
+        return Color32::from_rgb(r, g, b);
+    }
+    let (r0, g0, b0) = C[i];
+    let (r1, g1, b1) = C[i + 1];
+    let r = (r0 as f32 + f * ((r1 as f32) - (r0 as f32))).round() as u8;
+    let g = (g0 as f32 + f * ((g1 as f32) - (g0 as f32))).round() as u8;
+    let b = (b0 as f32 + f * ((b1 as f32) - (b0 as f32))).round() as u8;
+    Color32::from_rgb(r, g, b)
+}
+
+pub fn viridis_map(value: f32, min_v: f32, max_v: f32) -> Color32 {
+    let t = if max_v > min_v { ((value - min_v) / (max_v - min_v)).clamp(0.0, 1.0) } else { 0.0 };
+    viridis_color32(t)
+}
+
+fn blue_ramp(value: f32, min_v: f32, max_v: f32) -> Color32 {
+    let t = if max_v > min_v { ((value - min_v) / (max_v - min_v)).clamp(0.0, 1.0) } else { 0.0 };
+    let r = (10.0 + 20.0 * t) as u8;
+    let g = (30.0 + 80.0 * t) as u8;
+    let b = (80.0 + 160.0 * t) as u8;
+    Color32::from_rgb(r, g, b)
+}
+
+impl OverlayState {
+    pub fn rebuild_age_shapes(&mut self, rect: Rect, latlon: &[[f32; 2]], age_myr: &[f32]) {
+        let mut shapes = Vec::with_capacity(latlon.len());
+        let (amin, amax) = self.age_minmax;
+        for i in 0..latlon.len() {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            let col = viridis_map(age_myr[i], amin, amax);
+            shapes.push(Shape::circle_filled(p, 1.2, col));
+        }
+        self.age_cache = Some(shapes);
+    }
+
+    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, latlon: &[[f32; 2]], depth_m: &[f32]) {
+        let mut shapes = Vec::with_capacity(latlon.len());
+        let (dmin, dmax) = self.depth_minmax;
+        for i in 0..latlon.len() {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            let col = blue_ramp(depth_m[i], dmin, dmax);
+            shapes.push(Shape::circle_filled(p, 1.2, col));
+        }
+        self.bathy_cache = Some(shapes);
+    }
+
+    pub fn age_shapes(&self) -> &[Shape] {
+        self.age_cache.as_deref().unwrap_or_default()
+    }
+    pub fn bathy_shapes(&self) -> &[Shape] {
+        self.bathy_cache.as_deref().unwrap_or_default()
     }
 }
