@@ -76,8 +76,7 @@ impl<'w> GpuState<'w> {
             .await
             .unwrap_or_else(|| panic!("no suitable GPU adapters"));
 
-        let required_limits =
-            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let required_limits = wgpu::Limits::default();
 
         let (device, queue) = adapter
             .request_device(
@@ -176,6 +175,24 @@ fn main() {
         let g_tmp = engine::grid::Grid::new(f);
         let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
     }
+    // T-030: Minimal plates log
+    {
+        let f: u32 = 64;
+        let g_tmp = engine::grid::Grid::new(f);
+        let plates = engine::plates::Plates::new(&g_tmp, 8, 12345);
+        let mut mags: Vec<f64> =
+            plates.vel_en.iter().map(|v| ((v[0] as f64).hypot(v[1] as f64))).collect();
+        mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = mags.len();
+        let min_v = *mags.first().unwrap_or(&0.0);
+        let max_v = *mags.last().unwrap_or(&0.0);
+        let mean_v = if n == 0 { 0.0 } else { mags.iter().sum::<f64>() / n as f64 };
+        println!(
+            "[plates] N={} |V| min/mean/max = {:.3} / {:.3} / {:.3} m/yr",
+            8, min_v, mean_v, max_v
+        );
+    }
+
     log_grid_info();
 
     event_loop

@@ -9,15 +9,17 @@ pub mod fields;
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
+/// Plates seeding and velocities.
+pub mod plates;
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn version_is_semver_like() {
         assert!(version().split('.').count() >= 3);
