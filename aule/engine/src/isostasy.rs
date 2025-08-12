@@ -49,7 +49,7 @@ pub fn solve_offset_for_volume(
     let mut lo = -10_000.0_f64;
     let mut hi = 10_000.0_f64;
     let mut f_lo = vol_off(depth_m, area_m2, lo) - target_vol_m3;
-    let mut f_hi = vol_off(depth_m, area_m2, hi) - target_vol_m3;
+    let mut _f_hi = vol_off(depth_m, area_m2, hi) - target_vol_m3;
 
     // Enlarge bracket if needed
     let mut expand = 0;
@@ -59,9 +59,9 @@ pub fn solve_offset_for_volume(
         expand += 1;
     }
     expand = 0;
-    while f_hi < 0.0 && expand < 4 {
+    while _f_hi < 0.0 && expand < 4 {
         hi += 10_000.0;
-        f_hi = vol_off(depth_m, area_m2, hi) - target_vol_m3;
+        _f_hi = vol_off(depth_m, area_m2, hi) - target_vol_m3;
         expand += 1;
     }
 
@@ -78,19 +78,7 @@ pub fn solve_offset_for_volume(
             f_lo = f_mid;
         } else {
             hi = off;
-            f_hi = f_mid;
         }
     }
     off
-}
-
-fn volume_with_offset(depth_m: &[f32], area_m2: &[f32], off: f64) -> f64 {
-    let mut v = 0.0f64;
-    for i in 0..depth_m.len() {
-        let d = (depth_m[i] as f64) + off;
-        if d > 0.0 {
-            v += d * (area_m2[i] as f64);
-        }
-    }
-    v
 }

@@ -15,8 +15,8 @@ fn solver_hits_target_within_tol() {
     let n = 1000usize;
     let mut depth = vec![0.0f32; n];
     let area = vec![2.0f32; n];
-    for i in 0..n {
-        depth[i] = (i as f32) * 1.0;
+    for (i, d) in depth.iter_mut().enumerate().take(n) {
+        *d = (i as f32) * 1.0;
     }
     let (v0, _a0) = isostasy::ocean_volume_from_depth(&depth, &area);
     // Target: add 100 m average depth → additional volume = 100 * sum(area)

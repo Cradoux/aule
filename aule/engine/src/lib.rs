@@ -7,6 +7,8 @@
 pub mod age;
 /// Plate boundary classification.
 pub mod boundaries;
+/// Synthetic continental mask generator and applier.
+pub mod continent;
 /// Field and tiling views.
 pub mod fields;
 /// 1D elastic plate flexure (CPU reference; analytic + CG solver).
