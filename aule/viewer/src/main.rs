@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
 mod overlay;
+mod plot;
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
@@ -263,11 +264,12 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  H: HUD");
+                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  H: HUD");
                                     ui.separator();
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
@@ -324,6 +326,48 @@ fn main() {
                                     ));
                                 });
                             });
+
+                            // Optional bottom panel for age-depth plot
+                            if ov.show_age_depth {
+                                egui::TopBottomPanel::bottom("age_depth_panel").show(ctx, |ui| {
+                                    ui.label("Age–Depth Validation");
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::Slider::new(&mut ov.plot_sample_cap, 1000..=50_000)
+                                                .text("Sample cap")
+                                                .step_by(1000.0),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut ov.plot_bin_width_myr, 1.0..=20.0)
+                                                .text("Bin width (Myr)"),
+                                        );
+                                    });
+                                    let d0 = 2600.0_f64;
+                                    let a = 350.0_f64;
+                                    let b = 0.0_f64;
+                                    let pdata = plot::build_age_depth_plot(
+                                        &age_out.age_myr,
+                                        &age_out.depth_m,
+                                        plot::AgeDepthPlotParams { sample_cap: ov.plot_sample_cap as usize, bin_width_myr: ov.plot_bin_width_myr },
+                                        &|age| engine::age::depth_from_age(age, d0, a, b),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("RMS: {:.2} m  N={}  age[min/max]={:.2}/{:.2} Myr  depth[min/max]={:.0}/{:.0} m",
+                                            pdata.stats.rms_m, pdata.stats.n_samples,
+                                            pdata.stats.age_minmax.0, pdata.stats.age_minmax.1,
+                                            pdata.stats.depth_minmax.0, pdata.stats.depth_minmax.1));
+                                    });
+                                    egui_plot::Plot::new("age_depth_plot")
+                                        .legend(egui_plot::Legend::default())
+                                        .x_axis_label("Age (Myr)")
+                                        .y_axis_label("Depth (m)")
+                                        .show(ui, |plot_ui| {
+                                            plot_ui.points(pdata.scatter);
+                                            plot_ui.line(pdata.binned);
+                                            plot_ui.line(pdata.reference);
+                                        });
+                                });
+                            }
 
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 let rect = ui.available_rect_before_wrap();
