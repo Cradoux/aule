@@ -11,6 +11,8 @@ pub mod boundaries;
 pub mod fields;
 /// 1D elastic plate flexure (CPU reference; analytic + CG solver).
 pub mod flexure;
+/// GPU flexure multigrid scaffold (WGSL).
+pub mod flexure_gpu;
 /// Geometric utilities used by solvers.
 pub mod geo;
 /// Minimal GPU helper for tests (T-020).
