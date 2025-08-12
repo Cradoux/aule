@@ -421,6 +421,10 @@ fn main() {
                                                 trench_deepen_m: 3000.0,
                                                 arc_uplift_m: -500.0,
                                                 backarc_uplift_m: -200.0,
+                                                rollback_offset_m: 0.0,
+                                                rollback_rate_km_per_myr: 0.0,
+                                                backarc_extension_mode: false,
+                                                backarc_extension_deepen_m: 600.0,
                                             },
                                         );
                                         ov.rebuild_subduction_meshes(rect, &world.grid.latlon, &sub_res.masks);

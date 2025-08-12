@@ -48,6 +48,12 @@ pub struct OverlayState {
     pub subd_backarc: Option<Vec<Shape>>,
     pub max_subd_slider: u32,
     pub live_subd_cap: u32,
+
+    // Subduction params (viewer-controlled)
+    pub rollback_offset_km: f32,
+    pub rollback_rate_km_per_myr: f32,
+    pub backarc_extension_mode: bool,
+    pub backarc_extension_deepen_m: f32,
 }
 
 impl Default for OverlayState {
@@ -89,6 +95,10 @@ impl Default for OverlayState {
             subd_backarc: None,
             max_subd_slider: 10_000,
             live_subd_cap: 10_000,
+            rollback_offset_km: 0.0,
+            rollback_rate_km_per_myr: 0.0,
+            backarc_extension_mode: false,
+            backarc_extension_deepen_m: 600.0,
         }
     }
 }

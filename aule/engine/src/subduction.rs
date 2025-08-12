@@ -40,6 +40,14 @@ pub struct SubductionParams {
     pub arc_uplift_m: f32,
     /// Back-arc bathymetry delta (m, negative uplifts/shallows).
     pub backarc_uplift_m: f32,
+    /// Absolute oceanward offset applied to the hinge (meters). Default: 0.
+    pub rollback_offset_m: f64,
+    /// If > 0, can be used by viewer stepper: offset += rate * dt_myr (not applied here).
+    pub rollback_rate_km_per_myr: f64,
+    /// If true, back-arc is deepened instead of uplifted (extension mode).
+    pub backarc_extension_mode: bool,
+    /// Depth added inside back-arc band in extension mode (positive down).
+    pub backarc_extension_deepen_m: f32,
 }
 
 /// Counts for each band.
@@ -202,10 +210,12 @@ pub fn apply_subduction(
         let mut is_arc = false;
         let mut is_back = false;
         if dist_over[i].is_finite() {
-            let d = dist_over[i];
-            is_arc = (d - arc_off_m).abs() <= arc_hw_m;
-            is_back =
-                !is_arc && d >= (arc_off_m + arc_hw_m) && d <= (arc_off_m + arc_hw_m + backarc_w_m);
+            // Apply rollback offset on overriding distance
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            is_arc = (d_eff - arc_off_m).abs() <= arc_hw_m;
+            is_back = !is_arc
+                && d_eff >= (arc_off_m + arc_hw_m)
+                && d_eff <= (arc_off_m + arc_hw_m + backarc_w_m);
         }
         if is_trench {
             masks.trench[i] = true;
@@ -232,7 +242,11 @@ pub fn apply_subduction(
             delta += params.arc_uplift_m;
         }
         if masks.backarc[i] {
-            delta += params.backarc_uplift_m;
+            if params.backarc_extension_mode {
+                delta += params.backarc_extension_deepen_m;
+            } else {
+                delta += params.backarc_uplift_m;
+            }
         }
         if delta != 0.0 {
             let mut base = crate::age::depth_from_age(age_myr[i] as f64, D0, A_COEF, B_COEF) as f32;
