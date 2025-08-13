@@ -127,6 +127,19 @@ pub struct OverlayState {
     pub viewport_epoch: u64,
     pub world_dirty: bool,
     pub flex_dirty: bool,
+
+    // Hypsometry panel
+    pub show_hypsometry: bool,
+    pub hyps_bins: u32,
+    pub hyps_min_m: f32,
+    pub hyps_max_m: f32,
+    pub hyps_auto_domain: bool,
+    pub hyps_centers_m: Vec<f64>,
+    pub hyps_area_per_bin_m2: Vec<f64>,
+    pub hyps_land_frac: f64,
+    pub hyps_mean_m: f64,
+    pub hyps_median_m: f64,
+    pub hyps_coast_area_m2: f64,
 }
 
 impl Default for OverlayState {
@@ -230,6 +243,18 @@ impl Default for OverlayState {
             viewport_epoch: 0,
             world_dirty: false,
             flex_dirty: false,
+
+            show_hypsometry: false,
+            hyps_bins: 256,
+            hyps_min_m: 0.0,
+            hyps_max_m: 6000.0,
+            hyps_auto_domain: true,
+            hyps_centers_m: Vec::new(),
+            hyps_area_per_bin_m2: Vec::new(),
+            hyps_land_frac: 0.0,
+            hyps_mean_m: 0.0,
+            hyps_median_m: 0.0,
+            hyps_coast_area_m2: 0.0,
         }
     }
 }
