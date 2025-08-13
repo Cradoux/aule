@@ -55,6 +55,8 @@ pub mod stepper;
 pub mod subduction;
 /// Fluvial erosion, hillslope diffusion, and sediment transport/deposition orchestrator.
 pub mod surface;
+/// High-F tiling plan (T-455)
+pub mod tileplan;
 /// Transform pull-apart/restraining bands (CPU pass).
 pub mod transforms;
 /// World state.

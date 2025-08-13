@@ -179,6 +179,16 @@ pub struct OverlayState {
     pub sun_alt_deg: f32,
     pub legend_on: bool,
     pub color_dirty: bool,
+
+    // Resolution/tiling (T-455)
+    pub show_resolution: bool,
+    pub preset_f: u32,
+    pub tiles_last: usize,
+    pub tile_interior_min: usize,
+    pub tile_interior_max: usize,
+    pub tile_halo_min: usize,
+    pub tile_halo_max: usize,
+    pub tile_halo_rings: u32,
 }
 
 impl Default for OverlayState {
@@ -324,6 +334,15 @@ impl Default for OverlayState {
             sun_alt_deg: 45.0,
             legend_on: true,
             color_dirty: true,
+
+            show_resolution: false,
+            preset_f: 64,
+            tiles_last: 0,
+            tile_interior_min: 0,
+            tile_interior_max: 0,
+            tile_halo_min: 0,
+            tile_halo_max: 0,
+            tile_halo_rings: 1,
         }
     }
 }

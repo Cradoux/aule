@@ -18,12 +18,7 @@ fn zero_toggles_no_change() {
         &mut world.depth_m,
         &mut world.sediment_m,
         &world.area_m2,
-        &surface::SurfaceParams {
-            k_stream: 0.0,
-            k_diff: 0.0,
-            k_tr: 0.0,
-            ..Default::default()
-        },
+        &surface::SurfaceParams { k_stream: 0.0, k_diff: 0.0, k_tr: 0.0, ..Default::default() },
         1.0,
     );
     assert!(stats.eroded_m3.abs() < 1e-12);
