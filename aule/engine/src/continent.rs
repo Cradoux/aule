@@ -166,3 +166,79 @@ pub fn apply_continents(
     let frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
     (mask, frac)
 }
+
+/// Advect the continental fraction `C` and thickness `th_c_m` using a simple
+/// semi-Lagrangian nearest-neighbour backtrace on the lat/lon grid.
+///
+/// This is a lightweight, deterministic CPU MVP intended to make motion visible.
+/// It backtraces from each cell center by `v * dt` on a spherical lat/lon chart
+/// and samples from the nearest of the 1-ring neighbours (including self).
+pub fn advect_c_thc(
+    grid: &Grid,
+    vel_en_m_per_yr: &[[f32; 2]],
+    dt_myr: f64,
+    c: &mut [f32],
+    th_c_m: &mut [f32],
+) {
+    let n = grid.cells;
+    if c.len() != n || th_c_m.len() != n || vel_en_m_per_yr.len() != n {
+        return;
+    }
+    // Precompute backtraced targets in lat/lon
+    const R_EARTH_M: f64 = 6_371_000.0;
+    let years = dt_myr.max(0.0) * 1.0e6;
+    let mut c_new = vec![0.0f32; n];
+    let mut thc_new = vec![0.0f32; n];
+    for i in 0..n {
+        let lat = grid.latlon[i][0] as f64;
+        let lon = grid.latlon[i][1] as f64;
+        let ve = vel_en_m_per_yr[i][0] as f64;
+        let vn = vel_en_m_per_yr[i][1] as f64;
+        let dx = ve * years; // meters east
+        let dy = vn * years; // meters north
+        let dlat = dy / R_EARTH_M;
+        let dlon = if lat.abs() < std::f64::consts::FRAC_PI_2 {
+            dx / (R_EARTH_M * lat.cos().max(1e-9))
+        } else {
+            0.0
+        };
+        // Backtrace: source position = current - displacement
+        let src_lat = lat - dlat;
+        let mut src_lon = lon - dlon;
+        // Wrap lon to [-pi,pi]
+        if src_lon > std::f64::consts::PI {
+            src_lon -= 2.0 * std::f64::consts::PI;
+        }
+        if src_lon < -std::f64::consts::PI {
+            src_lon += 2.0 * std::f64::consts::PI;
+        }
+
+        // Choose nearest among self + 1-ring neighbours in lat/lon
+        let mut best_j = i;
+        let mut best_d2 = (grid.latlon[i][0] as f64 - src_lat).powi(2)
+            + (grid.latlon[i][1] as f64 - src_lon).powi(2);
+        for &nj in &grid.n1[i] {
+            let j = nj as usize;
+            let d2 = (grid.latlon[j][0] as f64 - src_lat).powi(2)
+                + (grid.latlon[j][1] as f64 - src_lon).powi(2);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best_j = j;
+            }
+        }
+        c_new[i] = c[best_j];
+        thc_new[i] = th_c_m[best_j];
+    }
+    c.copy_from_slice(&c_new);
+    th_c_m.copy_from_slice(&thc_new);
+}
+
+/// Apply uplift to `depth_m` using the fields `C` (0..1) and `th_c_m` (m).
+/// Negative uplift makes water shallower (land higher). This simply applies:
+/// depth[i] += -(C[i] * th_c_m[i]).
+pub fn apply_uplift_from_c_thc(depth_m: &mut [f32], c: &[f32], th_c_m: &[f32]) {
+    let n = depth_m.len().min(c.len()).min(th_c_m.len());
+    for i in 0..n {
+        depth_m[i] += -(c[i] * th_c_m[i]);
+    }
+}

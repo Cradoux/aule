@@ -43,6 +43,9 @@ pub struct OverlayState {
     // Age/bathymetry layers
     pub show_age: bool,
     pub show_bathy: bool,
+    pub show_continents_field: bool,
+    /// If true, the stepper will advect and apply continents each step
+    pub continents_apply: bool,
     pub v_floor_cm_per_yr: f32,
     pub age_minmax: (f32, f32),
     pub depth_minmax: (f32, f32),
@@ -103,6 +106,8 @@ pub struct OverlayState {
     pub cont_amp_applied_m: f32,
     pub cont_key: Option<ContKey>,
     pub cont_template: Option<Vec<f32>>,
+    /// Reusable `C` color overlay cache
+    pub cont_c_cache: Option<Vec<Shape>>,
 
     // Flexure overlay/state
     pub show_flexure: bool,   // draw w overlay
@@ -180,6 +185,8 @@ impl Default for OverlayState {
             bounds_cache: None,
             show_age: false,
             show_bathy: false,
+            show_continents_field: false,
+            continents_apply: true,
             v_floor_cm_per_yr: 0.5,
             age_minmax: (0.0, 0.0),
             depth_minmax: (0.0, 0.0),
@@ -231,6 +238,7 @@ impl Default for OverlayState {
             cont_amp_applied_m: 0.0,
             cont_key: None,
             cont_template: None,
+            cont_c_cache: None,
 
             show_flexure: false,
             enable_flexure: false,
@@ -297,6 +305,7 @@ impl OverlayState {
         self.mesh_coastline = None;
         self.flex_mesh = None;
         self.flex_overlay_count = 0;
+        self.cont_c_cache = None;
     }
 }
 
@@ -684,6 +693,17 @@ impl OverlayState {
         self.bathy_cache = Some(shapes);
     }
 
+    /// Simple C overlay: viridis ramp from oceanic (0) to continental (1)
+    pub fn rebuild_c_overlay(&mut self, rect: Rect, latlon: &[[f32; 2]], c: &[f32]) {
+        let mut shapes = Vec::with_capacity(latlon.len());
+        for i in 0..latlon.len().min(c.len()) {
+            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+            let col = viridis_map(c[i].clamp(0.0, 1.0), 0.0, 1.0);
+            shapes.push(Shape::circle_filled(p, 1.2, col));
+        }
+        self.cont_c_cache = Some(shapes);
+    }
+
     pub fn draw_legend(&self, painter: &egui::Painter, rect: Rect) {
         let pad = 8.0;
         let w = 280.0;
@@ -785,6 +805,7 @@ impl OverlayState {
     }
 
     /// Build flexure deflection overlay as a lightweight point mesh colored by value.
+    #[allow(dead_code)]
     pub fn rebuild_flexure_mesh(
         &mut self,
         rect: Rect,
@@ -827,6 +848,7 @@ impl OverlayState {
     }
 
     /// Build continent land mask and coastline meshes
+    #[allow(dead_code)]
     pub fn rebuild_continent_meshes(
         &mut self,
         rect: Rect,
@@ -963,6 +985,7 @@ impl OverlayState {
     }
 
     /// Build transform point meshes (cyan for pull-apart, brown for restraining).
+    #[allow(dead_code)]
     pub fn rebuild_transform_meshes(
         &mut self,
         rect: Rect,
