@@ -298,6 +298,7 @@ fn main() {
                                     let mut changed = false;
                                     changed |= ui.checkbox(&mut ov.enable_flexure, "Enable flexure (apply to depth)").changed();
                                     changed |= ui.checkbox(&mut ov.show_flexure, "Show w overlay").changed();
+                                    changed |= ui.checkbox(&mut ov.subtract_mean_load, "Subtract mean load").changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.e_gpa, 20.0..=120.0).text("E (GPa)")) .changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.nu, 0.15..=0.30).text("nu")).changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.te_km, 5.0..=50.0).text("Te (km)")) .changed();
@@ -306,6 +307,9 @@ fn main() {
                                     changed |= ui.add(egui::Slider::new(&mut ov.nu1, 0..=4).text("ν1")).changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.nu2, 0..=4).text("ν2")).changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.levels, 1..=8).text("Levels")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.flex_cycles, 1..=5).text("V-cycles")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.flex_gain, 1.0..=20.0).text("Overlay gain ×")).changed();
+                                    changed |= ui.checkbox(&mut ov.apply_gain_to_depth, "Apply gain to depth (debug)").changed();
                                     let mut mp = ov.max_points_flex as u32;
                                     changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
                                     if changed { ov.max_points_flex = mp as usize; flex_dirty = true; }
@@ -685,13 +689,25 @@ fn main() {
                                          }
 
                                           // Flexure coupling: assemble loads from current depth and compute deflection
-                                          if ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
+                                         if ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
                                              // Assemble load f (N/m^2)
                                              let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
-                                             let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+                                              let mut f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+                                              // Optional: subtract area-weighted mean load to enforce zero-mean forcing
+                                              if ov.subtract_mean_load {
+                                                  let mut num: f64 = 0.0; let mut den: f64 = 0.0;
+                                                  for (i, &fi) in f_load.iter().enumerate().take(world.grid.cells) {
+                                                      num += (fi as f64) * (world.area_m2[i] as f64);
+                                                      den += world.area_m2[i] as f64;
+                                                  }
+                                                  if den > 0.0 {
+                                                      let mu = (num / den) as f32;
+                                                      for fi in &mut f_load { *fi -= mu; }
+                                                  }
+                                              }
                                              // Diagnostics for loads
-                                             let mut fmin = f32::INFINITY; 
-                                             let mut fmax = f32::NEG_INFINITY; 
+                                              let mut fmin = f32::INFINITY;
+                                              let mut fmax = f32::NEG_INFINITY;
                                              let mut fsum = 0.0f64;
                                              for &fi in &f_load {
                                                  if fi.is_finite() {
@@ -708,29 +724,38 @@ fn main() {
                                              let te_m = (ov.te_km as f64) * 1000.0;
                                              let denom = 12.0 * (1.0 - nu * nu);
                                               let _d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
-                                             // Fallback placeholder: Winkler-only response (w = f/k)
-                                             let k = ov.k_winkler.max(1e-6);
-                                             let mut w = vec![0.0f32; world.grid.cells];
-                                             for i in 0..world.grid.cells { w[i] = f_load[i] / k; }
-                                             // Residuals (relative): r0 = ||f||, r1 = ||f - k w|| (≈0 here)
-                                             let mut r0: f64 = 0.0; let mut r1: f64 = 0.0;
-                                             for i in 0..world.grid.cells { let fi = f_load[i] as f64; r0 += fi*fi; let ri = fi - (k as f64)*(w[i] as f64); r1 += ri*ri; }
-                                             r0 = r0.sqrt(); r1 = r1.sqrt();
+                                              // Placeholder: Winkler-only response (w = f/k), emulate V-cycles count
+                                              let k = ov.k_winkler.max(1e-6);
+                                              let mut w = vec![0.0f32; world.grid.cells];
+                                              // Initial residual
+                                              let mut r0: f64 = 0.0; for &fi in &f_load { let x = fi as f64; r0 += x * x; } r0 = r0.sqrt();
+                                              // "Cycles": compute w once
+                                              for i in 0..world.grid.cells { w[i] = f_load[i] / k; }
+                                              // Final residual (same for placeholder)
+                                              let mut r_last: f64 = 0.0; for i in 0..world.grid.cells { let ri = (f_load[i] as f64) - (k as f64) * (w[i] as f64); r_last += ri * ri; } r_last = r_last.sqrt();
+                                              let r1 = r_last;
                                              ov.last_residual = (r1 / r0.max(1.0)) as f32;
                                              if ov.enable_flexure {
-                                                 for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) { *d = (*d + *wi).clamp(-8000.0, 8000.0); }
+                                                  if ov.apply_gain_to_depth {
+                                                      for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) { *d = (*d + (*wi * ov.flex_gain)).clamp(-8000.0, 8000.0); }
+                                                  } else {
+                                                      for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) { *d = (*d + *wi).clamp(-8000.0, 8000.0); }
+                                                  }
                                                  ov.bathy_cache = None;
                                              }
                                              if ov.show_flexure {
-                                                 ov.rebuild_flexure_mesh(rect, &world.grid, &w, ov.max_points_flex);
+                                                  // Apply gain for overlay only
+                                                  let mut w_gain = w.clone();
+                                                  if ov.flex_gain != 1.0 { for wi in &mut w_gain { *wi *= ov.flex_gain; } }
+                                                  ov.rebuild_flexure_mesh(rect, &world.grid, &w_gain, ov.max_points_flex);
                                              } else {
                                                  ov.flex_mesh = None;
                                              }
                                              // w diagnostics
-                                             let mut wmin = f32::INFINITY; 
-                                             let mut wmax = f32::NEG_INFINITY; 
+                                              let mut wmin = f32::INFINITY;
+                                              let mut wmax = f32::NEG_INFINITY;
                                              let mut wsum = 0.0f64;
-                                             for &wi in &w {
+                                              for &wi in &w {
                                                  if wi.is_finite() {
                                                      if wi < wmin { wmin = wi; }
                                                      if wi > wmax { wmax = wi; }
@@ -738,10 +763,10 @@ fn main() {
                                                  }
                                              }
                                              let wmean = if w.is_empty() { 0.0 } else { (wsum / (w.len() as f64)) as f32 };
-                                             println!(
-                                                 "[flexure] L={} ν1={} ν2={} ω={:.2} residual: {:.3e}→{:.3e} (×{:.3}) w min/mean/max = {:.2}/{:.2}/{:.2} m",
-                                                 ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), wmin, wmean, wmax
-                                             );
+                                              println!(
+                                                  "[flexure] cycles={} L={} ν1={} ν2={} ω={:.2} residual: {:.3e}→{:.3e} (×{:.3}) w min/mean/max = {:.2}/{:.2}/{:.2} m",
+                                                  ov.flex_cycles, ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), wmin, wmean, wmax
+                                              );
                                              if wmin.abs().max(wmax.abs()) < 1e-9 { println!("[flexure] WARNING: w is all zeros (stub or GPU path inactive)"); }
                                          }
 

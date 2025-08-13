@@ -116,6 +116,10 @@ pub struct OverlayState {
     pub max_points_flex: usize, // overlay cap
     pub last_residual: f32,     // r_out / max(1,r_in)
     pub flex_mesh: Option<Mesh>,
+    pub subtract_mean_load: bool,
+    pub flex_cycles: u32,
+    pub flex_gain: f32,
+    pub apply_gain_to_depth: bool,
 }
 
 impl Default for OverlayState {
@@ -209,6 +213,10 @@ impl Default for OverlayState {
             max_points_flex: 10_000,
             last_residual: 0.0,
             flex_mesh: None,
+            subtract_mean_load: true,
+            flex_cycles: 1,
+            flex_gain: 1.0,
+            apply_gain_to_depth: false,
         }
     }
 }

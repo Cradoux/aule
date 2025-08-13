@@ -38,5 +38,6 @@ pub fn assemble_load_from_depth(grid: &Grid, depth_m: &[f32], p: &LoadParams) ->
         let land = if d_rel < 0.0 { -d_rel } else { 0.0 };
         f[i] = rho_w_g * ocean + rho_c_g * land;
     }
+    // Optionally subtract simple mean here is not possible without area; keep as-is.
     f
 }
