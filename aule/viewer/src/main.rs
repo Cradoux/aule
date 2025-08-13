@@ -487,21 +487,27 @@ fn main() {
 
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 let rect = ui.available_rect_before_wrap();
+                                // Viewport tracking and overlay invalidation on change
+                                let x = rect.min.x.round() as i32;
+                                let y = rect.min.y.round() as i32;
+                                let w = rect.width().round() as i32;
+                                let h = rect.height().round() as i32;
+                                let new_rect = [x, y, w, h];
+                                if new_rect != ov.last_map_rect_px {
+                                    ov.last_map_rect_px = new_rect;
+                                    ov.viewport_epoch = ov.viewport_epoch.wrapping_add(1);
+                                    ov.invalidate_all_meshes();
+                                    ctx.request_repaint();
+                                }
                                 let painter = ui.painter_at(rect);
                                 // Ensure caches are valid for current params
                                 let eff_ar = ov.effective_arrows_cap();
                                 let eff_bd = ov.effective_bounds_cap();
                                 let eff_sd = ov.effective_subd_cap();
                                 ov.ensure_params_and_invalidate_if_needed(rect, eff_ar, eff_bd, eff_sd);
-                                if ov.show_plates {
-                                    for s in ov.shapes_for_plates(rect, &world.grid.latlon, &world.plates.plate_id) { painter.add(s.clone()); }
-                                }
-                                if ov.show_vel {
-                                    for s in ov.shapes_for_velocities(rect, &world.grid.latlon, &world.v_en) { painter.add(s.clone()); }
-                                }
-                                if ov.show_bounds {
-                                    for s in ov.shapes_for_boundaries(rect, &world.grid.latlon, &world.boundaries.edges) { painter.add(s.clone()); }
-                                }
+                                if ov.show_plates { for s in ov.shapes_for_plates(rect, &world.grid.latlon, &world.plates.plate_id) { painter.add(s.clone()); } }
+                                if ov.show_vel { for s in ov.shapes_for_velocities(rect, &world.grid.latlon, &world.v_en) { painter.add(s.clone()); } }
+                                if ov.show_bounds { for s in ov.shapes_for_boundaries(rect, &world.grid.latlon, &world.boundaries.edges) { painter.add(s.clone()); } }
                                 if ov.show_age {
                                     if ov.age_cache.is_none() { ov.rebuild_age_shapes(rect, &world.grid.latlon, &world.age_myr); }
                                     for s in ov.age_shapes() { painter.add(s.clone()); }
@@ -539,9 +545,13 @@ fn main() {
                                         );
                                         ov.rebuild_subduction_meshes(rect, &world.grid.latlon, &sub_res.masks);
                                     }
-                                    if let Some(v) = &ov.subd_trench { for s in v { painter.add(s.clone()); } }
-                                    if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
-                                    if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
+                                    if ov.show_subduction {
+                                        if let Some(v) = &ov.subd_trench { for s in v { painter.add(s.clone()); } }
+                                        if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
+                                        if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
+                                    } else {
+                                        ov.subd_trench = None; ov.subd_arc = None; ov.subd_backarc = None;
+                                    }
                                 }
                                 if ov.show_transforms || ov.apply_sea_level || ov.show_continents || ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
                                     if (ov.trans_pull.is_none() && ov.trans_rest.is_none()) || continents_dirty || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
@@ -584,7 +594,7 @@ fn main() {
                                         );
                                         // Transforms: compute delta from baseline
                                         let mut depth_trans = depth_base.clone();
-                                        let (trans_masks, trans_stats) = engine::transforms::apply_transforms(
+                                        let (trans_masks, _trans_stats) = engine::transforms::apply_transforms(
                                             &world.grid, &world.boundaries, &world.plates.plate_id, &world.v_en, &mut depth_trans,
                                             engine::transforms::TransformParams {
                                                 tau_open_m_per_yr: ov.trans_tau_open_m_per_yr as f64,
@@ -594,10 +604,13 @@ fn main() {
                                                 basin_deepen_m: ov.trans_basin_deepen_m,
                                             }
                                         );
-                                        println!("[transforms] bands: pull_apart={} restraining={}", trans_stats.pull_apart_cells, trans_stats.restraining_cells);
-                                        ov.rebuild_transform_meshes(rect, &world.grid.latlon, &trans_masks);
-                                        ov.trans_pull_count = trans_stats.pull_apart_cells;
-                                        ov.trans_rest_count = trans_stats.restraining_cells;
+                                        if ov.show_transforms {
+                                            ov.rebuild_transform_meshes(rect, &world.grid.latlon, &trans_masks);
+                                        } else {
+                                            ov.trans_pull = None; ov.trans_rest = None;
+                                        }
+                                        ov.trans_pull_count = if let Some(v) = &ov.trans_pull { v.iter().map(|s| match s { egui::Shape::Mesh(m) => m.vertices.len()/4, _ => 0 }).sum() } else { 0 } as u32;
+                                        ov.trans_rest_count = if let Some(v) = &ov.trans_rest { v.iter().map(|s| match s { egui::Shape::Mesh(m) => m.vertices.len()/4, _ => 0 }).sum() } else { 0 } as u32;
                                         let mut final_depth = depth_subd;
                                         for i in 0..world.grid.cells {
                                             let delta_t = depth_trans[i] - depth_base[i];
@@ -690,8 +703,8 @@ fn main() {
                                              let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
                                              let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
                                              // Diagnostics for loads
-                                             let mut fmin = f32::INFINITY; 
-                                             let mut fmax = f32::NEG_INFINITY; 
+                                              let mut fmin = f32::INFINITY;
+                                              let mut fmax = f32::NEG_INFINITY;
                                              let mut fsum = 0.0f64;
                                              for &fi in &f_load {
                                                  if fi.is_finite() {
@@ -727,8 +740,8 @@ fn main() {
                                                  ov.flex_mesh = None;
                                              }
                                              // w diagnostics
-                                             let mut wmin = f32::INFINITY; 
-                                             let mut wmax = f32::NEG_INFINITY; 
+                                              let mut wmin = f32::INFINITY;
+                                              let mut wmax = f32::NEG_INFINITY;
                                              let mut wsum = 0.0f64;
                                              for &wi in &w {
                                                  if wi.is_finite() {
@@ -762,9 +775,11 @@ fn main() {
                                         ov.bathy_cache = None;
                                         continents_dirty = false;
                                     }
-                                    if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
-                                    if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
-                                    if ov.show_flexure { if let Some(m) = &ov.flex_mesh { painter.add(egui::Shape::mesh(m.clone())); } }
+                                    if ov.show_transforms {
+                                        if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
+                                        if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
+                                    } else { ov.trans_pull=None; ov.trans_rest=None; }
+                                    if ov.show_flexure { if let Some(m) = &ov.flex_mesh { ov.flex_overlay_count = m.vertices.len() / 4; painter.add(egui::Shape::mesh(m.clone())); } } else { ov.flex_mesh=None; ov.flex_overlay_count = 0; }
                                     if ov.show_continents {
                                         if let Some(m) = &ov.mesh_continents { painter.add(egui::Shape::mesh(m.clone())); }
                                         if let Some(m) = &ov.mesh_coastline { painter.add(egui::Shape::mesh(m.clone())); }
