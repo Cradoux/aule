@@ -40,6 +40,10 @@ pub struct World {
     pub area_m2: Vec<f32>,
     /// Last flexure residual ratio (r_out / max(1, r_in)) if flexure applied this step.
     pub last_flex_residual: f32,
+    /// Cumulative sediment thickness in meters (≥0), updated by surface processes.
+    pub sediment_m: Vec<f32>,
+    /// Last surface-processes stats (if applied this step).
+    pub last_surface_stats: Option<crate::surface::SurfaceStats>,
     /// Continents change epoch counter (bump when C/th_c change applied).
     pub epoch_continents: u64,
     /// Last epoch when sea-level was re-baselined (to debounce auto mode).
@@ -67,6 +71,7 @@ impl World {
         let depth_m = vec![0.0f32; grid.cells];
         let c = vec![0.0f32; grid.cells];
         let th_c_m = vec![0.0f32; grid.cells];
+        let sediment_m = vec![0.0f32; grid.cells];
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
         // Precompute area in m^2 using Earth radius
         const R_EARTH_M: f64 = 6_371_000.0;
@@ -88,6 +93,8 @@ impl World {
             sea_level_ref: None,
             area_m2,
             last_flex_residual: 0.0,
+            sediment_m,
+            last_surface_stats: None,
             epoch_continents: 0,
             last_rebaseline_epoch: 0,
         }
@@ -121,6 +128,10 @@ pub struct StepParams {
     pub do_accretion: bool,
     /// Enable continental rifting and passive margins
     pub do_rifting: bool,
+    /// Enable surface processes (erosion, diffusion, sediment transport/deposition)
+    pub do_surface: bool,
+    /// Parameter set for surface processes.
+    pub surface_params: crate::surface::SurfaceParams,
 }
 
 /// Result summary for one step.
@@ -416,9 +427,62 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
         world.epoch_continents = world.epoch_continents.wrapping_add(1);
     }
 
+    // H.5) Surface processes after tectonics, before flexure/isostasy
+    world.last_surface_stats = None;
+    // If flexure should be applied after surface coupling, skip the later generic flexure stage
+    let mut run_flexure_stage_i = sp.do_flexure;
+    if sp.do_surface {
+        let stats = crate::surface::apply_surface_processes(
+            &world.grid,
+            &world.c,
+            &mut world.depth_m,
+            &mut world.sediment_m,
+            &world.area_m2,
+            &sp.surface_params,
+            sp.dt_myr,
+        );
+        // Log once per step when enabled
+        let res_pct = if stats.eroded_m3 > 0.0 { stats.residual_m3 / stats.eroded_m3 } else { 0.0 };
+        println!(
+            "[surface] eroded={:.2e} m³ deposited={:.2e} m³ residual={:+.3}% max_ero={:.2} m max_dep={:.2} m",
+            stats.eroded_m3, stats.deposited_m3, res_pct * 100.0, stats.max_erosion_m, stats.max_deposition_m
+        );
+        world.last_surface_stats = Some(stats);
+        if sp.surface_params.couple_flexure {
+            // Run a quick Winkler-like flexure response to approximate coupling
+            world.last_flex_residual = -1.0;
+            let lp = flexure_loads::LoadParams {
+                rho_w: 1030.0,
+                rho_c: 2900.0,
+                g: 9.81,
+                sea_level_m: 0.0,
+            };
+            let f_load = flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+            let k = 3.0e8f32;
+            let mut w = vec![0.0f32; n];
+            for i in 0..n {
+                w[i] = f_load[i] / k;
+            }
+            let mut r0: f64 = 0.0;
+            let mut r1: f64 = 0.0;
+            for i in 0..n {
+                let fi = f_load[i] as f64;
+                r0 += fi * fi;
+                let ri = fi - (k as f64) * (w[i] as f64);
+                r1 += ri * ri;
+            }
+            world.last_flex_residual = ((r1.sqrt()) / (r0.sqrt().max(1.0))) as f32;
+            for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) {
+                *d = (*d + *wi).clamp(-8000.0, 8000.0);
+            }
+            // Skip generic flexure stage below if we already coupled here
+            run_flexure_stage_i = false;
+        }
+    }
+
     // I) flexure (Winkler placeholder)
     world.last_flex_residual = -1.0;
-    if sp.do_flexure {
+    if run_flexure_stage_i {
         let lp =
             flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
         let f_load = flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
