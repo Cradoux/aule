@@ -228,6 +228,9 @@ fn main() {
     let mut dt_myr: f32 = 1.0;
     let mut steps_per_sec: u32 = 5;
     let mut step_accum_s: f32 = 0.0;
+    // Snapshots
+    let mut snapshot_every_myr: f32 = 5.0;
+    let mut next_snapshot_t: f64 = 0.0;
 
     event_loop
     .run(move |event, elwt| {
@@ -269,6 +272,19 @@ fn main() {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  C: Continents  H: HUD");
                                     ui.separator();
+                                    ui.group(|ui| {
+                                        ui.heading("Snapshots");
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut snapshot_every_myr).clamp_range(0.1..=1000.0).speed(0.1).prefix("every "));
+                                            ui.label("Myr");
+                                            if ui.button("Write now").clicked() {
+                                                let name = format!("depth_t{:08.1}Myr.csv", world.clock.t_myr);
+                                                let path = std::path::Path::new(&name);
+                                                let _ = engine::snapshots::write_csv_depth(path, world.clock.t_myr, &world.depth_m);
+                                                println!("[snapshot] wrote {} (N={})", name, world.depth_m.len());
+                                            }
+                                        });
+                                    });
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
                                         nplates,
@@ -286,7 +302,21 @@ fn main() {
                                     if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
                                     if ui.button("⏭").clicked() {
                                         let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
-                                        let _ = engine::stepper::step(&mut world, &p);
+                                        let stats = engine::stepper::step(&mut world, &p);
+                                        // Log one line for manual step
+                                        let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                        let land_area: f64 = world
+                                            .depth_m
+                                            .iter()
+                                            .zip(world.area_m2.iter())
+                                            .filter(|(&d, _)| d <= 0.0)
+                                            .map(|(_, &a)| a as f64)
+                                            .sum();
+                                        let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                        println!(
+                                            "[step] t={:.1} Myr dt={:.1} Myr | div={} conv={} trans={} | land={:.1}% | residual flex={:.3e}",
+                                            stats.t_myr, dt_myr, world.boundaries.stats.divergent, world.boundaries.stats.convergent, world.boundaries.stats.transform, land_frac * 100.0, ov.last_residual
+                                        );
                                         ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
                                     }
                                     ui.separator();
@@ -962,10 +992,38 @@ fn main() {
                             step_accum_s += dt;
                             let step_interval = 1.0f32 / (steps_per_sec.max(1) as f32);
                             let mut steps_this_frame = 0u32;
-                            let max_steps_frame = 4u32; // clamp to keep FPS ~60
+                            let max_steps_frame = 8u32; // clamp to keep FPS ~60
                             while step_accum_s >= step_interval && steps_this_frame < max_steps_frame {
                                 let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
-                                let _ = engine::stepper::step(&mut world, &p);
+                                let stats = engine::stepper::step(&mut world, &p);
+                                // Step log (one line per step)
+                                let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                let land_area: f64 = world
+                                    .depth_m
+                                    .iter()
+                                    .zip(world.area_m2.iter())
+                                    .filter(|(&d, _)| d <= 0.0)
+                                    .map(|(_, &a)| a as f64)
+                                    .sum();
+                                let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                println!(
+                                    "[step] t={:.1} Myr dt={:.1} Myr | div={} conv={} trans={} | land={:.1}% | residual flex={:.3e}",
+                                    stats.t_myr, dt_myr, world.boundaries.stats.divergent, world.boundaries.stats.convergent, world.boundaries.stats.transform, land_frac * 100.0, ov.last_residual
+                                );
+                                // Periodic snapshots when crossing threshold(s)
+                                if snapshot_every_myr > 0.0 {
+                                    while stats.t_myr + 1e-9 >= next_snapshot_t {
+                                        if next_snapshot_t > 0.0 || stats.t_myr >= snapshot_every_myr as f64 {
+                                            let name = format!("depth_t{:08.1}Myr.csv", stats.t_myr);
+                                            let path = std::path::Path::new(&name);
+                                            let _ = engine::snapshots::write_csv_depth(path, stats.t_myr, &world.depth_m);
+                                            println!("[snapshot] wrote {} (N={})", name, world.depth_m.len());
+                                        }
+                                        next_snapshot_t = if next_snapshot_t == 0.0 { snapshot_every_myr as f64 } else { next_snapshot_t + snapshot_every_myr as f64 };
+                                        if next_snapshot_t.is_infinite() || next_snapshot_t.is_nan() { break; }
+                                        if next_snapshot_t > stats.t_myr + 1000.0 { break; }
+                                    }
+                                }
                                 step_accum_s -= step_interval;
                                 steps_this_frame += 1;
                             }
