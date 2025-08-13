@@ -30,6 +30,74 @@ impl Plates {
     }
 }
 
+/// Compute per-cell 3D surface velocities (m/yr) using current `plate_id` and plate kinematics.
+pub fn velocity_field_m_per_yr(grid: &Grid, plates: &Plates, plate_id: &[u16]) -> Vec<[f32; 3]> {
+    let mut vel = vec![[0.0f32, 0.0f32, 0.0f32]; grid.cells];
+    for i in 0..grid.cells {
+        let r = [grid.pos_xyz[i][0] as f64, grid.pos_xyz[i][1] as f64, grid.pos_xyz[i][2] as f64];
+        let pid = plate_id[i] as usize;
+        let a = [
+            plates.pole_axis[pid][0] as f64,
+            plates.pole_axis[pid][1] as f64,
+            plates.pole_axis[pid][2] as f64,
+        ];
+        let omega = plates.omega_rad_yr[pid] as f64;
+        // linear velocity v = (omega * axis) × (R * r)
+        let w = [a[0] * omega, a[1] * omega, a[2] * omega];
+        let rp = [r[0] * RADIUS_M, r[1] * RADIUS_M, r[2] * RADIUS_M];
+        let v = cross(w, rp);
+        vel[i] = [v[0] as f32, v[1] as f32, v[2] as f32];
+    }
+    vel
+}
+
+/// Compute per-cell local east/north velocity components (m/yr) for the given `plate_id`.
+pub fn velocity_en_m_per_yr(grid: &Grid, plates: &Plates, plate_id: &[u16]) -> Vec<[f32; 2]> {
+    let mut vel_en = vec![[0.0f32, 0.0f32]; grid.cells];
+    for i in 0..grid.cells {
+        let p = [grid.pos_xyz[i][0] as f64, grid.pos_xyz[i][1] as f64, grid.pos_xyz[i][2] as f64];
+        let pid = plate_id[i] as usize;
+        let a = [
+            plates.pole_axis[pid][0] as f64,
+            plates.pole_axis[pid][1] as f64,
+            plates.pole_axis[pid][2] as f64,
+        ];
+        let omega = plates.omega_rad_yr[pid] as f64;
+        let w = [a[0] * omega, a[1] * omega, a[2] * omega];
+        let rp = [p[0] * RADIUS_M, p[1] * RADIUS_M, p[2] * RADIUS_M];
+        let v = cross(w, rp);
+        let east = normalize(cross([0.0, 0.0, 1.0], p));
+        let north = normalize(cross(p, east));
+        vel_en[i] = [dot(v, east) as f32, dot(v, north) as f32];
+    }
+    vel_en
+}
+
+/// Rotate a unit vector `r` about `axis` (unit) by angle `theta` (radians) using Rodrigues formula.
+pub fn rotate_point(axis: [f32; 3], theta: f32, r: [f32; 3]) -> [f32; 3] {
+    let k = [axis[0] as f64, axis[1] as f64, axis[2] as f64];
+    let rr = [r[0] as f64, r[1] as f64, r[2] as f64];
+    let ct = (theta as f64).cos();
+    let st = (theta as f64).sin();
+    let kxr = cross(k, rr);
+    let kdotr = dot(k, rr);
+    let term1 = [rr[0] * ct, rr[1] * ct, rr[2] * ct];
+    let term2 = [kxr[0] * st, kxr[1] * st, kxr[2] * st];
+    let term3 = [k[0] * kdotr * (1.0 - ct), k[1] * kdotr * (1.0 - ct), k[2] * kdotr * (1.0 - ct)];
+    let out = [
+        term1[0] + term2[0] + term3[0],
+        term1[1] + term2[1] + term3[1],
+        term1[2] + term2[2] + term3[2],
+    ];
+    // Normalize to unit length to mitigate drift
+    let n = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+    if n > 0.0 {
+        [(out[0] / n) as f32, (out[1] / n) as f32, (out[2] / n) as f32]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
 fn farthest_point_seeds(grid: &Grid, k: u32, seed: u64) -> Vec<[f64; 3]> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let first = (rng.next_u32() as usize) % grid.cells;

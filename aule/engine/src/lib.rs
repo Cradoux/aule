@@ -33,6 +33,8 @@ pub mod isostasy;
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// Semi-Lagrangian advection helpers (CPU, deterministic).
+pub mod sl_advect;
 /// Snapshot IO utilities (CSV/binary)
 pub mod snapshots;
 /// World stepper.

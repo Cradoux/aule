@@ -302,7 +302,7 @@ fn main() {
                                     ui.separator();
                                     if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
                                     if ui.button("⏭").clicked() {
-                                        let sp = engine::world::StepParams {
+                                let sp = engine::world::StepParams {
                                             dt_myr: dt_myr as f64,
                                             do_flexure: ov.enable_flexure,
                                             do_isostasy: ov.apply_sea_level,
@@ -311,6 +311,7 @@ fn main() {
                                             do_continents: ov.continents_apply,
                                             do_ridge_birth: true,
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
+                                    do_rigid_motion: ov.kin_enable,
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -335,6 +336,13 @@ fn main() {
                                         "max arrows={} max strokes={} max subd={}  scale={:.2} px/cm/yr  v_floor={:.2} cm/yr  FPS: {:.0}",
                                         ov.max_arrows_slider, ov.max_bounds_slider, ov.max_subd_slider, ov.vel_scale_px_per_cm_yr, ov.v_floor_cm_per_yr, fps
                                     ));
+                                });
+                                ui.separator();
+                                ui.collapsing("Kinematics (K)", |ui| {
+                                    let mut changed = false;
+                                    changed |= ui.checkbox(&mut ov.kin_enable, "Enable rigid motion").changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.kin_trail_steps, 0..=5).text("Trail steps")).changed();
+                                    if changed { ov.bounds_cache=None; ov.plates_cache=None; }
                                 });
                                 ui.separator();
                                 // Map color HUD (T-131)
@@ -973,6 +981,29 @@ fn main() {
                                         if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
                                         if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
                                     } else { ov.trans_pull=None; ov.trans_rest=None; }
+                                    // Drift trails for plate boundaries (simple midpoint dots)
+                                    if ov.kin_trail_steps > 0 {
+                                        if ov.kin_trails.is_none() { ov.kin_trails = Some(std::collections::HashMap::new()); }
+                                        if let Some(map) = &mut ov.kin_trails {
+                                            let edges = &world.boundaries.edges;
+                                            let step_e = (edges.len() / (ov.max_bounds_slider.max(1) as usize)).max(1);
+                                            for &(u, v, _) in edges.iter().step_by(step_e) {
+                                                let pu = overlay::project_equirect(world.grid.latlon[u as usize][0], world.grid.latlon[u as usize][1], rect);
+                                                let pv = overlay::project_equirect(world.grid.latlon[v as usize][0], world.grid.latlon[v as usize][1], rect);
+                                                let center = overlay::wrap_midpoint_equirect(pu, pv, rect);
+                                                let key = if u < v { (u, v) } else { (v, u) };
+                                                let entry = map.entry(key).or_insert_with(Vec::new);
+                                                entry.push(center);
+                                                if entry.len() as u32 > ov.kin_trail_steps { entry.remove(0); }
+                                                let n = entry.len();
+                                                for (i, p) in entry.iter().enumerate() {
+                                                    let a = ((i + 1) as f32) / (n as f32);
+                                                    let col = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (a * 80.0) as u8);
+                                                    painter.add(egui::Shape::circle_filled(*p, 0.8, col));
+                                                }
+                                            }
+                                        }
+                                    } else { ov.kin_trails = None; }
                                     if ov.show_flexure { if let Some(m) = &ov.flex_mesh { ov.flex_overlay_count = m.vertices.len() / 4; painter.add(egui::Shape::mesh(m.clone())); } } else { ov.flex_mesh=None; ov.flex_overlay_count = 0; }
                                     if ov.show_continents {
                                         if let Some(m) = &ov.mesh_continents { painter.add(egui::Shape::mesh(m.clone())); }
@@ -1057,6 +1088,7 @@ fn main() {
                                     do_continents: ov.continents_apply,
                                     do_ridge_birth: true,
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
+                                    do_rigid_motion: ov.kin_enable,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)

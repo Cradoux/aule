@@ -2,6 +2,7 @@ use egui::{
     epaint::{Mesh, Shape, Vertex, WHITE_UV},
     Color32, Pos2, Rect, Stroke, Vec2,
 };
+use std::collections::HashMap;
 
 const R_EARTH_M: f32 = 6_371_000.0;
 
@@ -20,6 +21,10 @@ pub struct OverlayState {
     pub show_plates: bool,
     pub show_vel: bool,
     pub show_bounds: bool,
+    // Kinematics (rigid plates)
+    pub kin_enable: bool,
+    pub kin_trail_steps: u32,
+    pub kin_trails: Option<HashMap<(u32, u32), Vec<Pos2>>>,
 
     // HUD parameters
     pub vel_scale_px_per_cm_yr: f32, // px per (cm/yr)
@@ -170,6 +175,9 @@ impl Default for OverlayState {
             show_plates: false,
             show_vel: false,
             show_bounds: false,
+            kin_enable: true,
+            kin_trail_steps: 0,
+            kin_trails: None,
             vel_scale_px_per_cm_yr: vel_scale_default,
             max_arrows_slider: max_default,
             max_bounds_slider: max_default,
@@ -335,7 +343,7 @@ pub fn project_equirect(lat: f32, lon: f32, rect: Rect) -> Pos2 {
 /// If the segment crosses the antimeridian (|dx| > 0.5*width), virtually unwrap one
 /// endpoint so the midpoint is computed along the shorter wrapped arc, then wrap the
 /// result back to the viewport.
-fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
+pub fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
     let w = rect.width();
     let x1 = pu.x;
     let mut x2 = pv.x;
