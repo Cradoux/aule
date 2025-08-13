@@ -53,13 +53,11 @@ pub fn apply_transforms(
     assert_eq!(depth_m.len(), grid.cells);
     assert_eq!(plate_id.len(), grid.cells);
 
-    // Precompute unit positions and world velocities
+    // Precompute unit positions
     let mut rhat: Vec<[f64; 3]> = Vec::with_capacity(grid.cells);
     for p in &grid.pos_xyz {
         rhat.push(geo::normalize([p[0] as f64, p[1] as f64, p[2] as f64]));
     }
-    let vel_w: Vec<[f64; 3]> =
-        rhat.iter().enumerate().map(|(i, &rh)| geo::en_to_world(rh, v_en[i])).collect();
 
     // Seeds for pull-apart vs restraining bands
     let mut seeds_pull: Vec<u32> = Vec::new();
@@ -82,41 +80,19 @@ pub fn apply_transforms(
         let u = ek.u;
         let v = ek.v;
         from_boundaries += 1;
-        let u_idx = u as usize;
-        let v_idx = v as usize;
-        let rh_u = rhat[u_idx];
-        let rh_v = rhat[v_idx];
-        // Tangent from u to v at midpoint direction
-        let t_dir = geo::normalize(geo::cross(rh_u, rh_v));
-        // Relative velocity in world coords
-        let dv = [
-            vel_w[v_idx][0] - vel_w[u_idx][0],
-            vel_w[v_idx][1] - vel_w[u_idx][1],
-            vel_w[v_idx][2] - vel_w[u_idx][2],
-        ];
-        let n_hat = geo::normalize(geo::cross(
-            t_dir,
-            geo::normalize([
-                (rh_u[0] + rh_v[0]) * 0.5,
-                (rh_u[1] + rh_v[1]) * 0.5,
-                (rh_u[2] + rh_v[2]) * 0.5,
-            ]),
-        ));
-        let t_comp = geo::dot(dv, t_dir).abs();
-        let n_comp = geo::dot(dv, n_hat).abs();
-        t_min = t_min.min(t_comp);
-        t_max = t_max.max(t_comp);
-        t_sum += t_comp;
-        n_min = n_min.min(n_comp);
-        n_max = n_max.max(n_comp);
-        n_sum += n_comp;
-        // Treat boundary classification as ground truth for transform.
+        let t_abs = (ek.t_m_per_yr as f64).abs();
+        let n_abs = (ek.n_m_per_yr as f64).abs();
+        t_min = t_min.min(t_abs);
+        t_max = t_max.max(t_abs);
+        t_sum += t_abs;
+        n_min = n_min.min(n_abs);
+        n_max = n_max.max(n_abs);
+        n_sum += n_abs;
         // Only gate by tangential magnitude to drop numerically dead edges.
-        if t_comp >= params.min_tangential_m_per_yr {
+        if t_abs >= params.min_tangential_m_per_yr {
             passing += 1;
-            // Shear sense using signed projection onto t_dir from u->v
-            let shear_sign = geo::dot(dv, t_dir);
-            if shear_sign >= 0.0 {
+            // Shear sense from stored signed t_m_per_yr (aligned with stored t_hat)
+            if ek.t_m_per_yr >= 0.0 {
                 // pull on u side, restraining on v side
                 seeds_pull.push(u);
                 seeds_rest.push(v);

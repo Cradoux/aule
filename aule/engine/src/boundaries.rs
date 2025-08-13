@@ -145,13 +145,14 @@ impl Boundaries {
                 ];
                 let dv = [vu[0] - vv[0], vu[1] - vv[1], vu[2] - vv[2]];
                 let n = dot(dv, n_hat);
-                let t = dot(dv, t_hat).abs();
+                let t_signed = dot(dv, t_hat);
+                let t_abs = t_signed.abs();
 
                 let class = if n > tau {
                     1u8 // divergent
                 } else if n < -tau {
                     2u8 // convergent
-                } else if t > n.abs() {
+                } else if t_abs > n.abs() {
                     3u8 // transform
                 } else {
                     0u8 // below threshold; ignore
@@ -185,11 +186,15 @@ impl Boundaries {
                         n_hat: [n_hat[0] as f32, n_hat[1] as f32, n_hat[2] as f32],
                         t_hat: [t_hat[0] as f32, t_hat[1] as f32, t_hat[2] as f32],
                         n_m_per_yr: n as f32,
-                        t_m_per_yr: t as f32,
+                        t_m_per_yr: t_signed as f32,
                     });
                 }
             }
         }
+
+        // Deterministic ordering
+        edges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        edge_kin.sort_unstable_by(|a, b| a.u.cmp(&b.u).then(a.v.cmp(&b.v)));
 
         Self { b, edges, edge_kin, stats }
     }
