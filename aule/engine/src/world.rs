@@ -153,6 +153,18 @@ pub struct StepStats {
     pub flex_residual: f32,
 }
 
+/// Execute a function for each tile in a `TilePlan` in deterministic order.
+/// The closure receives a borrowed `Tile` and a scratch area (caller-owned) for staging.
+pub fn for_each_tile<F>(grid: &Grid, plan: &crate::tileplan::TilePlan, mut f: F)
+where
+    F: FnMut(&crate::tileplan::Tile),
+{
+    let _ = grid; // grid is provided to mirror planned API and for future use
+    for t in &plan.tiles {
+        f(t);
+    }
+}
+
 /// Execute one evolution step with a minimal CPU pipeline.
 ///
 /// Order:
