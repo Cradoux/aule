@@ -29,6 +29,8 @@ pub mod grid;
 pub mod hypsometry;
 /// Global sea-level (isostasy MVP) utilities.
 pub mod isostasy;
+/// Orogeny (C–C collision) bilateral thickening/uplift.
+pub mod orogeny;
 /// Plates seeding and velocities.
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).

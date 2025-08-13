@@ -302,7 +302,7 @@ fn main() {
                                     ui.separator();
                                     if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
                                     if ui.button("⏭").clicked() {
-                                let sp = engine::world::StepParams {
+                                        let sp = engine::world::StepParams {
                                             dt_myr: dt_myr as f64,
                                             do_flexure: ov.enable_flexure,
                                             do_isostasy: ov.apply_sea_level,
@@ -312,6 +312,7 @@ fn main() {
                                             do_ridge_birth: true,
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                     do_rigid_motion: ov.kin_enable,
+                                            do_orogeny: false,
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -1089,6 +1090,7 @@ fn main() {
                                     do_ridge_birth: true,
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                     do_rigid_motion: ov.kin_enable,
+                                    do_orogeny: false,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)
