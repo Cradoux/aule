@@ -260,6 +260,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::A)) { age_plot.show = !age_plot.show; }
                             if ctx.input(|i| i.key_pressed(egui::Key::M)) { ov.show_map_color_panel = !ov.show_map_color_panel; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::S)) { ov.surface_enable = !ov.surface_enable; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
@@ -315,6 +316,20 @@ fn main() {
                                             do_orogeny: false,
                                             do_accretion: false,
                                             do_rifting: false,
+                                            do_surface: ov.surface_enable,
+                                            surface_params: engine::surface::SurfaceParams {
+                                                k_stream: ov.surf_k_stream,
+                                                m_exp: ov.surf_m_exp,
+                                                n_exp: ov.surf_n_exp,
+                                                k_diff: ov.surf_k_diff,
+                                                k_tr: ov.surf_k_tr,
+                                                p_exp: ov.surf_p_exp,
+                                                q_exp: ov.surf_q_exp,
+                                                rho_sed: ov.surf_rho_sed,
+                                                min_slope: ov.surf_min_slope,
+                                                subcycles: ov.surf_subcycles.max(1),
+                                                couple_flexure: ov.surf_couple_flexure,
+                                            },
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -391,6 +406,34 @@ fn main() {
                                     changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
                                     if changed { ov.max_points_flex = mp as usize; flex_dirty = true; }
                                     ui.label(format!("residual ratio = {:.3}", ov.last_residual));
+                                });
+                                // Surface processes HUD
+                                ui.collapsing("Surface (S)", |ui| {
+                                    ui.checkbox(&mut ov.surface_enable, "Enable surface processes");
+                                    ui.checkbox(&mut ov.surf_couple_flexure, "Couple to flexure");
+                                    ui.add(egui::Slider::new(&mut ov.surf_k_stream, 1.0e-6..=1.0e-4).logarithmic(true).text("K_stream"));
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::Slider::new(&mut ov.surf_m_exp, 0.3..=0.6).text("m"));
+                                        ui.add(egui::Slider::new(&mut ov.surf_n_exp, 0.8..=1.5).text("n"));
+                                    });
+                                    ui.add(egui::Slider::new(&mut ov.surf_k_diff, 0.05..=0.5).logarithmic(true).text("κ_diff (m²/yr)"));
+                                    ui.add(egui::Slider::new(&mut ov.surf_k_tr, 0.01..=0.3).logarithmic(true).text("K_transport"));
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::Slider::new(&mut ov.surf_p_exp, 1.0..=2.0).text("p"));
+                                        ui.add(egui::Slider::new(&mut ov.surf_q_exp, 0.5..=1.5).text("q"));
+                                    });
+                                    ui.add(egui::Slider::new(&mut ov.surf_rho_sed, 1000.0..=2500.0).text("ρ_sed (kg/m³)"));
+                                    ui.add(egui::Slider::new(&mut ov.surf_min_slope, 1.0e-5..=1.0e-3).logarithmic(true).text("min slope"));
+                                    let mut sc = ov.surf_subcycles;
+                                    let changed_sc = ui.add(egui::Slider::new(&mut sc, 1..=10).text("Subcycles")).changed();
+                                    if changed_sc { ov.surf_subcycles = sc; }
+                                    if let Some(stats) = world.last_surface_stats {
+                                        let pct = if stats.eroded_m3 > 0.0 { stats.residual_m3 / stats.eroded_m3 } else { 0.0 };
+                                        ui.label(format!(
+                                            "Erosion={:.2e} m³  Deposition={:.2e} m³  Residual={:+.2}%  max_ero={:.2} m  max_dep={:.2} m",
+                                            stats.eroded_m3, stats.deposited_m3, pct * 100.0, stats.max_erosion_m, stats.max_deposition_m
+                                        ));
+                                    }
                                 });
                                 ui.collapsing("Continents (C)", |ui| {
                                     let mut changed = false;
@@ -1095,6 +1138,20 @@ fn main() {
                                     do_orogeny: false,
                                     do_accretion: false,
                                     do_rifting: false,
+                                    do_surface: ov.surface_enable,
+                                    surface_params: engine::surface::SurfaceParams {
+                                        k_stream: ov.surf_k_stream,
+                                        m_exp: ov.surf_m_exp,
+                                        n_exp: ov.surf_n_exp,
+                                        k_diff: ov.surf_k_diff,
+                                        k_tr: ov.surf_k_tr,
+                                        p_exp: ov.surf_p_exp,
+                                        q_exp: ov.surf_q_exp,
+                                        rho_sed: ov.surf_rho_sed,
+                                        min_slope: ov.surf_min_slope,
+                                        subcycles: ov.surf_subcycles.max(1),
+                                        couple_flexure: ov.surf_couple_flexure,
+                                    },
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)

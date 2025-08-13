@@ -136,6 +136,21 @@ pub struct OverlayState {
 
     pub flex_overlay_count: usize,
 
+    // Surface processes (T-450)
+    pub show_surface_panel: bool,
+    pub surface_enable: bool,
+    pub surf_k_stream: f32,
+    pub surf_m_exp: f32,
+    pub surf_n_exp: f32,
+    pub surf_k_diff: f32,
+    pub surf_k_tr: f32,
+    pub surf_p_exp: f32,
+    pub surf_q_exp: f32,
+    pub surf_rho_sed: f32,
+    pub surf_min_slope: f32,
+    pub surf_subcycles: u32,
+    pub surf_couple_flexure: bool,
+
     // Viewport tracking and debounce
     pub last_map_rect_px: [i32; 4], // x,y,w,h rounded
     pub viewport_epoch: u64,
@@ -270,6 +285,19 @@ impl Default for OverlayState {
             apply_gain_to_depth: false,
 
             flex_overlay_count: 0,
+            show_surface_panel: true,
+            surface_enable: false,
+            surf_k_stream: 3.0e-6,
+            surf_m_exp: 0.5,
+            surf_n_exp: 1.0,
+            surf_k_diff: 0.1,
+            surf_k_tr: 0.1,
+            surf_p_exp: 1.3,
+            surf_q_exp: 1.0,
+            surf_rho_sed: 1800.0,
+            surf_min_slope: 1.0e-4,
+            surf_subcycles: 4,
+            surf_couple_flexure: false,
 
             last_map_rect_px: [0, 0, 0, 0],
             viewport_epoch: 0,

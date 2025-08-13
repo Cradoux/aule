@@ -15,6 +15,8 @@ pub mod flexure_loads;
 pub mod accretion;
 /// Synthetic continental mask generator and applier.
 pub mod continent;
+/// Erosion helpers (stream-power law, slopes, drainage area).
+pub mod erosion;
 /// Field and tiling views.
 pub mod fields;
 /// 1D elastic plate flexure (CPU reference; analytic + CG solver).
@@ -41,6 +43,8 @@ pub mod ridge;
 pub mod rifting;
 /// Long-term eustatic sea-level controller.
 pub mod sea_level;
+/// Sediment transport/deposition helpers.
+pub mod sediment;
 /// Semi-Lagrangian advection helpers (CPU, deterministic).
 pub mod sl_advect;
 /// Snapshot IO utilities (CSV/binary)
@@ -49,6 +53,8 @@ pub mod snapshots;
 pub mod stepper;
 /// Subduction bands and bathymetry adjustments (CPU pass).
 pub mod subduction;
+/// Fluvial erosion, hillslope diffusion, and sediment transport/deposition orchestrator.
+pub mod surface;
 /// Transform pull-apart/restraining bands (CPU pass).
 pub mod transforms;
 /// World state.
