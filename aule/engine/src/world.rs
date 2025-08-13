@@ -27,6 +27,19 @@ pub struct World {
     pub v_en: Vec<[f32; 2]>,
     /// Simulation clock.
     pub clock: Clock,
+    /// Reference sea-level volume and area captured after baseline age→depth
+    pub sea_level_ref: Option<SeaLevelRef>,
+    /// Precomputed per-cell areas in m^2 on the sphere (4πR^2 scaled)
+    pub area_m2: Vec<f32>,
+}
+
+/// Reference sea-level bookkeeping
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeaLevelRef {
+    /// Target ocean volume at reference state (m^3)
+    pub volume_m3: f64,
+    /// Ocean area used at reference state (m^2)
+    pub ocean_area_m2: f64,
 }
 
 impl World {
@@ -40,6 +53,23 @@ impl World {
         let age_myr = vec![0.0f32; grid.cells];
         let depth_m = vec![0.0f32; grid.cells];
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
-        Self { grid, plates, boundaries, age_myr, depth_m, v_en, clock }
+        // Precompute area in m^2 using Earth radius
+        const R_EARTH_M: f64 = 6_371_000.0;
+        let scale = 4.0 * std::f64::consts::PI * R_EARTH_M * R_EARTH_M;
+        let mut area_m2: Vec<f32> = Vec::with_capacity(grid.cells);
+        for &a in &grid.area {
+            area_m2.push((a as f64 * scale) as f32);
+        }
+        Self {
+            grid,
+            plates,
+            boundaries,
+            age_myr,
+            depth_m,
+            v_en,
+            clock,
+            sea_level_ref: None,
+            area_m2,
+        }
     }
 }

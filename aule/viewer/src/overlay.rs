@@ -3,6 +3,16 @@ use egui::{
     Color32, Pos2, Rect, Stroke, Vec2,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ContKey {
+    pub seed: u64,
+    pub n: u32,
+    pub radius_km: u32,
+    pub falloff_km: u32,
+    pub f: u32,
+}
+
+#[allow(dead_code)]
 pub struct OverlayState {
     pub show_hud: bool,
     pub show_plates: bool,
@@ -34,6 +44,12 @@ pub struct OverlayState {
     pub v_floor_cm_per_yr: f32,
     pub age_minmax: (f32, f32),
     pub depth_minmax: (f32, f32),
+    pub lock_bathy_scale: bool,
+    pub bathy_min_max: (f32, f32),
+    pub target_ocean_fraction: f32,
+    pub extra_offset_m: f32,
+    pub apply_sea_level: bool,
+    pub last_isostasy_offset_m: f64,
     pub(crate) age_cache: Option<Vec<Shape>>,
     pub(crate) bathy_cache: Option<Vec<Shape>>,
 
@@ -68,6 +84,23 @@ pub struct OverlayState {
     pub trans_max_points: u32,
     pub trans_pull_count: u32,
     pub trans_rest_count: u32,
+
+    // Continents overlay/state
+    pub show_continents: bool,
+    pub cont_seed: u64,
+    pub cont_n: u32,
+    pub cont_radius_km: f64,
+    pub cont_falloff_km: f64,
+    pub cont_auto_amp: bool,
+    pub cont_target_land_frac: f32,
+    pub cont_manual_amp_m: f32,
+    pub cont_max_points: usize,
+    pub mesh_continents: Option<Mesh>,
+    pub mesh_coastline: Option<Mesh>,
+    pub cont_land_frac: f64,
+    pub cont_amp_applied_m: f32,
+    pub cont_key: Option<ContKey>,
+    pub cont_template: Option<Vec<f32>>,
 }
 
 impl Default for OverlayState {
@@ -99,6 +132,12 @@ impl Default for OverlayState {
             v_floor_cm_per_yr: 0.5,
             age_minmax: (0.0, 0.0),
             depth_minmax: (0.0, 0.0),
+            lock_bathy_scale: false,
+            bathy_min_max: (2600.0, 6000.0),
+            target_ocean_fraction: 0.70,
+            extra_offset_m: 0.0,
+            apply_sea_level: false,
+            last_isostasy_offset_m: 0.0,
             age_cache: None,
             bathy_cache: None,
             show_age_depth: false,
@@ -125,6 +164,22 @@ impl Default for OverlayState {
             trans_max_points: 10_000,
             trans_pull_count: 0,
             trans_rest_count: 0,
+
+            show_continents: false,
+            cont_seed: 1_234_567,
+            cont_n: 3,
+            cont_radius_km: 2200.0,
+            cont_falloff_km: 600.0,
+            cont_auto_amp: true,
+            cont_target_land_frac: 0.29,
+            cont_manual_amp_m: 2500.0,
+            cont_max_points: 20_000,
+            mesh_continents: None,
+            mesh_coastline: None,
+            cont_land_frac: 0.0,
+            cont_amp_applied_m: 0.0,
+            cont_key: None,
+            cont_template: None,
         }
     }
 }
@@ -447,15 +502,83 @@ impl OverlayState {
         self.age_cache = Some(shapes);
     }
 
-    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, latlon: &[[f32; 2]], depth_m: &[f32]) {
-        let mut shapes = Vec::with_capacity(latlon.len());
+    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
+        let mut shapes = Vec::with_capacity(grid.latlon.len());
         let (dmin, dmax) = self.depth_minmax;
-        for i in 0..latlon.len() {
-            let p = project_equirect(latlon[i][0], latlon[i][1], rect);
+        for (i, &ll) in grid.latlon.iter().enumerate() {
+            let p = project_equirect(ll[0], ll[1], rect);
             let col = blue_ramp(depth_m[i], dmin, dmax);
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }
+        // Draw 0 m coastline as thin black segments where any neighbor crosses zero
+        let mut coast = Vec::new();
+        for i in 0..grid.latlon.len() {
+            let di = depth_m[i];
+            for &n in &grid.n1[i] {
+                let j = n as usize;
+                let dj = depth_m[j];
+                if (di > 0.0 && dj <= 0.0) || (di <= 0.0 && dj > 0.0) {
+                    let pu = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
+                    let pv = project_equirect(grid.latlon[j][0], grid.latlon[j][1], rect);
+                    let center = Pos2::new((pu.x + pv.x) * 0.5, (pu.y + pv.y) * 0.5);
+                    let dir = (pv - pu).normalized();
+                    let orth = Vec2::new(-dir.y, dir.x);
+                    let half = orth * 1.0;
+                    coast.push(Shape::line_segment(
+                        [center - half, center + half],
+                        Stroke::new(1.0, Color32::BLACK),
+                    ));
+                }
+            }
+        }
+        shapes.extend(coast);
         self.bathy_cache = Some(shapes);
+    }
+
+    /// Build continent land mask and coastline meshes
+    pub fn rebuild_continent_meshes(
+        &mut self,
+        rect: Rect,
+        grid: &engine::grid::Grid,
+        depth_m: &[f32],
+        mask_land: &[bool],
+        cap_total: usize,
+    ) -> (Mesh, Mesh) {
+        // Land point cloud
+        let mut land_indices: Vec<usize> = Vec::new();
+        for (i, &is_land) in mask_land.iter().enumerate() {
+            if is_land {
+                land_indices.push(i);
+            }
+        }
+        let mut mesh_land = Mesh::default();
+        let mut mesh_coast = Mesh::default();
+        let total = land_indices.len().max(1);
+        let stride = (total / cap_total.max(1)).max(1);
+        let col_land = Color32::from_rgba_unmultiplied(120, 120, 120, 160);
+        let r = 1.2;
+        for &i in land_indices.iter().step_by(stride) {
+            let p = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
+            Self::mesh_add_dot(&mut mesh_land, p, r, col_land);
+        }
+        // Coastline: neighbors crossing 0 m
+        for i in 0..grid.latlon.len() {
+            let di = depth_m[i];
+            for &n in &grid.n1[i] {
+                let j = n as usize;
+                let dj = depth_m[j];
+                if (di > 0.0 && dj <= 0.0) || (di <= 0.0 && dj > 0.0) {
+                    let pu = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
+                    let pv = project_equirect(grid.latlon[j][0], grid.latlon[j][1], rect);
+                    let center = Pos2::new((pu.x + pv.x) * 0.5, (pu.y + pv.y) * 0.5);
+                    let dir = (pv - pu).normalized();
+                    let _orth = Vec2::new(-dir.y, dir.x);
+                    // Approximate thin segment by a small dot at the midpoint for performance
+                    Self::mesh_add_dot(&mut mesh_coast, center, 0.8, Color32::BLACK);
+                }
+            }
+        }
+        (mesh_land, mesh_coast)
     }
 
     pub fn age_shapes(&self) -> &[Shape] {

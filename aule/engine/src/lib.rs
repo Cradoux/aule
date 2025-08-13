@@ -6,16 +6,26 @@
 /// Steady-state oceanic age and bathymetry mapping.
 pub mod age;
 /// Plate boundary classification.
+/// Plate boundary classification.
 pub mod boundaries;
 pub use boundaries::{BoundaryStats, Boundaries, EdgeClass, EdgeKin};
+
+/// Synthetic continental mask generator and applier.
+pub mod continent;
 /// Field and tiling views.
 pub mod fields;
+/// 1D elastic plate flexure (CPU reference; analytic + CG solver).
+pub mod flexure;
+/// GPU flexure multigrid scaffold (WGSL).
+pub mod flexure_gpu;
 /// Geometric utilities used by solvers.
 pub mod geo;
 /// Minimal GPU helper for tests (T-020).
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
+/// Global sea-level (isostasy MVP) utilities.
+pub mod isostasy;
 /// Plates seeding and velocities.
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
