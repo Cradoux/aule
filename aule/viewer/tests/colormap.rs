@@ -5,7 +5,9 @@ fn parse_pal_increasing_and_minmax() {
     let pal = parse_pal(HYPS_DEFAULT_STR).expect("parse pal");
     assert!(pal.stops.len() >= 2);
     for i in 1..pal.stops.len() {
-        assert!(pal.stops[i].v.partial_cmp(&pal.stops[i - 1].v) == Some(std::cmp::Ordering::Greater));
+        assert!(
+            pal.stops[i].v.partial_cmp(&pal.stops[i - 1].v) == Some(std::cmp::Ordering::Greater)
+        );
     }
     assert!(pal.vmax > pal.vmin);
 }

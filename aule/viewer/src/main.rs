@@ -185,6 +185,8 @@ fn main() {
     let surface_format = gpu.config.format;
     let mut egui_renderer = EguiRenderer::new(&gpu.device, surface_format, None, 1);
     let mut ov = overlay::OverlayState::default();
+    // Edge-triggered snapshots state
+    let mut next_snapshot_t: f64 = f64::INFINITY;
     let mut flex = plot_flexure::FlexureUI::default();
     let mut age_plot = plot_age_depth::AgeDepthUIState::default();
     // T-020: Construct device field buffers sized to the grid (then drop)
@@ -228,6 +230,8 @@ fn main() {
     let mut dt_myr: f32 = 1.0;
     let mut steps_per_sec: u32 = 5;
     let mut step_accum_s: f32 = 0.0;
+    // Snapshots frequency (Myr)
+    let mut snapshot_every_myr: f32 = 5.0;
 
     event_loop
     .run(move |event, elwt| {
@@ -269,6 +273,19 @@ fn main() {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  C: Continents  H: HUD");
                                     ui.separator();
+                                    ui.group(|ui| {
+                                        ui.heading("Snapshots");
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut snapshot_every_myr).clamp_range(0.1..=1000.0).speed(0.1).prefix("every "));
+                                            ui.label("Myr");
+                                            if ui.button("Write now").clicked() {
+                                                let name = format!("depth_t{:08.1}Myr.csv", world.clock.t_myr);
+                                                let path = std::path::Path::new(&name);
+                                                let _ = engine::snapshots::write_csv_depth(path, world.clock.t_myr, &world.depth_m);
+                                                println!("[snapshot] wrote {} (N={})", name, world.depth_m.len());
+                                            }
+                                        });
+                                    });
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
                                         nplates,
@@ -285,8 +302,31 @@ fn main() {
                                     ui.separator();
                                     if playing { if ui.button("⏸").clicked() { playing = false; } } else if ui.button("▶").clicked() { playing = true; }
                                     if ui.button("⏭").clicked() {
-                                        let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
-                                        let _ = engine::stepper::step(&mut world, &p);
+                                        let sp = engine::world::StepParams {
+                                            dt_myr: dt_myr as f64,
+                                            do_flexure: ov.enable_flexure,
+                                            do_isostasy: ov.apply_sea_level,
+                                            do_transforms: ov.show_transforms,
+                                            do_subduction: ov.show_subduction,
+                                            do_continents: ov.continents_apply,
+                                            do_ridge_birth: true,
+                                        };
+                                        let stats = engine::world::step_once(&mut world, &sp);
+                                        // Log one line for manual step
+                                        let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                        let land_area: f64 = world
+                                            .depth_m
+                                            .iter()
+                                            .zip(world.area_m2.iter())
+                                            .filter(|(&d, _)| d <= 0.0)
+                                            .map(|(_, &a)| a as f64)
+                                            .sum();
+                                        let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                        println!(
+                                            "[step] t={:.1} Myr dt={:.1} | div={} conv={} trans={} | land={:.1}% C̄={:.1}% | residual flex={}",
+                                            stats.t_myr, stats.dt_myr, stats.div_count, stats.conv_count, stats.trans_count, land_frac * 100.0, stats.c_bar * 100.0,
+                                            if sp.do_flexure { format!("{:.3e}", world.last_flex_residual) } else { "–".to_string() }
+                                        );
                                         ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
                                     }
                                     ui.separator();
@@ -577,6 +617,10 @@ fn main() {
                                     for s in ov.bathy_shapes() { painter.add(s.clone()); }
                                     if ov.legend_on { ov.draw_legend(&painter, rect); }
                                 }
+                                if ov.show_continents_field {
+                                    if ov.cont_c_cache.is_none() { ov.rebuild_c_overlay(rect, &world.grid.latlon, &world.c); }
+                                    if let Some(sh) = &ov.cont_c_cache { for s in sh { painter.add(s.clone()); } }
+                                }
                                 if ov.show_subduction {
                                     if ov.subd_trench.is_none() && ov.subd_arc.is_none() && ov.subd_backarc.is_none() {
                                         let mut tmp_depth = vec![0.0f32; world.grid.cells];
@@ -614,210 +658,7 @@ fn main() {
                                 }
                                 if ov.show_transforms || ov.apply_sea_level || ov.show_continents || ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
                                     if (ov.trans_pull.is_none() && ov.trans_rest.is_none()) || continents_dirty || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
-                                        // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
-                                        // Baseline from age
-                                        let mut depth_base = vec![0.0f32; world.grid.cells];
-                                        for (i, db) in depth_base.iter_mut().enumerate().take(world.grid.cells) {
-                                            let mut d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
-                                            if !d.is_finite() { d = 6000.0; }
-                                            *db = d.clamp(0.0, 6000.0);
-                                        }
-                                        // Capture reference ocean volume once (before subduction/transforms)
-                                        if world.sea_level_ref.is_none() {
-                                            const R_EARTH_M: f64 = 6_371_000.0;
-                                            let scale = 4.0 * std::f64::consts::PI * R_EARTH_M * R_EARTH_M;
-                                            let mut area_m2: Vec<f32> = Vec::with_capacity(world.grid.cells);
-                                            for &a in &world.grid.area { area_m2.push((a as f64 * scale) as f32); }
-                                            let (v0, a0) = engine::isostasy::ocean_volume_from_depth(&depth_base, &area_m2);
-                                            world.sea_level_ref = Some(engine::world::SeaLevelRef { volume_m3: v0, ocean_area_m2: a0 });
-                                        }
-                                        // Subduction on baseline
-                                        let mut depth_subd = depth_base.clone();
-                                        let sub_res = engine::subduction::apply_subduction(
-                                            &world.grid, &world.boundaries, &world.plates.plate_id,
-                                            &world.age_myr, &world.v_en, &mut depth_subd,
-                                            engine::subduction::SubductionParams {
-                                                tau_conv_m_per_yr: 0.005,
-                                                trench_half_width_km: 50.0,
-                                                arc_offset_km: 150.0,
-                                                arc_half_width_km: 30.0,
-                                                backarc_width_km: 150.0,
-                                                trench_deepen_m: 3000.0,
-                                                arc_uplift_m: -500.0,
-                                                backarc_uplift_m: -200.0,
-                                                rollback_offset_m: 0.0,
-                                                rollback_rate_km_per_myr: 0.0,
-                                                backarc_extension_mode: false,
-                                                backarc_extension_deepen_m: 600.0,
-                                            },
-                                        );
-                                        // Transforms: compute delta from baseline
-                                        let mut depth_trans = depth_base.clone();
-                                        let (trans_masks, _trans_stats) = engine::transforms::apply_transforms(
-                                            &world.grid, &world.boundaries, &world.plates.plate_id, &world.v_en, &mut depth_trans,
-                                            engine::transforms::TransformParams {
-                                                tau_open_m_per_yr: ov.trans_tau_open_m_per_yr as f64,
-                                                min_tangential_m_per_yr: ov.trans_min_tangential_m_per_yr as f64,
-                                                basin_half_width_km: ov.trans_basin_half_width_km as f64,
-                                                ridge_like_uplift_m: ov.trans_ridge_like_uplift_m,
-                                                basin_deepen_m: ov.trans_basin_deepen_m,
-                                            }
-                                        );
-                                        if ov.show_transforms {
-                                            ov.rebuild_transform_meshes(rect, &world.grid.latlon, &trans_masks);
-                                        } else {
-                                            ov.trans_pull = None; ov.trans_rest = None;
-                                        }
-                                        ov.trans_pull_count = if let Some(v) = &ov.trans_pull { v.iter().map(|s| match s { egui::Shape::Mesh(m) => m.vertices.len()/4, _ => 0 }).sum() } else { 0 } as u32;
-                                        ov.trans_rest_count = if let Some(v) = &ov.trans_rest { v.iter().map(|s| match s { egui::Shape::Mesh(m) => m.vertices.len()/4, _ => 0 }).sum() } else { 0 } as u32;
-                                        let mut final_depth = depth_subd;
-                                        for i in 0..world.grid.cells {
-                                            let delta_t = depth_trans[i] - depth_base[i];
-                                            // avoid overlap with subduction masks
-                                            if !sub_res.masks.trench[i] && !sub_res.masks.arc[i] && !sub_res.masks.backarc[i] {
-                                                final_depth[i] += delta_t;
-                                            }
-                                        }
-                                        // Continents: build/apply before sea-level
-                                        if ov.show_continents || continents_dirty {
-                                            let key = overlay::ContKey {
-                                                seed: ov.cont_seed,
-                                                n: ov.cont_n,
-                                                radius_km: ov.cont_radius_km.round() as u32,
-                                                falloff_km: ov.cont_falloff_km.round() as u32,
-                                                f: world.grid.frequency,
-                                            };
-                                            if ov.cont_key != Some(key) || ov.cont_template.is_none() {
-                                                let cp = engine::continent::ContinentParams {
-                                                    seed: ov.cont_seed,
-                                                    n_continents: ov.cont_n,
-                                                    mean_radius_km: ov.cont_radius_km,
-                                                    falloff_km: ov.cont_falloff_km,
-                                                    plateau_uplift_m: 1.0,
-                                                    target_land_fraction: None,
-                                                };
-                                                let cf = engine::continent::build_continents(&world.grid, cp);
-                                                ov.cont_template = Some(cf.uplift_template_m);
-                                                ov.cont_key = Some(key);
-                                            }
-                                            if let Some(tmpl) = ov.cont_template.as_ref() {
-                                            let depth_pre = final_depth.clone();
-                                                let amp_m: f32 = if ov.cont_auto_amp {
-                                                    engine::continent::solve_amplitude_for_target_land_fraction(
-                                                        &depth_pre, tmpl, &world.area_m2, ov.cont_target_land_frac as f64, 1e-3, 64,
-                                                    )
-                                                } else { ov.cont_manual_amp_m };
-                                                let (_mask_land, land_frac) = engine::continent::apply_continents(
-                                                    &mut final_depth, tmpl, amp_m, &world.area_m2,
-                                                );
-                                                ov.cont_amp_applied_m = amp_m;
-                                                ov.cont_land_frac = land_frac;
-                                            }
-                                        }
-                                        // Apply global sea level if requested
-                                        if ov.apply_sea_level {
-                                            let area_sum: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                                            if let Some(ref_ref) = world.sea_level_ref {
-                                                let frac_ref = if area_sum > 0.0 { ref_ref.ocean_area_m2 / area_sum } else { 0.0 };
-                                                let target_frac = (ov.target_ocean_fraction as f64).clamp(0.01, 0.99);
-                                                let target_volume = ref_ref.volume_m3 * (target_frac / frac_ref.max(1e-12));
-                                                let before = final_depth.clone();
-                                                let off = engine::isostasy::solve_offset_for_volume(&final_depth, &world.area_m2, target_volume, 1e6, 64);
-                                                // Manual extra offset for exploration
-                                                let total_off = off + (ov.extra_offset_m as f64);
-                                                engine::isostasy::apply_sea_level_offset(&mut final_depth, total_off);
-                                                ov.last_isostasy_offset_m = total_off;
-                                                let (v_b, a_b) = engine::isostasy::ocean_volume_from_depth(&before, &world.area_m2);
-                                                let (v_a, a_a) = engine::isostasy::ocean_volume_from_depth(&final_depth, &world.area_m2);
-                                                println!(
-                                                    "[isostasy] solved={:+.1} m  extra={:+.1} m  total={:+.1} m  ocean_frac: {:.3} → {:.3}  volume: {:.3e} → {:.3e} (target={:.3e})",
-                                                    off, ov.extra_offset_m, total_off, a_b/area_sum, a_a/area_sum, v_b, v_a, target_volume
-                                                );
-                                            } else {
-                                                // Show helper to force first land for visibility
-                                                let min_d = final_depth.iter().cloned().fold(f32::INFINITY, f32::min);
-                                                let off_first_land = (-(min_d as f64) + 1.0).max(0.0);
-                                                println!("[isostasy] Offset to first land: {:.0} m", off_first_land);
-                                            }
-                                        }
-                                         world.depth_m = final_depth;
-                                         // Build continent meshes against final depths (post sea-level)
-                                         if ov.show_continents {
-                                             let mask_post: Vec<bool> = world.depth_m.iter().map(|&d| d <= 0.0).collect();
-                                             let (m_land, m_coast) = ov.rebuild_continent_meshes(
-                                                 rect, &world.grid, &world.depth_m, &mask_post, ov.cont_max_points,
-                                             );
-                                             ov.mesh_continents = Some(m_land);
-                                             ov.mesh_coastline = Some(m_coast);
-                                             println!(
-                                                 "[continent] seed={} n={} radius={} falloff={} amp={:.0}m land={:.1}% (auto={})",
-                                                 ov.cont_seed, ov.cont_n, ov.cont_radius_km.round() as u32, ov.cont_falloff_km.round() as u32,
-                                                 ov.cont_amp_applied_m, ov.cont_land_frac * 100.0, ov.cont_auto_amp
-                                             );
-                                         }
-
-                                          // Flexure coupling: assemble loads from current depth and compute deflection
-                                          if ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
-                                             // Assemble load f (N/m^2)
-                                             let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
-                                             let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
-                                             // Diagnostics for loads
-                                              let mut fmin = f32::INFINITY;
-                                              let mut fmax = f32::NEG_INFINITY;
-                                             let mut fsum = 0.0f64;
-                                             for &fi in &f_load {
-                                                 if fi.is_finite() {
-                                                     if fi < fmin { fmin = fi; }
-                                                     if fi > fmax { fmax = fi; }
-                                                     fsum += fi as f64;
-                                                 }
-                                             }
-                                             let fmean = if f_load.is_empty() { 0.0 } else { (fsum / (f_load.len() as f64)) as f32 };
-                                             println!("[flexure.load] N={} N/m^2 min/mean/max = {:.2e}/{:.2e}/{:.2e}", f_load.len(), fmin, fmean, fmax);
-                                             // Compute D from (E, nu, Te)
-                                             let e_pa = (ov.e_gpa as f64) * 1.0e9;
-                                             let nu = ov.nu as f64;
-                                             let te_m = (ov.te_km as f64) * 1000.0;
-                                             let denom = 12.0 * (1.0 - nu * nu);
-                                              let _d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
-                                             // Fallback placeholder: Winkler-only response (w = f/k)
-                                             let k = ov.k_winkler.max(1e-6);
-                                             let mut w = vec![0.0f32; world.grid.cells];
-                                             for i in 0..world.grid.cells { w[i] = f_load[i] / k; }
-                                             // Residuals (relative): r0 = ||f||, r1 = ||f - k w|| (≈0 here)
-                                             let mut r0: f64 = 0.0; let mut r1: f64 = 0.0;
-                                             for i in 0..world.grid.cells { let fi = f_load[i] as f64; r0 += fi*fi; let ri = fi - (k as f64)*(w[i] as f64); r1 += ri*ri; }
-                                             r0 = r0.sqrt(); r1 = r1.sqrt();
-                                             ov.last_residual = (r1 / r0.max(1.0)) as f32;
-                                             if ov.enable_flexure {
-                                                 for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) { *d = (*d + *wi).clamp(-8000.0, 8000.0); }
-                                                 ov.bathy_cache = None;
-                                             }
-                                             if ov.show_flexure {
-                                                 ov.rebuild_flexure_mesh(rect, &world.grid, &w, ov.max_points_flex);
-                                             } else {
-                                                 ov.flex_mesh = None;
-                                             }
-                                             // w diagnostics
-                                              let mut wmin = f32::INFINITY;
-                                              let mut wmax = f32::NEG_INFINITY;
-                                             let mut wsum = 0.0f64;
-                                             for &wi in &w {
-                                                 if wi.is_finite() {
-                                                     if wi < wmin { wmin = wi; }
-                                                     if wi > wmax { wmax = wi; }
-                                                     wsum += wi as f64;
-                                                 }
-                                             }
-                                             let wmean = if w.is_empty() { 0.0 } else { (wsum / (w.len() as f64)) as f32 };
-                                             println!(
-                                                 "[flexure] L={} ν1={} ν2={} ω={:.2} residual: {:.3e}→{:.3e} (×{:.3}) w min/mean/max = {:.2}/{:.2}/{:.2} m",
-                                                 ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), wmin, wmean, wmax
-                                             );
-                                             if wmin.abs().max(wmax.abs()) < 1e-9 { println!("[flexure] WARNING: w is all zeros (stub or GPU path inactive)"); }
-                                         }
-
-                                          // Update bathy scale
+                                        // Update bathy scale
                                         if ov.lock_bathy_scale { ov.depth_minmax = ov.bathy_min_max; }
                                         else {
                                             // recompute dynamic scale
@@ -962,10 +803,50 @@ fn main() {
                             step_accum_s += dt;
                             let step_interval = 1.0f32 / (steps_per_sec.max(1) as f32);
                             let mut steps_this_frame = 0u32;
-                            let max_steps_frame = 4u32; // clamp to keep FPS ~60
+                            let max_steps_frame = 8u32; // clamp to keep FPS ~60
                             while step_accum_s >= step_interval && steps_this_frame < max_steps_frame {
-                                let p = engine::stepper::StepParams { dt_myr, tau_open_m_per_yr: 0.005 };
-                                let _ = engine::stepper::step(&mut world, &p);
+                                let sp = engine::world::StepParams {
+                                    dt_myr: dt_myr as f64,
+                                    do_flexure: ov.enable_flexure,
+                                    do_isostasy: ov.apply_sea_level,
+                                    do_transforms: ov.show_transforms,
+                                    do_subduction: ov.show_subduction,
+                                    do_continents: ov.continents_apply,
+                                    do_ridge_birth: true,
+                                };
+                                let stats = engine::world::step_once(&mut world, &sp);
+                                // Step log (one line per step)
+                                let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                let land_area: f64 = world
+                                    .depth_m
+                                    .iter()
+                                    .zip(world.area_m2.iter())
+                                    .filter(|(&d, _)| d <= 0.0)
+                                    .map(|(_, &a)| a as f64)
+                                    .sum();
+                                let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                println!(
+                                    "[step] t={:.1} Myr dt={:.1} | div={} conv={} trans={} | land={:.1}% C̄={:.1}% | residual flex={}",
+                                    stats.t_myr, stats.dt_myr, stats.div_count, stats.conv_count, stats.trans_count, land_frac * 100.0, stats.c_bar * 100.0,
+                                    if sp.do_flexure { format!("{:.3e}", world.last_flex_residual) } else { "–".to_string() }
+                                );
+                                // Edge-triggered snapshots
+                                let f = snapshot_every_myr.max(0.0);
+                                if f > 0.0 {
+                                    if next_snapshot_t.is_infinite() || next_snapshot_t.is_nan() {
+                                        let k = (world.clock.t_myr / (f as f64)).ceil();
+                                        next_snapshot_t = (k * (f as f64)).max(world.clock.t_myr);
+                                    }
+                                    if world.clock.t_myr + 1e-9 >= next_snapshot_t {
+                                        let name = format!("depth_t{:08.1}Myr.csv", world.clock.t_myr);
+                                        let path = std::path::Path::new(&name);
+                                        let _ = engine::snapshots::write_csv_depth(path, world.clock.t_myr, &world.depth_m);
+                                        println!("[snapshot] wrote {} (N={})", name, world.depth_m.len());
+                                        next_snapshot_t += f as f64;
+                                    }
+                                } else {
+                                    next_snapshot_t = f64::INFINITY;
+                                }
                                 step_accum_s -= step_interval;
                                 steps_this_frame += 1;
                             }

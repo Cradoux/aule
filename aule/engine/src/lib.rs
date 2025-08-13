@@ -33,6 +33,8 @@ pub mod isostasy;
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// Snapshot IO utilities (CSV/binary)
+pub mod snapshots;
 /// World stepper.
 pub mod stepper;
 /// Subduction bands and bathymetry adjustments (CPU pass).
