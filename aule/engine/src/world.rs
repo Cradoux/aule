@@ -165,6 +165,22 @@ where
     }
 }
 
+/// Run the world forward until `t_end_myr` using repeated `step_once` calls.
+/// Stepping is chunked into at most `max_steps_per_yield` iterations per call so a
+/// caller (e.g., viewer) can interleave UI work between chunks.
+pub fn run_to_t(world: &mut World, sp: &StepParams, t_end_myr: f64, max_steps_per_yield: u32) {
+    let max_chunk = max_steps_per_yield.max(1);
+    while world.clock.t_myr < t_end_myr {
+        for _ in 0..max_chunk {
+            if world.clock.t_myr >= t_end_myr {
+                break;
+            }
+            let _ = step_once(world, sp);
+        }
+        // yield to caller
+    }
+}
+
 /// Execute one evolution step with a minimal CPU pipeline.
 ///
 /// Order:
