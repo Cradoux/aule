@@ -101,6 +101,21 @@ pub struct OverlayState {
     pub cont_amp_applied_m: f32,
     pub cont_key: Option<ContKey>,
     pub cont_template: Option<Vec<f32>>,
+
+    // Flexure overlay/state
+    pub show_flexure: bool,   // draw w overlay
+    pub enable_flexure: bool, // apply w to depth
+    pub E_gpa: f32,
+    pub nu: f32,
+    pub Te_km: f32,
+    pub k_winkler: f32, // N/m^3
+    pub wj_omega: f32,  // 0.6..0.9
+    pub nu1: u32,
+    pub nu2: u32,
+    pub levels: u32,
+    pub max_points_flex: usize, // overlay cap
+    pub last_residual: f32,     // r_out / max(1,r_in)
+    pub flex_mesh: Option<Mesh>,
 }
 
 impl Default for OverlayState {
@@ -180,6 +195,20 @@ impl Default for OverlayState {
             cont_amp_applied_m: 0.0,
             cont_key: None,
             cont_template: None,
+
+            show_flexure: false,
+            enable_flexure: false,
+            E_gpa: 70.0,
+            nu: 0.25,
+            Te_km: 25.0,
+            k_winkler: 3.0e8f32,
+            wj_omega: 0.7,
+            nu1: 1,
+            nu2: 1,
+            levels: 2,
+            max_points_flex: 10_000,
+            last_residual: 0.0,
+            flex_mesh: None,
         }
     }
 }
@@ -533,6 +562,49 @@ impl OverlayState {
         }
         shapes.extend(coast);
         self.bathy_cache = Some(shapes);
+    }
+
+    /// Build flexure deflection overlay as a lightweight point mesh colored by value.
+    pub fn rebuild_flexure_mesh(
+        &mut self,
+        rect: Rect,
+        grid: &engine::grid::Grid,
+        w_m: &[f32],
+        cap_total: usize,
+    ) {
+        let mut mesh = Mesh::default();
+        let n = grid.latlon.len().min(w_m.len());
+        let mut idxs: Vec<usize> = (0..n).collect();
+        // Subsample uniformly
+        let stride = (n / cap_total.max(1)).max(1);
+        // Scale by min/max of w for color
+        let mut wmin = f32::INFINITY;
+        let mut wmax = f32::NEG_INFINITY;
+        for &v in w_m.iter().take(n) {
+            if v.is_finite() {
+                if v < wmin {
+                    wmin = v;
+                }
+                if v > wmax {
+                    wmax = v;
+                }
+            }
+        }
+        if !wmin.is_finite() || !wmax.is_finite() || wmin >= wmax {
+            wmin = 0.0;
+            wmax = 1.0;
+        }
+        for &i in idxs.iter().step_by(stride) {
+            let ll = grid.latlon[i];
+            let p = project_equirect(ll[0], ll[1], rect);
+            let col = viridis_map(w_m[i], wmin, wmax);
+            Self::mesh_add_dot(&mut mesh, p, 1.2, col);
+        }
+        if mesh.vertices.is_empty() {
+            self.flex_mesh = None;
+        } else {
+            self.flex_mesh = Some(mesh);
+        }
     }
 
     /// Build continent land mask and coastline meshes

@@ -258,6 +258,7 @@ fn main() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
                             if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
+                            if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
@@ -291,6 +292,24 @@ fn main() {
                                     ));
                                 });
                                 ui.separator();
+                                let mut flex_dirty = false;
+                                ui.collapsing("Flexure (G)", |ui| {
+                                    let mut changed = false;
+                                    changed |= ui.checkbox(&mut ov.enable_flexure, "Enable flexure (apply to depth)").changed();
+                                    changed |= ui.checkbox(&mut ov.show_flexure, "Show w overlay").changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.E_gpa, 20.0..=120.0).text("E (GPa)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.nu, 0.15..=0.30).text("nu")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.Te_km, 5.0..=50.0).text("Te (km)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.k_winkler, 0.0..=5.0e8).text("k (N/m^3)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.wj_omega, 0.6..=0.9).text("ω (WJ)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.nu1, 0..=4).text("ν1")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.nu2, 0..=4).text("ν2")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.levels, 1..=8).text("Levels")) .changed();
+                                    let mut mp = ov.max_points_flex as u32;
+                                    changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
+                                    if changed { ov.max_points_flex = mp as usize; flex_dirty = true; }
+                                    ui.label(format!("residual ratio = {:.3}", ov.last_residual));
+                                });
                                 ui.collapsing("Continents (C)", |ui| {
                                     let mut changed = false;
                                     changed |= ui.add(egui::DragValue::new(&mut ov.cont_seed).speed(1.0).prefix("Seed ")).changed();
@@ -523,7 +542,7 @@ fn main() {
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
                                 }
-                                if ov.show_transforms || ov.apply_sea_level || ov.show_continents {
+                                if ov.show_transforms || ov.apply_sea_level || ov.show_continents || ov.show_flexure || ov.enable_flexure {
                                     if ov.trans_pull.is_none() && ov.trans_rest.is_none() || continents_dirty {
                                         // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
                                         // Baseline from age
@@ -663,7 +682,43 @@ fn main() {
                                                  ov.cont_amp_applied_m, ov.cont_land_frac * 100.0, ov.cont_auto_amp
                                              );
                                          }
-                                        // Update bathy scale
+
+                                         // Flexure coupling: assemble loads from current depth and compute deflection
+                                         if ov.show_flexure || ov.enable_flexure || flex_dirty {
+                                             // Assemble load f (N/m^2)
+                                             let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
+                                             let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+                                             // Compute D from (E, nu, Te)
+                                             let e_pa = (ov.E_gpa as f64) * 1.0e9;
+                                             let nu = ov.nu as f64;
+                                             let te_m = (ov.Te_km as f64) * 1000.0;
+                                             let denom = 12.0 * (1.0 - nu * nu);
+                                             let d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
+                                             // Fallback placeholder: Winkler-only response (w = f/k)
+                                             let k = ov.k_winkler.max(1e-6);
+                                             let mut w = vec![0.0f32; world.grid.cells];
+                                             for i in 0..world.grid.cells { w[i] = f_load[i] / k; }
+                                             // Residuals (relative): r0 = ||f||, r1 = ||f - k w|| (≈0 here)
+                                             let mut r0: f64 = 0.0; let mut r1: f64 = 0.0;
+                                             for i in 0..world.grid.cells { let fi = f_load[i] as f64; r0 += fi*fi; let ri = fi - (k as f64)*(w[i] as f64); r1 += ri*ri; }
+                                             r0 = r0.sqrt(); r1 = r1.sqrt();
+                                             ov.last_residual = (r1 / r0.max(1.0)) as f32;
+                                             if ov.enable_flexure {
+                                                 for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) { *d = (*d + *wi).clamp(-8000.0, 8000.0); }
+                                                 ov.bathy_cache = None;
+                                             }
+                                             if ov.show_flexure {
+                                                 ov.rebuild_flexure_mesh(rect, &world.grid, &w, ov.max_points_flex);
+                                             } else {
+                                                 ov.flex_mesh = None;
+                                             }
+                                             println!(
+                                                 "[flexure] levels={} ν1={} ν2={} ω={:.2}  residual: {:.3e}→{:.3e} (×{:.3})  D={:.3e} k={:.3e}",
+                                                 ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), d_pa_m3, k
+                                             );
+                                         }
+
+                                         // Update bathy scale
                                         if ov.lock_bathy_scale { ov.depth_minmax = ov.bathy_min_max; }
                                         else {
                                             // recompute dynamic scale
@@ -682,6 +737,7 @@ fn main() {
                                     }
                                     if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
+                                    if ov.show_flexure { if let Some(m) = &ov.flex_mesh { painter.add(egui::Shape::mesh(m.clone())); } }
                                     if ov.show_continents {
                                         if let Some(m) = &ov.mesh_continents { painter.add(egui::Shape::mesh(m.clone())); }
                                         if let Some(m) = &ov.mesh_coastline { painter.add(egui::Shape::mesh(m.clone())); }

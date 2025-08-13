@@ -122,7 +122,8 @@ pub fn ui(
 
         // Recompute if params changed
         let hash = compute_hash((st, grid.cells, st.sample_cap));
-        if changed || hash != st.last_hash || st.scatter_pts.is_none() || st.reference_pts.is_none() {
+        if changed || hash != st.last_hash || st.scatter_pts.is_none() || st.reference_pts.is_none()
+        {
             st.last_hash = hash;
             let depth_src = if st.use_final_depth { depth_final_m } else { depth_pre_m };
             let n = grid.cells.min(depth_src.len()).min(age_myr.len());
@@ -218,13 +219,17 @@ pub fn ui(
             .y_axis_label("Depth (m)")
             .show(ui, |plot_ui| {
                 if let Some(r) = &st.reference_pts {
-                    plot_ui.line(Line::new(PlotPoints::from_iter(r.iter().copied())).name("analytic"));
+                    plot_ui
+                        .line(Line::new(PlotPoints::from_iter(r.iter().copied())).name("analytic"));
                 }
                 if let Some(p) = &st.scatter_pts {
-                    plot_ui.points(Points::new(PlotPoints::from_iter(p.iter().copied())).name("samples"));
+                    plot_ui.points(
+                        Points::new(PlotPoints::from_iter(p.iter().copied())).name("samples"),
+                    );
                 }
                 if let Some(b) = &st.binned_pts {
-                    plot_ui.line(Line::new(PlotPoints::from_iter(b.iter().copied())).name("binned"));
+                    plot_ui
+                        .line(Line::new(PlotPoints::from_iter(b.iter().copied())).name("binned"));
                 }
             });
         ui.label(format!(

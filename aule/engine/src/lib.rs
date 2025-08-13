@@ -6,9 +6,10 @@
 /// Steady-state oceanic age and bathymetry mapping.
 pub mod age;
 /// Plate boundary classification.
-/// Plate boundary classification.
 pub mod boundaries;
-pub use boundaries::{BoundaryStats, Boundaries, EdgeClass, EdgeKin};
+pub use boundaries::{Boundaries, BoundaryStats, EdgeClass, EdgeKin};
+/// Flexure load assembly helpers.
+pub mod flexure_loads;
 
 /// Synthetic continental mask generator and applier.
 pub mod continent;
