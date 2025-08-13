@@ -115,6 +115,8 @@ pub struct StepParams {
     pub auto_rebaseline_after_continents: bool,
     /// Enable rigid plate motion (advect plate_id and update velocities)
     pub do_rigid_motion: bool,
+    /// Enable collision orogeny (C–C sutures)
+    pub do_orogeny: bool,
 }
 
 /// Result summary for one step.
@@ -148,11 +150,8 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
 
     // B) velocities from plates using current plate ids (or static if disabled)
     let vel3 = if sp.do_rigid_motion {
-        world.v_en = crate::plates::velocity_en_m_per_yr(
-            &world.grid,
-            &world.plates,
-            &world.plates.plate_id,
-        );
+        world.v_en =
+            crate::plates::velocity_en_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
         crate::plates::velocity_field_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id)
     } else {
         world.v_en.clone_from(&world.plates.vel_en);
@@ -288,6 +287,31 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 ridge_like_uplift_m: -300.0,
                 basin_deepen_m: 400.0,
             },
+        );
+    }
+
+    // G.5) Orogeny (C–C): after transforms, before continents uplift/flexure
+    if sp.do_orogeny {
+        let p_orog = crate::orogeny::OrogenyParams {
+            c_min: 0.6,
+            w_core_km: 150.0,
+            w_taper_km: 250.0,
+            k_thick: 0.10,
+            beta_uplift: 1.0,
+            gamma_obliquity: 1.0,
+            couple_flexure: false,
+        };
+        let _stats = crate::orogeny::apply_cc_orogeny(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &vel3,
+            &world.c,
+            &world.area_m2,
+            &mut world.th_c_m,
+            &mut world.depth_m,
+            &p_orog,
+            sp.dt_myr,
         );
     }
 
