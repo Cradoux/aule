@@ -261,6 +261,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                             if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; flex_dirty = true; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Y)) { ov.show_hypsometry = !ov.show_hypsometry; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
@@ -373,6 +374,39 @@ fn main() {
                                     }
                                 });
                                 ui.separator();
+                                ui.collapsing("Hypsometry (Y)", |ui| {
+                                    let mut changed = false;
+                                    changed |= ui.add(egui::Slider::new(&mut ov.hyps_bins, 64..=512).text("bins")).changed();
+                                    changed |= ui.checkbox(&mut ov.hyps_auto_domain, "auto domain").changed();
+                                    if !ov.hyps_auto_domain {
+                                        changed |= ui.add(egui::DragValue::new(&mut ov.hyps_min_m).speed(10.0).prefix("min ")).changed();
+                                        changed |= ui.add(egui::DragValue::new(&mut ov.hyps_max_m).speed(10.0).prefix("max ")).changed();
+                                    }
+                                    if ui.button("Export CSV").clicked() {
+                                        // No external deps: use UNIX epoch seconds for filename suffix
+                                        let secs = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0);
+                                        let name = format!("hypsometry_{}.csv", secs);
+                                        if !ov.hyps_centers_m.is_empty() && ov.hyps_centers_m.len() == ov.hyps_area_per_bin_m2.len() {
+                                            let mut cum: f64 = 0.0;
+                                            let mut s = String::from("bin_center_m,count_cells,area_m2,cumulative_area_m2\n");
+                                            for (i, &c) in ov.hyps_centers_m.iter().enumerate() {
+                                                let a = ov.hyps_area_per_bin_m2[i];
+                                                cum += a;
+                                                s.push_str(&format!("{:.6},{},{} ,{}\n", c, 0, a, cum));
+                                            }
+                                            let _ = std::fs::write(name, s);
+                                        }
+                                    }
+                                    ui.label(format!(
+                                        "[hyps] bins={} land={:.1}% mean={:.0} m median={:.0} m coast_area={:.3e} m^2 | overlay pts={} transforms pts={}",
+                                        ov.hyps_bins, ov.hyps_land_frac * 100.0, ov.hyps_mean_m, ov.hyps_median_m, ov.hyps_coast_area_m2,
+                                        ov.flex_overlay_count, ov.trans_pull_count + ov.trans_rest_count
+                                    ));
+                                    if changed { ov.world_dirty = true; }
+                                });
                                 ui.collapsing("Transforms (0)", |ui| {
                                     ui.label("Active if |tangential| ≥ min_tangential & |normal| ≤ τ_open");
                                     ui.label("Cyan = pull-apart (deeper), Brown = restraining (shallower)");
@@ -758,7 +792,7 @@ fn main() {
                                              if wmin.abs().max(wmax.abs()) < 1e-9 { println!("[flexure] WARNING: w is all zeros (stub or GPU path inactive)"); }
                                          }
 
-                                         // Update bathy scale
+                                          // Update bathy scale
                                         if ov.lock_bathy_scale { ov.depth_minmax = ov.bathy_min_max; }
                                         else {
                                             // recompute dynamic scale
@@ -774,6 +808,57 @@ fn main() {
                                         }
                                         ov.bathy_cache = None;
                                         continents_dirty = false;
+
+                                          // Hypsometry recompute (post sea-level and flexure)
+                                          if ov.show_hypsometry || ov.world_dirty {
+                                              let bins = ov.hyps_bins.max(1) as usize;
+                                              let (mut min_m, mut max_m) = (ov.hyps_min_m, ov.hyps_max_m);
+                                              if ov.hyps_auto_domain {
+                                                  let mut dmin = f32::INFINITY;
+                                                  let mut dmax = f32::NEG_INFINITY;
+                                                  for &d in &world.depth_m {
+                                                      if d.is_finite() {
+                                                          if d < dmin { dmin = d; }
+                                                          if d > dmax { dmax = d; }
+                                                      }
+                                                  }
+                                                  if dmin.is_finite() && dmax.is_finite() && dmax > dmin {
+                                                      min_m = dmin;
+                                                      max_m = dmax;
+                                                  }
+                                              }
+                                              let (centers, areas) = engine::hypsometry::histogram_area_weighted(
+                                                  &world.depth_m, &world.area_m2, bins, min_m, max_m,
+                                              );
+                                              ov.hyps_centers_m.clone_from(&centers);
+                                              ov.hyps_area_per_bin_m2.clone_from(&areas);
+                                              // Land fraction and stats
+                                              let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                              let land_area: f64 = world
+                                                  .depth_m
+                                                  .iter()
+                                                  .zip(world.area_m2.iter())
+                                                  .filter(|(&d, _)| d <= 0.0)
+                                                  .map(|(_, &a)| a as f64)
+                                                  .sum();
+                                              ov.hyps_land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
+                                              // Mean
+                                              let mut weighted_sum: f64 = 0.0;
+                                              for (i, &c) in ov.hyps_centers_m.iter().enumerate() { weighted_sum += c * ov.hyps_area_per_bin_m2[i]; }
+                                              ov.hyps_mean_m = if total_area > 0.0 { weighted_sum / total_area } else { 0.0 };
+                                              // Median (by cumulative area)
+                                              let mut cum: f64 = 0.0; let mut median = 0.0;
+                                              for (i, &a) in ov.hyps_area_per_bin_m2.iter().enumerate() { cum += a; if cum >= 0.5 * total_area { median = ov.hyps_centers_m[i]; break; } }
+                                              ov.hyps_median_m = median;
+                                              // Coastline area: approximate as area in bins whose centers straddle 0
+                                              let mut coast_a = 0.0; for (i, &c) in ov.hyps_centers_m.iter().enumerate() { if c.abs() <= (max_m - min_m) as f64 / (bins as f64) { coast_a += ov.hyps_area_per_bin_m2[i]; } }
+                                              ov.hyps_coast_area_m2 = coast_a;
+                                              println!(
+                                                  "[hypsometry] bins={} land={:.1}% mean={:.0} m median={:.0} m coast_area={:.3e} m^2",
+                                                  ov.hyps_bins, ov.hyps_land_frac * 100.0, ov.hyps_mean_m, ov.hyps_median_m, ov.hyps_coast_area_m2
+                                              );
+                                              ov.world_dirty = false;
+                                          }
                                     }
                                     if ov.show_transforms {
                                         if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
