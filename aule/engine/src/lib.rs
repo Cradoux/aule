@@ -11,6 +11,8 @@ pub use boundaries::{Boundaries, BoundaryStats, EdgeClass, EdgeKin};
 /// Flexure load assembly helpers.
 pub mod flexure_loads;
 
+/// Arc/terrane accretion at O–C margins.
+pub mod accretion;
 /// Synthetic continental mask generator and applier.
 pub mod continent;
 /// Field and tiling views.

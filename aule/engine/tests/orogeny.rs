@@ -41,7 +41,9 @@ fn cc_gates_by_cmin() {
     // Oceanic side suppresses effect => most cells unchanged in this crude test
     let mut changed = 0usize;
     for (i, &th0) in th_before.iter().enumerate().take(world.grid.cells) {
-        if (world.th_c_m[i] - th0).abs() > 1e-3 { changed += 1; }
+        if (world.th_c_m[i] - th0).abs() > 1e-3 {
+            changed += 1;
+        }
     }
     // still allow a few due to coarse constraints
     assert!(changed < world.grid.cells / 2);
