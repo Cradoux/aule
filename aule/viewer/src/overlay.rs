@@ -127,6 +127,7 @@ pub struct OverlayState {
     pub flex_cycles: u32,
     pub flex_gain: f32,
     pub apply_gain_to_depth: bool,
+
     pub flex_overlay_count: usize,
 
     // Viewport tracking and debounce
@@ -157,6 +158,7 @@ pub struct OverlayState {
     pub sun_alt_deg: f32,
     pub legend_on: bool,
     pub color_dirty: bool,
+
 }
 
 impl Default for OverlayState {
@@ -257,6 +259,7 @@ impl Default for OverlayState {
             flex_cycles: 1,
             flex_gain: 1.0,
             apply_gain_to_depth: false,
+
             flex_overlay_count: 0,
 
             last_map_rect_px: [0, 0, 0, 0],
@@ -284,6 +287,7 @@ impl Default for OverlayState {
             sun_alt_deg: 45.0,
             legend_on: true,
             color_dirty: true,
+
         }
     }
 }
