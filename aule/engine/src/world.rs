@@ -117,6 +117,8 @@ pub struct StepParams {
     pub do_rigid_motion: bool,
     /// Enable collision orogeny (C–C sutures)
     pub do_orogeny: bool,
+    /// Enable O–C accretion (arc/forearc growth)
+    pub do_accretion: bool,
 }
 
 /// Result summary for one step.
@@ -269,6 +271,61 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 backarc_extension_mode: false,
                 backarc_extension_deepen_m: 600.0,
             },
+        );
+    }
+
+    // F.5) O–C accretion: after subduction, before transforms/orogeny
+    if sp.do_accretion {
+        // Use masks from last subduction run if available by recomputing quickly with same params
+        let sub = subduction::apply_subduction(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &world.age_myr,
+            &world.v_en,
+            &mut world.depth_m,
+            subduction::SubductionParams {
+                tau_conv_m_per_yr: TAU_OPEN_M_PER_YR,
+                trench_half_width_km: 50.0,
+                arc_offset_km: 150.0,
+                arc_half_width_km: 30.0,
+                backarc_width_km: 150.0,
+                trench_deepen_m: 3000.0,
+                arc_uplift_m: -500.0,
+                backarc_uplift_m: -200.0,
+                rollback_offset_m: 0.0,
+                rollback_rate_km_per_myr: 0.0,
+                backarc_extension_mode: false,
+                backarc_extension_deepen_m: 600.0,
+            },
+        );
+        let p_acc = crate::accretion::AccretionParams {
+            k_arc: 0.05,
+            gamma_obliquity: 1.0,
+            beta_arc: 1.0,
+            alpha_arc: 0.02,
+            alpha_forearc: 0.01,
+            c_min_continent: 0.6,
+            thc_min_m: 20_000.0,
+            thc_max_m: 70_000.0,
+            enable_docking: false,
+            c_terrane_min: 0.5,
+            d_dock_km: 150.0,
+            vn_min_m_per_yr: 0.005,
+            tau_dock: 0.02,
+            couple_flexure: false,
+        };
+        let _ = crate::accretion::apply_oc_accretion(
+            &world.grid,
+            &sub.masks,
+            &world.boundaries,
+            &vel3,
+            &mut world.c,
+            &mut world.th_c_m,
+            &mut world.depth_m,
+            &world.area_m2,
+            &p_acc,
+            sp.dt_myr,
         );
     }
 

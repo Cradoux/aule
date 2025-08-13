@@ -313,6 +313,7 @@ fn main() {
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                     do_rigid_motion: ov.kin_enable,
                                             do_orogeny: false,
+                                            do_accretion: false,
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -1091,6 +1092,7 @@ fn main() {
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                     do_rigid_motion: ov.kin_enable,
                                     do_orogeny: false,
+                                    do_accretion: false,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)
