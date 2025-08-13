@@ -246,6 +246,7 @@ fn main() {
                         let raw_input = egui_state.take_egui_input(window);
                         let full_output = egui_ctx.run(raw_input, |ctx| {
                                 let mut continents_dirty: bool = false;
+                                let mut flex_dirty: bool = false;
                             if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
@@ -258,7 +259,7 @@ fn main() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
                             if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
-                            if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; flex_dirty = true; }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
@@ -307,7 +308,7 @@ fn main() {
                                     changed |= ui.add(egui::Slider::new(&mut ov.levels, 1..=8).text("Levels")) .changed();
                                     let mut mp = ov.max_points_flex as u32;
                                     changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
-                                    if changed { ov.max_points_flex = mp as usize; }
+                                    if changed { ov.max_points_flex = mp as usize; flex_dirty = true; }
                                     ui.label(format!("residual ratio = {:.3}", ov.last_residual));
                                 });
                                 ui.collapsing("Continents (C)", |ui| {
@@ -542,8 +543,8 @@ fn main() {
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
                                 }
-                                if ov.show_transforms || ov.apply_sea_level || ov.show_continents || ov.show_flexure || ov.enable_flexure {
-                                    if ov.trans_pull.is_none() && ov.trans_rest.is_none() || continents_dirty {
+                                if ov.show_transforms || ov.apply_sea_level || ov.show_continents || ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
+                                    if (ov.trans_pull.is_none() && ov.trans_rest.is_none()) || continents_dirty || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
                                         // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
                                         // Baseline from age
                                         let mut depth_base = vec![0.0f32; world.grid.cells];
@@ -683,17 +684,30 @@ fn main() {
                                              );
                                          }
 
-                                         // Flexure coupling: assemble loads from current depth and compute deflection
-                                         if ov.show_flexure || ov.enable_flexure {
+                                          // Flexure coupling: assemble loads from current depth and compute deflection
+                                          if ov.enable_flexure || flex_dirty || (ov.show_flexure && ov.flex_mesh.is_none()) {
                                              // Assemble load f (N/m^2)
                                              let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
                                              let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+                                             // Diagnostics for loads
+                                             let mut fmin = f32::INFINITY; 
+                                             let mut fmax = f32::NEG_INFINITY; 
+                                             let mut fsum = 0.0f64;
+                                             for &fi in &f_load {
+                                                 if fi.is_finite() {
+                                                     if fi < fmin { fmin = fi; }
+                                                     if fi > fmax { fmax = fi; }
+                                                     fsum += fi as f64;
+                                                 }
+                                             }
+                                             let fmean = if f_load.is_empty() { 0.0 } else { (fsum / (f_load.len() as f64)) as f32 };
+                                             println!("[flexure.load] N={} N/m^2 min/mean/max = {:.2e}/{:.2e}/{:.2e}", f_load.len(), fmin, fmean, fmax);
                                              // Compute D from (E, nu, Te)
                                              let e_pa = (ov.e_gpa as f64) * 1.0e9;
                                              let nu = ov.nu as f64;
                                              let te_m = (ov.te_km as f64) * 1000.0;
                                              let denom = 12.0 * (1.0 - nu * nu);
-                                             let d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
+                                              let _d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
                                              // Fallback placeholder: Winkler-only response (w = f/k)
                                              let k = ov.k_winkler.max(1e-6);
                                              let mut w = vec![0.0f32; world.grid.cells];
@@ -712,10 +726,23 @@ fn main() {
                                              } else {
                                                  ov.flex_mesh = None;
                                              }
+                                             // w diagnostics
+                                             let mut wmin = f32::INFINITY; 
+                                             let mut wmax = f32::NEG_INFINITY; 
+                                             let mut wsum = 0.0f64;
+                                             for &wi in &w {
+                                                 if wi.is_finite() {
+                                                     if wi < wmin { wmin = wi; }
+                                                     if wi > wmax { wmax = wi; }
+                                                     wsum += wi as f64;
+                                                 }
+                                             }
+                                             let wmean = if w.is_empty() { 0.0 } else { (wsum / (w.len() as f64)) as f32 };
                                              println!(
-                                                 "[flexure] levels={} ν1={} ν2={} ω={:.2}  residual: {:.3e}→{:.3e} (×{:.3})  D={:.3e} k={:.3e}",
-                                                 ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), d_pa_m3, k
+                                                 "[flexure] L={} ν1={} ν2={} ω={:.2} residual: {:.3e}→{:.3e} (×{:.3}) w min/mean/max = {:.2}/{:.2}/{:.2} m",
+                                                 ov.levels, ov.nu1, ov.nu2, ov.wj_omega, r0, r1, r1 / r0.max(1.0), wmin, wmean, wmax
                                              );
+                                             if wmin.abs().max(wmax.abs()) < 1e-9 { println!("[flexure] WARNING: w is all zeros (stub or GPU path inactive)"); }
                                          }
 
                                          // Update bathy scale
