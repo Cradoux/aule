@@ -156,6 +156,16 @@ git rebase origin/main
 
 \- T-320: \`chore/T-320-logging\`
 
+- T-400: `feat/T-400-world-stepper`
+- T-410: `feat/T-410-continent-advection`
+- T-420: `feat/T-420-orogeny-collision`
+- T-421: `feat/T-421-arc-accretion`
+- T-430: `feat/T-430-continental-rifting`
+- T-440: `feat/T-440-sea-level-coupling`
+- T-450: `feat/T-450-surface-processes-integration`
+- T-460: `feat/T-460-hotspots-plumes`
+
+
 **Conventional commits (recommended)**
 
 * `feat(T-015): add tiler with halo=2`
@@ -434,6 +444,33 @@ git rebase origin/main
 **Acceptance criteria:** Real‑time updates; screenshot/export works.
 **Dependencies:** previous viewer subtasks.
 
+T-120a — Hypsometry & Land-% Plot (viewer)
+Objective: Add a fast hypsometry histogram and land-% readout that update after each recompute (post sea-level & flexure), with CSV export.
+
+Deliverables: viewer: HUD panel (Y), elevation-based histogram (bins 64–512), land %, mean/median elevation, coastline bin; CSV export (hypsometry_YYYYMMDD_HHMMSS.csv). (Optional) engine helper engine/src/hypsometry.rs for area-weighted histogram.
+
+Implementation outline:
+
+Elevation = -depth_m (ocean negative, land positive).
+
+Default domain from current elevation min/max; allow manual min/max.
+
+Recompute only when world changed or panel/bins/domain changed.
+
+CSV columns: elev_center_m, count_cells, area_m2, cumulative_area_m2.
+
+Acceptance criteria:
+
+Y toggles panel; plot updates on change.
+
+Log: [hypsometry] bins=… land=…% mean=… m median=… m coast_area=… m^2.
+
+CSV writes with non-empty rows.
+
+CI green; no new deps; no unsafe.
+
+Dependencies: T-060, T-090, T-082.
+
 ### T‑130 — Exporters
 
 **Objective:** PNG16/TIFF32/NetCDF or Zarr + masks + plate vectors (GeoJSON/GPML).
@@ -493,6 +530,79 @@ git rebase origin/main
 **Acceptance criteria:** Viewer HUD shows timings; JSON logs written.
 
 ---
+
+Sprint 9 – Time Integration & Continents (Weeks 9–12)
+T-400 — World stepper & scheduler (Δt Myr loop + snapshots)
+Objective: Deterministic simulation loop that advances the world by Δt Myr and calls kernels in correct order, with playback controls & snapshots.
+
+Deliverables: engine/src/world.rs (WorldState, StepParams, step_once), engine/src/snapshots.rs CSV writer; viewer play/pause/step wiring + snapshot frequency control.
+
+Implementation outline:
+Order: Age increment → Boundaries → Ridge birth (placeholder) → Subduction (T-070/71) → Transforms (T-072) → Continents (T-051 template; static for now) → Flexure (T-082) → Isostasy (T-090) → t += dt. Throttle to ≤8 steps/frame; rebuild overlays once per step.
+
+Acceptance criteria: Play/pause/step moves t forward; one [step] log per step; snapshots write; CI green.
+
+Dependencies: T-082, T-090, T-051.
+
+T-410 — Continental advection & crust fields (C, th_c)
+Objective: Persist continental fraction C∈[0,1] and crust thickness th_c on the grid; advect with plate motion each step.
+
+Deliverables: engine/src/continents.rs (advect_C_thc), updates in WorldState & step_once; tests for mass/energy-like invariants and determinism.
+
+Implementation outline: Semi-Lagrangian or upwind advection on the geodesic grid using plate velocities; clip to [0,1]; stabilize with small diffusion if needed.
+
+Acceptance criteria: C mass nearly conserved (≤0.1%/100 Myr on coarse dt); deterministic; visible drift.
+
+Dependencies: T-400, T-030.
+
+T-420 — Collision orogeny (C–C sutures)
+Objective: When convergent boundaries intersect continental crust on both sides, thicken crust and uplift ranges; form flexural foredeeps.
+
+Deliverables: engine/src/orogeny.rs (suture mask; Δth_c; uplift; optional coupling to flexure loads), tests; viewer log.
+
+Implementation outline: Use Boundaries+edge_kin to find C–C segments; apply banded uplift and crust thickening; increase loads for foredeep response.
+
+Acceptance criteria: Mountain belts appear at C–C sutures; foredeep basins deepen; no numerical blow-up for dt=1 Myr.
+
+Dependencies: T-410, T-070/71, T-082.
+
+T-421 — Arc/terrane accretion (O–C MVP)
+Objective: As arcs/back-arc approach continental margins, increment C and th_c along sutures.
+
+Deliverables: rules in orogeny.rs; tests for determinism; viewer counters.
+
+Acceptance criteria: Continental growth visible at active margins; bounded rates.
+
+Dependencies: T-420.
+
+T-430 — Continental rifting & passive margins
+Objective: At divergence across high-C regions, thin th_c, create rift topography, seed zero-age ocean; generate passive margin taper.
+
+Deliverables: engine/src/rifting.rs; viewer hooks.
+
+Acceptance criteria: New ocean basins open; surrounding margins match taper rules; stable for dt=1 Myr.
+
+Dependencies: T-410, T-050.
+
+T-440 — Long-term sea-level coupling
+Objective: Couple global sea-level offset to long-term hypsometry/ice proxy (slow target fraction drift) or hold constant per config.
+
+Deliverables: extend T-090; tests for monotonicity & determinism.
+
+Acceptance criteria: Offset evolves smoothly; coastlines stable.
+
+Dependencies: T-400, T-120a.
+
+T-450 — Surface processes in the loop
+Objective: Integrate T-100/T-101 kernels into the stepper with stable dt.
+
+Deliverables: scheduler hooks; guardrails for stability.
+
+Acceptance criteria: Rivers reach sea; no mass leaks; runs stable for ≥500 steps.
+
+Dependencies: T-400, T-100.
+
+(Optionally later) T-460 — Hotspots & plumes — slow fields that bias rifting & LIPs.
 
 ## Guardrails (don’t deviate)
 

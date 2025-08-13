@@ -25,12 +25,16 @@ pub mod geo;
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
+/// Hypsometry helpers.
+pub mod hypsometry;
 /// Global sea-level (isostasy MVP) utilities.
 pub mod isostasy;
 /// Plates seeding and velocities.
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// Snapshot IO utilities (CSV/binary)
+pub mod snapshots;
 /// World stepper.
 pub mod stepper;
 /// Subduction bands and bathymetry adjustments (CPU pass).
