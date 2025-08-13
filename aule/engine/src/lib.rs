@@ -7,6 +7,7 @@
 pub mod age;
 /// Plate boundary classification.
 pub mod boundaries;
+pub use boundaries::{BoundaryStats, Boundaries, EdgeClass, EdgeKin};
 /// Field and tiling views.
 pub mod fields;
 /// Geometric utilities used by solvers.
