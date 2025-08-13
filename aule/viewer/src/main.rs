@@ -1,6 +1,7 @@
 //! Aulë viewer binary.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
+mod colormap;
 mod overlay;
 mod plot;
 mod plot_age_depth;
@@ -254,6 +255,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::A)) { age_plot.show = !age_plot.show; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::M)) { ov.show_map_color_panel = !ov.show_map_color_panel; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
@@ -294,6 +296,28 @@ fn main() {
                                     ));
                                 });
                                 ui.separator();
+                                // Map color HUD (T-131)
+                                if ov.show_map_color_panel {
+                                    ui.group(|ui| {
+                                        ui.heading("Map color");
+                                        let mut changed = false;
+                                        let before_mode = ov.color_mode;
+                                        ui.horizontal(|ui| {
+                                            ui.radio_value(&mut ov.color_mode, 0u8, "Hypsometric");
+                                            ui.radio_value(&mut ov.color_mode, 1u8, "Biome preview");
+                                        });
+                                        if ov.color_mode != before_mode { changed = true; }
+                                        ui.separator();
+                                        changed |= ui.checkbox(&mut ov.shade_on, "Hillshade").changed();
+                                        ui.add_enabled(ov.shade_on, egui::Slider::new(&mut ov.shade_strength, 0.0..=1.0).text("Strength"));
+                                        ui.horizontal(|ui| {
+                                            ui.add_enabled(ov.shade_on, egui::Slider::new(&mut ov.sun_az_deg, 0.0..=360.0).text("Sun az (deg)"));
+                                            ui.add_enabled(ov.shade_on, egui::Slider::new(&mut ov.sun_alt_deg, 0.0..=90.0).text("Sun alt (deg)"));
+                                        });
+                                        changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
+                                        if changed { ov.color_dirty = true; ov.bathy_cache = None; }
+                                    });
+                                }
                                 // Flexure HUD
                                 ui.collapsing("Flexure (G)", |ui| {
                                     let mut changed = false;
@@ -547,10 +571,11 @@ fn main() {
                                     for s in ov.age_shapes() { painter.add(s.clone()); }
                                 }
                                 if ov.show_bathy {
-                                        if ov.bathy_cache.is_none() {
+                                    if ov.bathy_cache.is_none() {
                                         ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
                                     }
                                     for s in ov.bathy_shapes() { painter.add(s.clone()); }
+                                    if ov.legend_on { ov.draw_legend(&painter, rect); }
                                 }
                                 if ov.show_subduction {
                                     if ov.subd_trench.is_none() && ov.subd_arc.is_none() && ov.subd_backarc.is_none() {

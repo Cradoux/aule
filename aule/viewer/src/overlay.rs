@@ -3,6 +3,8 @@ use egui::{
     Color32, Pos2, Rect, Stroke, Vec2,
 };
 
+const R_EARTH_M: f32 = 6_371_000.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ContKey {
     pub seed: u64,
@@ -140,6 +142,16 @@ pub struct OverlayState {
     pub hyps_mean_m: f64,
     pub hyps_median_m: f64,
     pub hyps_coast_area_m2: f64,
+
+    // Map color (T-131)
+    pub show_map_color_panel: bool,
+    pub color_mode: u8,      // 0=Hypsometric, 1=Biome preview
+    pub shade_on: bool,      // hillshade blend toggle
+    pub shade_strength: f32, // 0..1
+    pub sun_az_deg: f32,
+    pub sun_alt_deg: f32,
+    pub legend_on: bool,
+    pub color_dirty: bool,
 }
 
 impl Default for OverlayState {
@@ -255,6 +267,15 @@ impl Default for OverlayState {
             hyps_mean_m: 0.0,
             hyps_median_m: 0.0,
             hyps_coast_area_m2: 0.0,
+
+            show_map_color_panel: false,
+            color_mode: 0,
+            shade_on: false,
+            shade_strength: 0.5,
+            sun_az_deg: 315.0,
+            sun_alt_deg: 45.0,
+            legend_on: true,
+            color_dirty: true,
         }
     }
 }
@@ -577,6 +598,7 @@ pub fn viridis_map(value: f32, min_v: f32, max_v: f32) -> Color32 {
     viridis_color32(t)
 }
 
+#[allow(dead_code)]
 fn blue_ramp(value: f32, min_v: f32, max_v: f32) -> Color32 {
     let t = if max_v > min_v { ((value - min_v) / (max_v - min_v)).clamp(0.0, 1.0) } else { 0.0 };
     let r = (10.0 + 20.0 * t) as u8;
@@ -600,9 +622,41 @@ impl OverlayState {
     pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
         let mut shapes = Vec::with_capacity(grid.latlon.len());
         let (dmin, dmax) = self.depth_minmax;
+        let elev_min_locked = -dmax;
+        let elev_max_locked = -dmin;
+        // Optional hillshade
+        let mut shade: Vec<f32> = vec![1.0; grid.cells];
+        if self.shade_on {
+            compute_hillshade(&mut shade, grid, depth_m, self.sun_az_deg, self.sun_alt_deg);
+        }
         for (i, &ll) in grid.latlon.iter().enumerate() {
             let p = project_equirect(ll[0], ll[1], rect);
-            let col = blue_ramp(depth_m[i], dmin, dmax);
+            let elev = -depth_m[i];
+            let base_rgb = match self.color_mode {
+                0 => {
+                    let pal = crate::colormap::hyps_default_palette();
+                    let t = if elev_max_locked > elev_min_locked {
+                        ((elev - elev_min_locked) / (elev_max_locked - elev_min_locked))
+                            .clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let x = pal.vmin + t * (pal.vmax - pal.vmin);
+                    crate::colormap::sample_linear_srgb(pal, x)
+                }
+                _ => crate::colormap::pick_biome_color(ll[0], elev),
+            };
+            let rgb = if self.shade_on {
+                let sh = shade[i];
+                let k = 1.0 - self.shade_strength + self.shade_strength * sh;
+                let r = ((base_rgb[0] as f32) * k).round().clamp(0.0, 255.0) as u8;
+                let g = ((base_rgb[1] as f32) * k).round().clamp(0.0, 255.0) as u8;
+                let b = ((base_rgb[2] as f32) * k).round().clamp(0.0, 255.0) as u8;
+                [r, g, b]
+            } else {
+                base_rgb
+            };
+            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }
         // Draw 0 m coastline as thin black segments where any neighbor crosses zero
@@ -628,6 +682,106 @@ impl OverlayState {
         }
         shapes.extend(coast);
         self.bathy_cache = Some(shapes);
+    }
+
+    pub fn draw_legend(&self, painter: &egui::Painter, rect: Rect) {
+        let pad = 8.0;
+        let w = 280.0;
+        let h = 72.0;
+        let r = Rect::from_min_size(
+            Pos2::new(rect.right() - w - pad, rect.bottom() - h - pad),
+            egui::vec2(w, h),
+        );
+        painter.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_gray(200)));
+        match self.color_mode {
+            0 => self.draw_legend_hyps(painter, r),
+            _ => self.draw_legend_biome(painter, r),
+        }
+    }
+
+    fn draw_legend_hyps(&self, painter: &egui::Painter, r: Rect) {
+        let pal = crate::colormap::hyps_default_palette();
+        let elev_min = -self.depth_minmax.1;
+        let elev_max = -self.depth_minmax.0;
+        let bar = Rect::from_min_size(
+            Pos2::new(r.left() + 8.0, r.center().y - 8.0),
+            egui::vec2(r.width() - 16.0, 16.0),
+        );
+        let samples = 128usize;
+        for i in 0..samples {
+            let t0 = (i as f32) / (samples as f32);
+            let t1 = ((i + 1) as f32) / (samples as f32);
+            let x0 = bar.lerp_inside(Vec2::new(t0, 0.0)).x;
+            let x1 = bar.lerp_inside(Vec2::new(t1, 0.0)).x;
+            let v = pal.vmin + t0 * (pal.vmax - pal.vmin);
+            let rgb = crate::colormap::sample_linear_srgb(pal, v);
+            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let seg = Rect::from_min_max(Pos2::new(x0, bar.top()), Pos2::new(x1, bar.bottom()));
+            painter.rect_filled(seg, 0.0, col);
+        }
+        painter.rect_stroke(bar, 0.0, Stroke::new(1.0, Color32::BLACK));
+        let txt_min = format!("{:.0} m", elev_min);
+        let txt_max = format!("{:.0} m", elev_max);
+        painter.text(
+            Pos2::new(bar.left(), bar.bottom() + 4.0),
+            egui::Align2::LEFT_TOP,
+            txt_min,
+            egui::FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        painter.text(
+            Pos2::new(bar.right(), bar.bottom() + 4.0),
+            egui::Align2::RIGHT_TOP,
+            txt_max,
+            egui::FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        if elev_max > elev_min {
+            let t0 = (0.0 - elev_min) / (elev_max - elev_min);
+            if t0.is_finite() {
+                let x = bar.left() + t0.clamp(0.0, 1.0) * bar.width();
+                painter.line_segment(
+                    [Pos2::new(x, bar.top() - 3.0), Pos2::new(x, bar.bottom() + 3.0)],
+                    Stroke::new(1.0, Color32::WHITE),
+                );
+                painter.text(
+                    Pos2::new(x, bar.top() - 6.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    "0 m",
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+            }
+        }
+    }
+
+    fn draw_legend_biome(&self, painter: &egui::Painter, r: Rect) {
+        let classes = crate::colormap::biome_default_classes();
+        let cols = 4usize;
+        let rows = ((classes.len() + cols - 1) / cols).max(1);
+        let cell_w = (r.width() - 16.0) / (cols as f32);
+        let cell_h = ((r.height() - 20.0) / (rows as f32)).max(14.0);
+        let mut idx = 0usize;
+        for row in 0..rows {
+            for col in 0..cols {
+                if idx >= classes.len() {
+                    break;
+                }
+                let x = r.left() + 8.0 + (col as f32) * cell_w;
+                let y = r.top() + 8.0 + (row as f32) * cell_h;
+                let sw = Rect::from_min_size(Pos2::new(x, y), egui::vec2(18.0, 10.0));
+                let c = classes[idx].rgb;
+                painter.rect_filled(sw, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+                painter.text(
+                    Pos2::new(sw.right() + 4.0, y + 5.0),
+                    egui::Align2::LEFT_CENTER,
+                    &classes[idx].name,
+                    egui::FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
+                idx += 1;
+            }
+        }
     }
 
     /// Build flexure deflection overlay as a lightweight point mesh colored by value.
@@ -860,5 +1014,69 @@ impl OverlayState {
         }
         self.trans_pull = Some(shapes_p);
         self.trans_rest = Some(shapes_r);
+    }
+}
+
+fn compute_hillshade(
+    out: &mut [f32],
+    grid: &engine::grid::Grid,
+    depth_m: &[f32],
+    sun_az_deg: f32,
+    sun_alt_deg: f32,
+) {
+    let n = grid.cells;
+    if out.len() < n {
+        return;
+    }
+    let az = sun_az_deg.to_radians();
+    let alt = sun_alt_deg.to_radians();
+    let l_e = alt.cos() * az.sin();
+    let l_n = alt.cos() * az.cos();
+    let l_u = alt.sin();
+    for i in 0..n {
+        let lat_i = grid.latlon[i][0];
+        let lon_i = grid.latlon[i][1];
+        let elev_i = -depth_m[i];
+        let mut s_xx = 0.0f64;
+        let mut s_xy = 0.0f64;
+        let mut s_yy = 0.0f64;
+        let mut s_xz = 0.0f64;
+        let mut s_yz = 0.0f64;
+        let cos_lat = lat_i.cos();
+        for &nj in &grid.n1[i] {
+            let j = nj as usize;
+            let lat_j = grid.latlon[j][0];
+            let lon_j = grid.latlon[j][1];
+            let dx = (lon_j - lon_i) * cos_lat * R_EARTH_M;
+            let dy = (lat_j - lat_i) * R_EARTH_M;
+            let dz = (-depth_m[j] - elev_i) as f64;
+            let dx64 = dx as f64;
+            let dy64 = dy as f64;
+            s_xx += dx64 * dx64;
+            s_xy += dx64 * dy64;
+            s_yy += dy64 * dy64;
+            s_xz += dx64 * dz;
+            s_yz += dy64 * dz;
+        }
+        let det = s_xx * s_yy - s_xy * s_xy;
+        let (gx, gy) = if det.abs() > 1e-6 {
+            let inv_xx = s_yy / det;
+            let inv_xy = -s_xy / det;
+            let inv_yy = s_xx / det;
+            let gx = inv_xx * s_xz + inv_xy * s_yz;
+            let gy = inv_xy * s_xz + inv_yy * s_yz;
+            (gx as f32, gy as f32)
+        } else {
+            (0.0f32, 0.0f32)
+        };
+        let nx = -gx;
+        let ny = -gy;
+        let nz = 1.0f32;
+        let inv_len = (nx * nx + ny * ny + nz * nz).sqrt().recip();
+        let nx = nx * inv_len;
+        let ny = ny * inv_len;
+        let nz = nz * inv_len;
+        let shade = (nx * l_e + ny * l_n + nz * l_u).max(0.0);
+        out[i] = shade;
     }
 }

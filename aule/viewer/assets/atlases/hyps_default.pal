@@ -1,0 +1,17 @@
+# hyps_default.pal
+# domain: meters elevation (ocean negative, land positive)
+# columns: value_m  sRGB_hex
+-8000  #001E62
+-6000  #2A60B3
+-4000  #4BA3D8
+-2000  #80D4E8
+ -200  #D5F2F9
+    0  #F4EAD3   # sand
+ 1000  #C9D29B
+ 2000  #9FB26E
+ 3000  #7A8E4E
+ 4000  #5E6E3B
+ 6000  #FFFFFF
+
+
+
