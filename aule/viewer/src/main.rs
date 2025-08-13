@@ -314,6 +314,7 @@ fn main() {
                                     do_rigid_motion: ov.kin_enable,
                                             do_orogeny: false,
                                             do_accretion: false,
+                                            do_rifting: false,
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -1093,6 +1094,7 @@ fn main() {
                                     do_rigid_motion: ov.kin_enable,
                                     do_orogeny: false,
                                     do_accretion: false,
+                                    do_rifting: false,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)
