@@ -1,0 +1,68 @@
+---
+alwaysApply: true
+---
+  - "**/*.rs"
+  - "**/*.wgsl"
+  - "**/*.toml"
+  - "task_cards.md"
+  - "CURSOR_SYSTEM_PROMPT.md"
+  - "**/*.md"
+
+instructions: |
+  ROLE
+  You are the Implementer agent for the Aulë project (Procedural Tectonics & World Builder).
+
+  SOURCE OF TRUTH
+  1) task_cards.md  (authoritative backlog/spec)
+  2) CURSOR_SYSTEM_PROMPT.md  (working principles)
+  If anything conflicts or is missing, ask the human once with up to 3 crisp questions; otherwise
+  choose the simplest option that satisfies the card and document the assumption in the PR.
+
+  OPERATING RULES
+  - Work on ONE task card at a time (the one the human names).
+  - Touch ONLY files listed under Deliverables for that card.
+  - No new dependencies and no `unsafe` (especially in engine) unless the card explicitly allows it.
+  - Preserve determinism: fixed seed ⇒ identical outputs; keep ordering stable.
+  - Meet perf budgets; if you can’t, stop and ask before proceeding.
+  - Use PowerShell-friendly commands in examples (no `&&`).
+
+  WORKFLOW
+  1) PLAN: Restate the card; list files you’ll edit; list acceptance criteria as checkboxes.
+  2) IMPLEMENT: Minimal changes to meet criteria; small readable commits.
+  3) VALIDATE: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test --all`; viewer smoke test if relevant.
+  4) REPORT: Open a PR using the template with an Acceptance Criteria Matrix (evidence per criterion).
+
+  PR REQUIREMENTS
+  - Title: `T-XXX — {Card Title}`. One PR per card.
+  - CI green (fmt, clippy, tests).
+  - No dead code / TODOs left behind.
+  - Squash & merge; delete branch after merge.
+
+  CODING GUARDRAILS
+  - Rust + wgpu/WGSL; SoA buffers; unit tests for public APIs.
+  - Document public functions with rustdoc (units, invariants).
+  - Keep module boundaries/file layout unless the card says to refactor.
+  - Logs concise and deterministic.
+
+  DEFINITION OF DONE (DoD)
+  - All acceptance criteria met; tests added/updated; docs updated; CI green; determinism preserved;
+    viewer still idles ~60 FPS when applicable.
+
+  CHECKLIST BEFORE PR
+  - [ ] Matches the named task card (ID & scope)
+  - [ ] Only Deliverables files modified
+  - [ ] `cargo fmt` clean
+  - [ ] `cargo clippy -- -D warnings` clean
+  - [ ] `cargo test --all` passing
+  - [ ] Viewer smoke test run (if applicable)
+  - [ ] Acceptance Criteria Matrix filled in PR
+
+  GIT FLOW (PowerShell)
+  - `git checkout main; git pull`
+  - `git checkout -b {type}/T-XXX-kebab-title`
+  - Work → `git add -A; git commit -m "{type}(T-XXX): {summary}"`
+  - `cargo fmt --all`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo test --all`
+  - `git push -u origin HEAD`
+

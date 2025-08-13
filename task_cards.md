@@ -1,4 +1,4 @@
-# Aulë – Cursor Task Cards (v0.1)
+# Aulë – Cursor Task Cards (v0.2)
 
 > **Source of truth:** Follow these cards exactly. If anything is ambiguous, ask the Architect (lead model) before deviating. Do not introduce new dependencies without an explicit card.
 
@@ -21,6 +21,147 @@
 * Benchmarks (if perf‑related) updated and pass on CI.
 * Docs: README section or docs page updated.
 * No dead code, no TODOs left in code.
+
+---
+
+## GitHub workflow (for every task)
+
+**Branching policy**
+
+* Start from up-to-date `main`.
+* Create a new branch named with the pattern: `{type}/T-XXX-kebab-title` where `{type}` ∈ {`feat`, `fix`, `chore`, `docs`}.
+* Keep scope to the card’s Deliverables only. If a task depends on another in-flight task, open as a **Draft PR** and mark the dependency in the PR description.
+
+**Commands (copy/paste)**
+
+*PowerShell*
+
+```powershell
+# ensure main is current
+git checkout main; git pull
+# create task branch (example for T-015)
+git checkout -b feat/T-015-tile-partitioning
+# work…
+git add -A; git commit -m "feat(T-015): implement tile partitioning"
+# publish branch and open PR
+git push -u origin HEAD
+```
+
+*Bash*
+
+```bash
+# ensure main is current
+git checkout main && git pull
+# create task branch (example for T-015)
+git checkout -b feat/T-015-tile-partitioning
+# work…
+git add -A && git commit -m "feat(T-015): implement tile partitioning"
+# publish branch and open PR
+git push -u origin HEAD
+```
+
+**PR rules**
+
+* One PR per task. Use the template. Title: `T-XXX — {Title}`.
+* CI must be green (fmt, clippy, tests). If blocked by another PR, keep as **Draft**.
+* Prefer **Squash & merge**; delete the branch after merge.
+
+**Keeping in sync**
+
+*PowerShell*
+
+```powershell
+git fetch origin
+# rebase your branch on latest main (preferred)
+git rebase origin/main
+# or merge if necessary (avoid unless conflicts are complex)
+# git merge origin/main
+```
+
+*Bash*
+
+```bash
+git fetch origin
+# rebase your branch on latest main (preferred)
+git rebase origin/main
+# or merge if necessary (avoid unless conflicts are complex)
+# git merge origin/main
+```
+
+\*\*Branch types by card\*\*
+
+\- T-000: \`feat/T-000-bootstrap\`
+
+\- T-005: \`chore/T-005-lints\`
+
+\- T-008: \`docs/T-008-docs-site\`
+
+\- T-010: \`feat/T-010-grid\`
+
+\- T-015: \`feat/T-015-tiling\`
+
+\- T-020: \`feat/T-020-fields\` (\*\*Draft\*\* until T-015 merges)
+
+\- T-030: \`feat/T-030-plates\`
+
+\- T-040: \`feat/T-040-boundaries\`
+
+\- T-051: \`feat/T-051-continents\`
+
+\- T-060: \`feat/T-060-age-bathy\`
+
+\- T-061: \`feat/T-061-age-depth-plot\`
+
+\- T-070: \`feat/T-070-subduction\`
+
+\- T-071: \`feat/T-071-rollback\`
+
+\- T-072: \`feat/T-072-transforms\`
+
+\- T-073: \`feat/T-073-edge-kinematics\`
+
+\- T-080a: \`feat/T-080a-flexure-ref\`
+
+\- T-080b: \`feat/T-080b-flexure-gpu\`
+
+\- T-082: \`feat/T-082-flexure-coupling\`
+
+\- T-090: \`feat/T-090-isostasy\`
+
+\- T-100: \`feat/T-100-hydro-erosion\`
+
+\- T-101: \`feat/T-101-sediment\`
+
+\- T-102: \`chore/T-102-benchmarks\`
+
+\- T-110: \`feat/T-110-winds-precip\`
+
+\- T-111: \`feat/T-111-orographic\`
+
+\- T-120: \`feat/T-120-viewer-controls\`
+
+\- T-130: \`feat/T-130-exporters\`
+
+\- T-131: \`feat/T-131-color-atlases\`
+
+\- T-140: \`feat/T-140-pygplates\`
+
+\- T-200: \`feat/T-200-cli\`
+
+\- T-201: \`feat/T-201-python-bindings\`
+
+\- T-300: \`chore/T-300-benchmarks\`
+
+\- T-310: \`chore/T-310-deterministic-rng\`
+
+\- T-320: \`chore/T-320-logging\`
+
+**Conventional commits (recommended)**
+
+* `feat(T-015): add tiler with halo=2`
+* `fix(T-010): correct UP loop bounds`
+* `docs(T-008): add site-url=/aule/ and README badge`
+* `chore(T-005): tighten clippy and add CONTRIBUTING`
 
 ---
 
@@ -106,6 +247,18 @@
 **Acceptance criteria:** Unit test on synthetic 3‑plate setup; correct counts/types.
 **Dependencies:** T‑030.
 
+\### T-073 — Persist per-edge kinematics
+
+\*\*Objective:\*\* Store \`(n, t, n̂, t̂)\` once during boundary classification and reuse in subduction/transforms.
+
+\*\*Deliverables:\*\* Extend \`Boundaries\` with \`edge\_kin: Vec\<EdgeKin>\`; refactor \`subduction.rs\` and \`transforms.rs\` to consume; tests comparing stored vs recomputed \`(n,t)\`; no behavior change.
+
+\*\*Implementation outline:\*\* Canonicalize edges \`u\<v\`; compute midpoint frame and project velocities via shared helper; sort by \`(u,v)\`.
+
+\*\*Acceptance criteria:\*\* Stored vs ad-hoc \`(n,t)\` agree within 1e-9; subduction/transforms masks & stats unchanged; CI green.
+
+\*\*Dependencies:\*\* T-040.
+
 ### T‑120a — Viewer overlays (plates)
 
 **Objective:** Visualize plate IDs, velocity vectors, and boundary types.
@@ -124,6 +277,24 @@
 **Implementation outline:** Identify ridge cells; reset `age_ocean=0`; initialize oceanic thickness proxy; smear to 1‑ring.
 **Acceptance criteria:** Age histogram shows births at ridges; land fraction remains stable.
 **Dependencies:** T‑040, T‑020.
+
+\### T-051 — Continental mask (synthetic)
+
+\*\*Objective:\*\* Deterministic large-scale cratons to create land; overlay + amplitude targeting.
+
+\*\*Deliverables:\*\* \`engine/src/continent.rs\` (caps + smooth union + template, amplitude solve & apply), unit tests; viewer HUD & overlay (toggle \*\*C\*\*) with seed/n/radius/falloff, auto-amplitude to target land %, manual amplitude, cached meshes; recompute order before sea level.
+
+\*\*Implementation outline:\*\*
+
+\- Place \`n\` spherical caps from seed; plateau inside mean radius; Gaussian falloff; smooth-union into \[0,1] template.
+
+\- Solve amplitude by bisection to hit target area-weighted land fraction, else use manual amplitude.
+
+\- Apply uplift: \`depth += -(amp \* template)\`; build land mask & coastline mesh; cache.
+
+\*\*Acceptance criteria:\*\* Deterministic template; auto target within ±1 pp land %; viewer overlay renders; recompute finishes in a few ms at F=64.
+
+\*\*Dependencies:\*\* T-060 (depth), T-070/T-072 (order in recompute).
 
 ### T‑060 — Oceanic age & age→depth
 
@@ -170,20 +341,43 @@
 
 ## Sprint 5 – Flexure & Isostasy (Week 5–6)
 
-### T‑080 — Flexural solver (variable Te)
+### ### T-080a — Flexure reference (CPU, 1D)
 
-**Objective:** Thin‑plate elastic flexure with multigrid on tiles.
-**Deliverables:** `engine/src/flexure.rs`, `shaders/flexure_*.wgsl`.
-**Implementation outline:** Assemble loads (topo+sediment+water); 2–3 V‑cycles per step; mixed BC via tiling halos.
-**Acceptance criteria:** Line‑load analytic test within 5%; converges in < 10 iterations typical.
-**Dependencies:** T‑020, T‑100 (sediment load later).
 
-### T‑090 — Airy coupling
+\*\*Objective:\*\* Analytic line-load reference and CG solver for 1D plate on Winkler foundation; viewer plot (\*\*F\*\*).
 
-**Objective:** Local buoyancy snap without double counting against flexure.
-**Deliverables:** `engine/src/isostasy.rs`.
-**Acceptance criteria:** No drift in mean sea level; hills/mountains respond sensibly to erosion changes.
-**Dependencies:** T‑080.
+\*\*Deliverables:\*\* \`engine/src/flexure.rs\` (D\_from\_Te, alpha, w\_line\_analytic, 1D CG solver), tests (RMS ≤5% vs analytic), viewer plot with iterations/residual/RMS.
+
+\*\*Dependencies:\*\* T-020.
+
+\### T-080b — Flexure WGSL multigrid (tiles)
+
+\*\*Objective:\*\* WGSL kernels and multigrid V-cycle on tiled atlas; manufactured solution residual reduction.
+
+\*\*Deliverables:\*\* \`engine/src/flexure\_gpu.rs\`, \`shaders/flexure.wgsl\` (apply\_A, residual, Jacobi, restrict, prolong), tests: CPU vs GPU operator (1e-5), ignored GPU residual reduction (<0.5).
+
+\*\*Dependencies:\*\* T-020, T-080a.
+
+\### T-082 — Flexure load assembly & viewer coupling
+
+\*\*Objective:\*\* Assemble loads from depth (water/rock), run 1–2 GPU V-cycles, apply deflection in viewer; HUD controls.
+
+\*\*Deliverables:\*\* \`engine/src/flexure\_loads.rs\` (assemble), viewer HUD (G) with params (E,ν,Te,k,ω,ν1,ν2,levels), residual log; optional w overlay.
+
+\*\*Acceptance criteria:\*\* Residual reduction printed; depth changes visibly near loads; toggle on/off works; CI green.
+
+\*\*Dependencies:\*\* T-080b, T-051, T-090.
+
+### ### T-090 — Global sea-level constraint (isostasy MVP)
+
+
+\*\*Objective:\*\* Maintain constant reference ocean volume by solving a uniform sea-level offset; viewer toggle (\*\*L\*\*) with target fraction.
+
+\*\*Deliverables:\*\* \`engine/src/isostasy.rs\` (ocean volume, bisection solve, apply offset), tests (monotonicity, solver accuracy, idempotence, determinism); viewer HUD (persisted target fraction, extra Δoffset, lockable bathy scale, 0 m coastline).
+
+\*\*Acceptance criteria:\*\* Logs show non-zero offset when hypsometry changes; coastline shift visible with locked scale; CI green.
+
+\*\*Dependencies:\*\* T-060, T-051.
 
 ---
 
@@ -326,7 +520,7 @@
 
 ### `CURSOR_SYSTEM_PROMPT.md`
 
-**Paste this entire block into Cursor → Workspace Settings → Instructions. Also commit it at repo root as `CURSOR_SYSTEM_PROMPT.md`.**
+**Paste this entire block into Cursor → Workspace Settings → Instructions. Also commit it at repo root as ****************************`CURSOR_SYSTEM_PROMPT.md`****************************.**
 
 ```
 Title: Aulë Implementer Agent — System Prompt
