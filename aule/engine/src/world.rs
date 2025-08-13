@@ -113,6 +113,8 @@ pub struct StepParams {
     pub do_ridge_birth: bool,
     /// If true, auto re-baseline sea level after continents change.
     pub auto_rebaseline_after_continents: bool,
+    /// Enable rigid plate motion (advect plate_id and update velocities)
+    pub do_rigid_motion: bool,
 }
 
 /// Result summary for one step.
@@ -144,8 +146,18 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     let n = world.grid.cells;
     let dt_myr_f32 = sp.dt_myr as f32;
 
-    // B) velocities from plates
-    world.v_en.clone_from(&world.plates.vel_en);
+    // B) velocities from plates using current plate ids (or static if disabled)
+    let vel3 = if sp.do_rigid_motion {
+        world.v_en = crate::plates::velocity_en_m_per_yr(
+            &world.grid,
+            &world.plates,
+            &world.plates.plate_id,
+        );
+        crate::plates::velocity_field_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id)
+    } else {
+        world.v_en.clone_from(&world.plates.vel_en);
+        vec![[0.0f32, 0.0f32, 0.0f32]; world.grid.cells]
+    };
 
     // Diagnostics for velocities
     let mut vmin = f64::INFINITY;
@@ -189,6 +201,19 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &mut world.c,
             &mut world.th_c_m,
         );
+    }
+
+    // C) advect plate_id via semi-Lagrangian nearest-neighbor
+    if sp.do_rigid_motion {
+        let mut pid_new = world.plates.plate_id.clone();
+        crate::sl_advect::advect_plate_id(
+            &world.grid,
+            &vel3,
+            sp.dt_myr,
+            &world.plates.plate_id,
+            &mut pid_new,
+        );
+        world.plates.plate_id = pid_new;
     }
 
     // D) boundaries classify
