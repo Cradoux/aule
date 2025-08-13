@@ -116,6 +116,17 @@ pub struct OverlayState {
     pub max_points_flex: usize, // overlay cap
     pub last_residual: f32,     // r_out / max(1,r_in)
     pub flex_mesh: Option<Mesh>,
+    pub subtract_mean_load: bool,
+    pub flex_cycles: u32,
+    pub flex_gain: f32,
+    pub apply_gain_to_depth: bool,
+    pub flex_overlay_count: usize,
+
+    // Viewport tracking and debounce
+    pub last_map_rect_px: [i32; 4], // x,y,w,h rounded
+    pub viewport_epoch: u64,
+    pub world_dirty: bool,
+    pub flex_dirty: bool,
 }
 
 impl Default for OverlayState {
@@ -209,7 +220,37 @@ impl Default for OverlayState {
             max_points_flex: 10_000,
             last_residual: 0.0,
             flex_mesh: None,
+            subtract_mean_load: true,
+            flex_cycles: 1,
+            flex_gain: 1.0,
+            apply_gain_to_depth: false,
+            flex_overlay_count: 0,
+
+            last_map_rect_px: [0, 0, 0, 0],
+            viewport_epoch: 0,
+            world_dirty: false,
+            flex_dirty: false,
         }
+    }
+}
+
+impl OverlayState {
+    /// Invalidate all cached overlay meshes so they will rebuild next frame.
+    pub fn invalidate_all_meshes(&mut self) {
+        self.plates_cache = None;
+        self.vel_cache = None;
+        self.bounds_cache = None;
+        self.age_cache = None;
+        self.bathy_cache = None;
+        self.subd_trench = None;
+        self.subd_arc = None;
+        self.subd_backarc = None;
+        self.trans_pull = None;
+        self.trans_rest = None;
+        self.mesh_continents = None;
+        self.mesh_coastline = None;
+        self.flex_mesh = None;
+        self.flex_overlay_count = 0;
     }
 }
 
