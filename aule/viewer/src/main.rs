@@ -3,6 +3,7 @@
 
 mod overlay;
 mod plot;
+mod plot_age_depth;
 mod plot_flexure;
 
 use egui_wgpu::Renderer as EguiRenderer;
@@ -184,6 +185,7 @@ fn main() {
     let mut egui_renderer = EguiRenderer::new(&gpu.device, surface_format, None, 1);
     let mut ov = overlay::OverlayState::default();
     let mut flex = plot_flexure::FlexureUI::default();
+    let mut age_plot = plot_age_depth::AgeDepthUIState::default();
     // T-020: Construct device field buffers sized to the grid (then drop)
     {
         let f: u32 = 64;
@@ -250,6 +252,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::A)) { age_plot.show = !age_plot.show; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
@@ -441,6 +444,18 @@ fn main() {
                                             plot_ui.line(pdata.binned);
                                             plot_ui.line(pdata.reference);
                                         });
+                                });
+                            }
+
+                            if age_plot.show {
+                                egui::TopBottomPanel::bottom("age_depth_panel_2").show(ctx, |ui| {
+                                    // Construct pre-sea-level depth from age only
+                                    let mut depth_pre = vec![0.0f32; world.grid.cells];
+                                    for (i, v) in depth_pre.iter_mut().enumerate().take(world.grid.cells) {
+                                        let d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+                                        *v = d.clamp(0.0, 6000.0);
+                                    }
+                                    plot_age_depth::ui(&mut age_plot, ui, &world.grid, &world.age_myr, &depth_pre, &world.depth_m);
                                 });
                             }
 

@@ -41,6 +41,34 @@ pub fn depth_from_age(age_myr: f64, d0: f64, a: f64, b: f64) -> f64 {
     d0 + a * age_myr.sqrt() + b * age_myr
 }
 
+/// Half-space cooling depth model using thermal diffusivity `k_m2_s`.
+/// Units: `age_myr` in Myr, `d0_m` and result in meters, `k_m2_s` in m^2/s.
+/// This simple parameterization is tuned to produce ~2–6 km depths over 0–120 Myr
+/// for typical values (d0≈2600 m, k≈1e-6 m^2/s).
+#[inline]
+pub fn depth_from_age_hsc(age_myr: f64, d0_m: f64, k_m2_s: f64) -> f64 {
+    let age_s = (age_myr.max(0.0)) * 1.0e6_f64 * 365.25_f64 * 86400.0_f64;
+    let k = k_m2_s.max(0.0);
+    // Empirical scale factor to keep depths in a reasonable range
+    let c = 0.02_f64;
+    d0_m + c * (k * age_s).sqrt()
+}
+
+/// Plate cooling depth model with asymptotic plate thickness/maximum depth `z_plate_m`.
+/// For simplicity we cap the HSC curve at `z_plate_m`. With large `z_plate_m` the
+/// result approaches HSC at young ages. `t_myr` is accepted for API completeness but
+/// not used in this minimal implementation.
+#[inline]
+pub fn depth_from_age_plate(
+    age_myr: f64,
+    d0_m: f64,
+    _t_myr: f64,
+    z_plate_m: f64,
+    k_m2_s: f64,
+) -> f64 {
+    depth_from_age_hsc(age_myr, d0_m, k_m2_s).min(z_plate_m.max(d0_m))
+}
+
 #[derive(Copy, Clone, Debug)]
 struct QueueItem {
     t_yr: f64,
