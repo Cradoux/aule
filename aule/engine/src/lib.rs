@@ -37,6 +37,8 @@ pub mod orogeny;
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).
 pub mod ridge;
+/// Continental rifting and passive margins.
+pub mod rifting;
 /// Semi-Lagrangian advection helpers (CPU, deterministic).
 pub mod sl_advect;
 /// Snapshot IO utilities (CSV/binary)

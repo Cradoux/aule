@@ -119,6 +119,8 @@ pub struct StepParams {
     pub do_orogeny: bool,
     /// Enable O–C accretion (arc/forearc growth)
     pub do_accretion: bool,
+    /// Enable continental rifting and passive margins
+    pub do_rifting: bool,
 }
 
 /// Result summary for one step.
@@ -325,6 +327,40 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &mut world.depth_m,
             &world.area_m2,
             &p_acc,
+            sp.dt_myr,
+        );
+    }
+
+    // F.8) Continental rifting before transforms/orogeny/flexure
+    if sp.do_rifting {
+        let p_rift = crate::rifting::RiftingParams {
+            c_rift_min: 0.6,
+            v_open_min_m_per_yr: 0.001,
+            w_core_km: 60.0,
+            w_taper_km: 250.0,
+            k_thin: 0.15,
+            alpha_subs: 1.0,
+            ocean_thresh: 0.15,
+            k_c_oceanize: 0.05,
+            reset_age_on_core: true,
+            enable_shoulder: false,
+            w_bulge_km: 120.0,
+            beta_shoulder: 0.3,
+            couple_flexure: false,
+            thc_min_m: 20_000.0,
+            thc_max_m: 70_000.0,
+        };
+        let _ = crate::rifting::apply_rifting(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &vel3,
+            &mut world.c,
+            &mut world.th_c_m,
+            &mut world.age_myr,
+            &mut world.depth_m,
+            &world.area_m2,
+            &p_rift,
             sp.dt_myr,
         );
     }
