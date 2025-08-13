@@ -315,7 +315,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     // Stats for log line
     let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
     let mut weighted_c: f64 = 0.0;
-    for i in 0..n { weighted_c += (world.c[i] as f64) * (world.area_m2[i] as f64); }
+    for i in 0..n {
+        weighted_c += (world.c[i] as f64) * (world.area_m2[i] as f64);
+    }
     let c_bar = if total_area > 0.0 { weighted_c / total_area } else { 0.0 };
 
     // Advect diagnostics (rough backtrace distance)

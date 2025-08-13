@@ -158,7 +158,6 @@ pub struct OverlayState {
     pub sun_alt_deg: f32,
     pub legend_on: bool,
     pub color_dirty: bool,
-
 }
 
 impl Default for OverlayState {
@@ -287,7 +286,6 @@ impl Default for OverlayState {
             sun_alt_deg: 45.0,
             legend_on: true,
             color_dirty: true,
-
         }
     }
 }
@@ -328,6 +326,36 @@ pub fn project_equirect(lat: f32, lon: f32, rect: Rect) -> Pos2 {
     let x = ((lon as f64 + std::f64::consts::PI) / (2.0 * std::f64::consts::PI)) as f32 * w;
     let y = (1.0 - ((lat as f64 + std::f64::consts::FRAC_PI_2) / std::f64::consts::PI) as f32) * h;
     Pos2::new(rect.left() + x, rect.top() + y)
+}
+
+/// Wrap-aware midpoint between two projected points on an equirectangular map.
+///
+/// If the segment crosses the antimeridian (|dx| > 0.5*width), virtually unwrap one
+/// endpoint so the midpoint is computed along the shorter wrapped arc, then wrap the
+/// result back to the viewport.
+fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
+    let w = rect.width();
+    let x1 = pu.x;
+    let mut x2 = pv.x;
+    if (x2 - x1).abs() > 0.5 * w {
+        if x2 > x1 {
+            x2 -= w;
+        } else {
+            x2 += w;
+        }
+    }
+    let xm = 0.5 * (x1 + x2);
+    let ym = 0.5 * (pu.y + pv.y);
+    let mut xr = xm;
+    let left = rect.left();
+    let right = rect.right();
+    while xr < left {
+        xr += w;
+    }
+    while xr >= right {
+        xr -= w;
+    }
+    Pos2::new(xr, ym)
 }
 
 pub fn build_plate_points(rect: Rect, latlon: &[[f32; 2]], plate_id: &[u16]) -> Vec<Shape> {
@@ -371,8 +399,14 @@ pub fn build_boundary_strokes(
     for (idx, &(u, v, class)) in edges.iter().enumerate().step_by(step) {
         let pu = project_equirect(latlon[u as usize][0], latlon[u as usize][1], rect);
         let pv = project_equirect(latlon[v as usize][0], latlon[v as usize][1], rect);
-        let center = Pos2::new((pu.x + pv.x) * 0.5, (pu.y + pv.y) * 0.5);
-        let dir = (pv - pu).normalized();
+        let center = wrap_midpoint_equirect(pu, pv, rect);
+        // Wrap-aware short direction
+        let w = rect.width();
+        let mut dx = pv.x - pu.x;
+        if dx.abs() > 0.5 * w {
+            dx += if dx < 0.0 { w } else { -w };
+        }
+        let dir = Vec2::new(dx, pv.y - pu.y).normalized();
         let orth = Vec2::new(-dir.y, dir.x);
         let half = orth * 3.0;
         let color = match class {
@@ -682,8 +716,13 @@ impl OverlayState {
                 if (di > 0.0 && dj <= 0.0) || (di <= 0.0 && dj > 0.0) {
                     let pu = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
                     let pv = project_equirect(grid.latlon[j][0], grid.latlon[j][1], rect);
-                    let center = Pos2::new((pu.x + pv.x) * 0.5, (pu.y + pv.y) * 0.5);
-                    let dir = (pv - pu).normalized();
+                    let center = wrap_midpoint_equirect(pu, pv, rect);
+                    let w = rect.width();
+                    let mut dx = pv.x - pu.x;
+                    if dx.abs() > 0.5 * w {
+                        dx += if dx < 0.0 { w } else { -w };
+                    }
+                    let dir = Vec2::new(dx, pv.y - pu.y).normalized();
                     let orth = Vec2::new(-dir.y, dir.x);
                     let half = orth * 1.0;
                     coast.push(Shape::line_segment(
