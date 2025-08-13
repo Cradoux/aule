@@ -243,6 +243,7 @@ fn main() {
                     WindowEvent::RedrawRequested => {
                         let raw_input = egui_state.take_egui_input(window);
                         let full_output = egui_ctx.run(raw_input, |ctx| {
+                                let mut continents_dirty: bool = false;
                             if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
@@ -251,13 +252,14 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { continents_dirty = true; } }
                             if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  H: HUD");
+                                    ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  C: Continents  H: HUD");
                                     ui.separator();
                                     ui.label(format!(
                                         "plates={}  |V| min/mean/max = {:.2}/{:.2}/{:.2} cm/yr",
@@ -286,6 +288,22 @@ fn main() {
                                     ));
                                 });
                                 ui.separator();
+                                ui.collapsing("Continents (C)", |ui| {
+                                    let mut changed = false;
+                                    changed |= ui.add(egui::DragValue::new(&mut ov.cont_seed).speed(1.0).prefix("Seed ")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.cont_n, 1..=6).text("n continents")).changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.cont_radius_km, 800.0..=3500.0).text("Radius (km)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.cont_falloff_km, 200.0..=1200.0).text("Falloff σ (km)")) .changed();
+                                    changed |= ui.checkbox(&mut ov.cont_auto_amp, "Auto amplitude to target land %").changed();
+                                    if ov.cont_auto_amp {
+                                        changed |= ui.add(egui::Slider::new(&mut ov.cont_target_land_frac, 0.10..=0.60).text("Target land %")).changed();
+                                    } else {
+                                        changed |= ui.add(egui::Slider::new(&mut ov.cont_manual_amp_m, 0.0..=5000.0).text("Manual amplitude (m)")) .changed();
+                                    }
+                                    changed |= ui.add(egui::Slider::new(&mut ov.cont_max_points, 1000..=50_000).text("Max overlay points")).changed();
+                                    ui.label(format!("land = {:.1}%  amplitude = {:.0} m", ov.cont_land_frac * 100.0, ov.cont_amp_applied_m));
+                                    if changed { ov.mesh_continents=None; ov.mesh_coastline=None; ov.bathy_cache=None; continents_dirty = true; }
+                                });
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::Slider::new(&mut ov.vel_scale_px_per_cm_yr, 0.1..=2.0)
@@ -490,8 +508,8 @@ fn main() {
                                     if let Some(v) = &ov.subd_arc { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.subd_backarc { for s in v { painter.add(s.clone()); } }
                                 }
-                                if ov.show_transforms || ov.apply_sea_level {
-                                    if ov.trans_pull.is_none() && ov.trans_rest.is_none() {
+                                if ov.show_transforms || ov.apply_sea_level || ov.show_continents {
+                                    if ov.trans_pull.is_none() && ov.trans_rest.is_none() || continents_dirty {
                                         // Recompute depth: baseline -> subduction -> transforms, avoiding overlaps
                                         // Baseline from age
                                         let mut depth_base = vec![0.0f32; world.grid.cells];
@@ -553,6 +571,42 @@ fn main() {
                                                 final_depth[i] += delta_t;
                                             }
                                         }
+                                        // Continents: build/apply before sea-level
+                                        if ov.show_continents || continents_dirty {
+                                            let key = overlay::ContKey {
+                                                seed: ov.cont_seed,
+                                                n: ov.cont_n,
+                                                radius_km: ov.cont_radius_km.round() as u32,
+                                                falloff_km: ov.cont_falloff_km.round() as u32,
+                                                f: world.grid.frequency,
+                                            };
+                                            if ov.cont_key != Some(key) || ov.cont_template.is_none() {
+                                                let cp = engine::continent::ContinentParams {
+                                                    seed: ov.cont_seed,
+                                                    n_continents: ov.cont_n,
+                                                    mean_radius_km: ov.cont_radius_km,
+                                                    falloff_km: ov.cont_falloff_km,
+                                                    plateau_uplift_m: 1.0,
+                                                    target_land_fraction: None,
+                                                };
+                                                let cf = engine::continent::build_continents(&world.grid, cp);
+                                                ov.cont_template = Some(cf.uplift_template_m);
+                                                ov.cont_key = Some(key);
+                                            }
+                                            if let Some(tmpl) = ov.cont_template.as_ref() {
+                                            let depth_pre = final_depth.clone();
+                                                let amp_m: f32 = if ov.cont_auto_amp {
+                                                    engine::continent::solve_amplitude_for_target_land_fraction(
+                                                        &depth_pre, tmpl, &world.area_m2, ov.cont_target_land_frac as f64, 1e-3, 64,
+                                                    )
+                                                } else { ov.cont_manual_amp_m };
+                                                let (_mask_land, land_frac) = engine::continent::apply_continents(
+                                                    &mut final_depth, tmpl, amp_m, &world.area_m2,
+                                                );
+                                                ov.cont_amp_applied_m = amp_m;
+                                                ov.cont_land_frac = land_frac;
+                                            }
+                                        }
                                         // Apply global sea level if requested
                                         if ov.apply_sea_level {
                                             let area_sum: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
@@ -565,7 +619,7 @@ fn main() {
                                                 // Manual extra offset for exploration
                                                 let total_off = off + (ov.extra_offset_m as f64);
                                                 engine::isostasy::apply_sea_level_offset(&mut final_depth, total_off);
-                                                ov.last_isostasy_offset_m = total_off as f64;
+                                                ov.last_isostasy_offset_m = total_off;
                                                 let (v_b, a_b) = engine::isostasy::ocean_volume_from_depth(&before, &world.area_m2);
                                                 let (v_a, a_a) = engine::isostasy::ocean_volume_from_depth(&final_depth, &world.area_m2);
                                                 println!(
@@ -579,19 +633,44 @@ fn main() {
                                                 println!("[isostasy] Offset to first land: {:.0} m", off_first_land);
                                             }
                                         }
-                                        world.depth_m = final_depth;
+                                         world.depth_m = final_depth;
+                                         // Build continent meshes against final depths (post sea-level)
+                                         if ov.show_continents {
+                                             let mask_post: Vec<bool> = world.depth_m.iter().map(|&d| d <= 0.0).collect();
+                                             let (m_land, m_coast) = ov.rebuild_continent_meshes(
+                                                 rect, &world.grid, &world.depth_m, &mask_post, ov.cont_max_points,
+                                             );
+                                             ov.mesh_continents = Some(m_land);
+                                             ov.mesh_coastline = Some(m_coast);
+                                             println!(
+                                                 "[continent] seed={} n={} radius={} falloff={} amp={:.0}m land={:.1}% (auto={})",
+                                                 ov.cont_seed, ov.cont_n, ov.cont_radius_km.round() as u32, ov.cont_falloff_km.round() as u32,
+                                                 ov.cont_amp_applied_m, ov.cont_land_frac * 100.0, ov.cont_auto_amp
+                                             );
+                                         }
                                         // Update bathy scale
                                         if ov.lock_bathy_scale { ov.depth_minmax = ov.bathy_min_max; }
                                         else {
                                             // recompute dynamic scale
-                                            let mut dmin = f32::INFINITY; let mut dmax = f32::NEG_INFINITY;
-                                            for &d in &world.depth_m { if d.is_finite() { if d < dmin { dmin = d; } if d > dmax { dmax = d; } } }
+                                            let mut dmin = f32::INFINITY;
+                                            let mut dmax = f32::NEG_INFINITY;
+                                            for &d in &world.depth_m {
+                                                if d.is_finite() {
+                                                    if d < dmin { dmin = d; }
+                                                    if d > dmax { dmax = d; }
+                                                }
+                                            }
                                             if dmin.is_finite() && dmax.is_finite() { ov.depth_minmax = (dmin, dmax); }
                                         }
                                         ov.bathy_cache = None;
+                                        continents_dirty = false;
                                     }
                                     if let Some(v) = &ov.trans_pull { for s in v { painter.add(s.clone()); } }
                                     if let Some(v) = &ov.trans_rest { for s in v { painter.add(s.clone()); } }
+                                    if ov.show_continents {
+                                        if let Some(m) = &ov.mesh_continents { painter.add(egui::Shape::mesh(m.clone())); }
+                                        if let Some(m) = &ov.mesh_coastline { painter.add(egui::Shape::mesh(m.clone())); }
+                                    }
                                 }
                             });
                         });
