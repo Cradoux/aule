@@ -443,7 +443,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
         }
     }
 
-    // J) isostasy / sea-level: maintain reference ocean volume if available
+    // J) isostasy / sea-level: maintain reference ocean volume if available, plus slow eustasy
     if sp.do_isostasy {
         if world.sea_level_ref.is_none() {
             world.sea_level_ref = Some(isostasy::compute_ref(&world.depth_m, &world.area_m2));
@@ -456,16 +456,49 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             world.last_rebaseline_epoch = world.epoch_continents;
         }
         if let Some(r) = world.sea_level_ref {
-            let off = isostasy::solve_offset_for_volume(
+            // Isostatic offset for target volume
+            let l_iso = isostasy::solve_offset_for_volume(
                 &world.depth_m,
                 &world.area_m2,
                 r.volume_m3,
                 1e6,
                 64,
             );
-            isostasy::apply_sea_level_offset(&mut world.depth_m, off);
-            if off.abs() < 1e-3 {
-                println!("[isostasy] offset≈0 after rebaseline (|Δ|={:.4} m)", off.abs());
+            // Eustasy extra offset (policy: constant 0 in MVP)
+            let policy = crate::sea_level::EustasyPolicy::Constant { eta_m: 0.0 };
+            let eta = crate::sea_level::update_eustasy_eta(
+                world.clock.t_myr,
+                sp.dt_myr,
+                &policy,
+                &world.depth_m,
+                &world.area_m2,
+                l_iso,
+            );
+            let l_total = l_iso + eta;
+            isostasy::apply_sea_level_offset(&mut world.depth_m, l_total);
+            let ocean_frac = {
+                let mut ocean_area = 0.0f64;
+                let mut total_area = 0.0f64;
+                for i in 0..n {
+                    if world.depth_m[i] > 0.0 {
+                        ocean_area += world.area_m2[i] as f64;
+                    }
+                    total_area += world.area_m2[i] as f64;
+                }
+                if total_area > 0.0 {
+                    ocean_area / total_area
+                } else {
+                    0.0
+                }
+            };
+            println!(
+                "[sea] L_iso={:+.1} m  eta={:+.1} m  policy=constant  ocean={:.1}%",
+                l_iso,
+                eta,
+                ocean_frac * 100.0
+            );
+            if l_iso.abs() < 1e-3 {
+                println!("[isostasy] offset≈0 after rebaseline (|Δ|={:.4} m)", l_iso.abs());
             }
         }
     }

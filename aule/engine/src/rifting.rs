@@ -271,7 +271,8 @@ pub fn apply_rifting(
         }
         // Shoulder uplift bands
         if p.enable_shoulder && (in_bulge_l || in_bulge_r) {
-            let w_b: f64 = (if in_bulge_l { 1.0 } else { 0.0 }) + (if in_bulge_r { 1.0 } else { 0.0 });
+            let w_b: f64 =
+                (if in_bulge_l { 1.0 } else { 0.0 }) + (if in_bulge_r { 1.0 } else { 0.0 });
             let uplift = (p.beta_shoulder as f64) * r_thin * dt * w_b.min(1.0);
             depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
         }

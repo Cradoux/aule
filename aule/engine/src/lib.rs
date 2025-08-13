@@ -39,6 +39,8 @@ pub mod plates;
 pub mod ridge;
 /// Continental rifting and passive margins.
 pub mod rifting;
+/// Long-term eustatic sea-level controller.
+pub mod sea_level;
 /// Semi-Lagrangian advection helpers (CPU, deterministic).
 pub mod sl_advect;
 /// Snapshot IO utilities (CSV/binary)
