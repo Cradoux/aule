@@ -40,6 +40,10 @@ pub struct World {
     pub area_m2: Vec<f32>,
     /// Last flexure residual ratio (r_out / max(1, r_in)) if flexure applied this step.
     pub last_flex_residual: f32,
+    /// Continents change epoch counter (bump when C/th_c change applied).
+    pub epoch_continents: u64,
+    /// Last epoch when sea-level was re-baselined (to debounce auto mode).
+    pub last_rebaseline_epoch: u64,
 }
 
 /// Reference sea-level bookkeeping
@@ -84,6 +88,8 @@ impl World {
             sea_level_ref: None,
             area_m2,
             last_flex_residual: 0.0,
+            epoch_continents: 0,
+            last_rebaseline_epoch: 0,
         }
     }
 }
@@ -105,6 +111,8 @@ pub struct StepParams {
     pub do_continents: bool,
     /// Reset age along divergent boundaries (ridge births)
     pub do_ridge_birth: bool,
+    /// If true, auto re-baseline sea level after continents change.
+    pub auto_rebaseline_after_continents: bool,
 }
 
 /// Result summary for one step.
@@ -261,6 +269,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     // H) continents uplift
     if sp.do_continents {
         continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+        // Consider this a continents epoch change only if the uplift changed depths appreciably
+        // (we simply bump every time continents are applied in this MVP)
+        world.epoch_continents = world.epoch_continents.wrapping_add(1);
     }
 
     // I) flexure (Winkler placeholder)
@@ -293,8 +304,14 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     // J) isostasy / sea-level: maintain reference ocean volume if available
     if sp.do_isostasy {
         if world.sea_level_ref.is_none() {
-            let (v0, a0) = isostasy::ocean_volume_from_depth(&world.depth_m, &world.area_m2);
-            world.sea_level_ref = Some(SeaLevelRef { volume_m3: v0, ocean_area_m2: a0 });
+            world.sea_level_ref = Some(isostasy::compute_ref(&world.depth_m, &world.area_m2));
+        }
+        if sp.auto_rebaseline_after_continents
+            && world.epoch_continents != world.last_rebaseline_epoch
+        {
+            let area_clone: Vec<f32> = world.area_m2.clone();
+            let _ = isostasy::rebaseline(world, &area_clone);
+            world.last_rebaseline_epoch = world.epoch_continents;
         }
         if let Some(r) = world.sea_level_ref {
             let off = isostasy::solve_offset_for_volume(
@@ -305,6 +322,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 64,
             );
             isostasy::apply_sea_level_offset(&mut world.depth_m, off);
+            if off.abs() < 1e-3 {
+                println!("[isostasy] offset≈0 after rebaseline (|Δ|={:.4} m)", off.abs());
+            }
         }
     }
 

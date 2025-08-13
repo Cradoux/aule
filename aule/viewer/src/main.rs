@@ -310,6 +310,7 @@ fn main() {
                                             do_subduction: ov.show_subduction,
                                             do_continents: ov.continents_apply,
                                             do_ridge_birth: true,
+                                    auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                         };
                                         let stats = engine::world::step_once(&mut world, &sp);
                                         // Log one line for manual step
@@ -419,6 +420,21 @@ fn main() {
                                 ui.collapsing("Sea level (L)", |ui| {
                                     let mut changed = false;
                                     changed |= ui.checkbox(&mut ov.apply_sea_level, "Apply global sea level").changed();
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Re-baseline L now").clicked() {
+                                            let area = world.area_m2.clone();
+                                            let _ = engine::isostasy::rebaseline(&mut world, &area);
+                                            // Invalidate visuals (keep lock scale policy)
+                                            ov.world_dirty = true;
+                                            ov.bathy_cache = None;
+                                            println!(
+                                                "[isostasy] rebaseline: ocean_frac_ref={:.3} volume_ref={:.3e} m^3",
+                                                if let Some(r) = world.sea_level_ref { let a: f64 = world.area_m2.iter().map(|&x| x as f64).sum(); if a > 0.0 { r.ocean_area_m2 / a } else { 0.0 } } else { 0.0 },
+                                                if let Some(r) = world.sea_level_ref { r.volume_m3 } else { 0.0 }
+                                            );
+                                        }
+                                        ui.checkbox(&mut ov.auto_rebaseline_l, "Auto re-baseline after continents change");
+                                    });
                                     ui.horizontal(|ui| {
                                         ui.label("Target ocean fraction");
                                         // store temporarily in locked_depth_min/max sliders below if needed
@@ -1040,6 +1056,7 @@ fn main() {
                                     do_subduction: ov.show_subduction,
                                     do_continents: ov.continents_apply,
                                     do_ridge_birth: true,
+                                    auto_rebaseline_after_continents: ov.auto_rebaseline_l,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step)
