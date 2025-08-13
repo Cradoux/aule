@@ -105,9 +105,9 @@ pub struct OverlayState {
     // Flexure overlay/state
     pub show_flexure: bool,   // draw w overlay
     pub enable_flexure: bool, // apply w to depth
-    pub E_gpa: f32,
+    pub e_gpa: f32,
     pub nu: f32,
-    pub Te_km: f32,
+    pub te_km: f32,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -198,9 +198,9 @@ impl Default for OverlayState {
 
             show_flexure: false,
             enable_flexure: false,
-            E_gpa: 70.0,
+            e_gpa: 70.0,
             nu: 0.25,
-            Te_km: 25.0,
+            te_km: 25.0,
             k_winkler: 3.0e8f32,
             wj_omega: 0.7,
             nu1: 1,
@@ -574,7 +574,6 @@ impl OverlayState {
     ) {
         let mut mesh = Mesh::default();
         let n = grid.latlon.len().min(w_m.len());
-        let mut idxs: Vec<usize> = (0..n).collect();
         // Subsample uniformly
         let stride = (n / cap_total.max(1)).max(1);
         // Scale by min/max of w for color
@@ -594,7 +593,7 @@ impl OverlayState {
             wmin = 0.0;
             wmax = 1.0;
         }
-        for &i in idxs.iter().step_by(stride) {
+        for i in (0..n).step_by(stride) {
             let ll = grid.latlon[i];
             let p = project_equirect(ll[0], ll[1], rect);
             let col = viridis_map(w_m[i], wmin, wmax);

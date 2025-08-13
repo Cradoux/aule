@@ -292,14 +292,14 @@ fn main() {
                                     ));
                                 });
                                 ui.separator();
-                                let mut flex_dirty = false;
+                                // Flexure HUD
                                 ui.collapsing("Flexure (G)", |ui| {
                                     let mut changed = false;
                                     changed |= ui.checkbox(&mut ov.enable_flexure, "Enable flexure (apply to depth)").changed();
                                     changed |= ui.checkbox(&mut ov.show_flexure, "Show w overlay").changed();
-                                    changed |= ui.add(egui::Slider::new(&mut ov.E_gpa, 20.0..=120.0).text("E (GPa)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.e_gpa, 20.0..=120.0).text("E (GPa)")) .changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.nu, 0.15..=0.30).text("nu")).changed();
-                                    changed |= ui.add(egui::Slider::new(&mut ov.Te_km, 5.0..=50.0).text("Te (km)")) .changed();
+                                    changed |= ui.add(egui::Slider::new(&mut ov.te_km, 5.0..=50.0).text("Te (km)")) .changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.k_winkler, 0.0..=5.0e8).text("k (N/m^3)")) .changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.wj_omega, 0.6..=0.9).text("ω (WJ)")) .changed();
                                     changed |= ui.add(egui::Slider::new(&mut ov.nu1, 0..=4).text("ν1")).changed();
@@ -307,7 +307,7 @@ fn main() {
                                     changed |= ui.add(egui::Slider::new(&mut ov.levels, 1..=8).text("Levels")) .changed();
                                     let mut mp = ov.max_points_flex as u32;
                                     changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
-                                    if changed { ov.max_points_flex = mp as usize; flex_dirty = true; }
+                                    if changed { ov.max_points_flex = mp as usize; }
                                     ui.label(format!("residual ratio = {:.3}", ov.last_residual));
                                 });
                                 ui.collapsing("Continents (C)", |ui| {
@@ -684,14 +684,14 @@ fn main() {
                                          }
 
                                          // Flexure coupling: assemble loads from current depth and compute deflection
-                                         if ov.show_flexure || ov.enable_flexure || flex_dirty {
+                                         if ov.show_flexure || ov.enable_flexure {
                                              // Assemble load f (N/m^2)
                                              let lp = engine::flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
                                              let f_load = engine::flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
                                              // Compute D from (E, nu, Te)
-                                             let e_pa = (ov.E_gpa as f64) * 1.0e9;
+                                             let e_pa = (ov.e_gpa as f64) * 1.0e9;
                                              let nu = ov.nu as f64;
-                                             let te_m = (ov.Te_km as f64) * 1000.0;
+                                             let te_m = (ov.te_km as f64) * 1000.0;
                                              let denom = 12.0 * (1.0 - nu * nu);
                                              let d_pa_m3 = if denom > 0.0 { e_pa * te_m.powi(3) / denom } else { 0.0 };
                                              // Fallback placeholder: Winkler-only response (w = f/k)
