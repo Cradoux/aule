@@ -55,8 +55,7 @@ fn edge_kin_consistency_spotcheck() {
     let plates = engine::plates::Plates::new(&g, 8, 7);
     let b = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.005);
     assert_eq!(b.edge_kin.len(), b.edges.len());
-    let take = b.edges.len().min(10);
-    for i in 0..take {
+    for i in 0..b.edges.len() {
         let (u, v, class) = b.edges[i];
         let ek = &b.edge_kin[i];
         assert_eq!(ek.u, u);
@@ -94,8 +93,8 @@ fn edge_kin_consistency_spotcheck() {
         let vv = en_to_w(v as usize);
         let dv = [vu[0] - vv[0], vu[1] - vv[1], vu[2] - vv[2]];
         let n = dot(dv, n_hat) as f32;
-        let t = dot(dv, t_hat).abs() as f32;
-        assert!((n - ek.n_m_per_yr).abs() < 1e-5);
-        assert!((t - ek.t_m_per_yr).abs() < 1e-5);
+        let t = dot(dv, t_hat) as f32;
+        assert!((n - ek.n_m_per_yr).abs() < 1e-9);
+        assert!((t - ek.t_m_per_yr).abs() < 1e-9);
     }
 }

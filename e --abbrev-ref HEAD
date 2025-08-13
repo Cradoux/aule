@@ -1,0 +1,29 @@
+  T-010-geodesic-grid-fix    [m e6c37f5 [[34morigin/T-010-geodesic-grid-fix[m: gone] T-010: canonical F^2 triangulation, edge dedupe normalization, per-face diagnostics; tests for area & degrees; viewer at F=64
+  T-015-tile-partitioning    [m 92fe2cd [[34morigin/T-015-tile-partitioning[m] T-015: deterministic face-block tiler with BFS halo and neighbors; owner/local_index maps; tests; viewer tiling stats
+  chore/T-ci-format-parity   [m c3b510d [[34morigin/chore/T-ci-format-parity[m] ci(fmt): pin Rust 1.79.0 (minimal) with rustfmt+clippy
+  docs/T-008-docs-site       [m e3629f2 [[34morigin/docs/T-008-docs-site[m] T-030: add plates module and viewer logs; fix viewer device limits for storage buffers; RNG/clippy fixes
+  feat/T-015-tiling          [m 2b64e6a [[34morigin/feat/T-015-tiling[m] Merge pull request #9 from Cradoux/feat/T-020-fields
+  feat/T-020-fields          [m 734e3d2 [[34morigin/feat/T-020-fields[m] T-020: finalize draft  viewer constructs DeviceFields; docs/site-url fix; toolchain/rustfmt parity; tests/clippy green
+  feat/T-030-plates          [m cce33fa [[34morigin/feat/T-030-plates[m] T-030: add plates module and viewer logs; fix viewer device limits for storage buffers; RNG/clippy fixes
+  feat/T-050-ridge           [m a09cff7 [[34morigin/feat/T-050-ridge[m] feat(T-050): ridge births + 1-ring fringe (CPU); stats + tests
+  feat/T-051-continental-mask[m ae5ff14 [[34morigin/feat/T-051-continental-mask[m] feat(T-051): viewer HUD+overlay for continents; cached meshes; recompute before sea level
+  feat/T-060-age-bathy       [m 1cad9e7 [[34morigin/feat/T-060-age-bathy[m] feat(T-061): viewer AgeDepth plot, RMS; expose depth_from_age(); tests
+  feat/T-061-age-depth-plot  [m f1e8b97 [[34morigin/feat/T-061-age-depth-plot[m] feat(T-061): agedepth validation plot (A) with analytic models (HSC/Plate), sampling modes, and RMS stats
+  feat/T-070-subduction      [m 6f6b456 [[34morigin/feat/T-070-subduction[m] feat(T-070): render subduction bands with cached meshes; HUD controls + help
+  feat/T-071-rollback        [m 66efac0 [[34morigin/feat/T-071-rollback[m] feat(T-071): trench rollback & back-arc extension; params + tests; viewer scaffolding
+  feat/T-072-transforms      [m 0585c8c [[34morigin/feat/T-072-transforms[m] fix(T-072): transforms use boundary classification; tiny |t| gate; plate-restricted Dijkstra; HUD sliders trigger recompute; cached meshes; diagnostics
+* [32mfeat/T-073-edge-kinematics [m 5642545 [[34morigin/feat/T-073-edge-kinematics[m] feat(T-073): persist per-edge kinematics; refactor subduction/transforms to consume; tests for edge_kin
+  feat/T-080a-flexure-ref    [m a36472f [[34morigin/feat/T-080a-flexure-ref[m] feat(T-080a): CPU flexure reference (1D) with analytic line-load; CG solver; tests; viewer plot (F)
+  feat/T-080b-flexure-gpu-mg [m cc10ba0 Merge pull request #25 from Cradoux/feat/T-080a-flexure-ref
+  feat/T-080b-flexure-wgsl   [m 6359e01 [[34morigin/feat/T-080b-flexure-wgsl[m: gone] feat(T-080b): WGSL multigrid scaffold for flexure (tiles); CPU cross-check; ignored GPU test
+  feat/T-090-isostasy        [m 5189fd4 [[34morigin/feat/T-090-isostasy[m] Merge pull request #26 from Cradoux/feat/T-080b-flexure-wgsl
+  feat/T-120a-viewer-overlays[m 9131f59 [[34morigin/feat/T-120a-viewer-overlays[m] feat(T-120a): egui overlays for plates/vel/boundaries + HUD
+  feat/T-120b-playback       [m bf2b122 [[34morigin/feat/T-120b-playback[m] feat(T-120b): viewer playback HUD + simulation clock; stepper integration; cached overlays update
+  feat/T-400-stepper         [m 1d1d00d [[34morigin/feat/T-400-stepper[m] feat(T-400): world state + stepper; MVP kinematic step; tests
+  fix/T-090-isostasy-wiring  [m f1b3c50 [[34morigin/fix/T-090-isostasy-wiring[m] fix(T-090): wider target range, extra Δoffset, lockable bathy scale; robust isostasy bisection; logs; persist slider
+  main                       [m ee99049 [[34morigin/main[m] Merge pull request #29 from Cradoux/feat/T-061-age-depth-plot
+  master                     [m 6050a9b T-000: Repo bootstrap & CI
+  t-000-bootstrap            [m 6050a9b [[34morigin/t-000-bootstrap[m: gone] T-000: Repo bootstrap & CI
+  t-005-coding-standards     [m f24416e [[34morigin/t-005-coding-standards[m: gone] T-005 — Coding standards & lints
+  t-008-docs                 [m 1007928 [[34morigin/t-008-docs[m: ahead 1] T-010: apply rustfmt changes
+  t-010-grid                 [m 96bb105 [[34morigin/t-010-grid[m] T-015  Tile partitioning: tiler API scaffolding, fields tile views, tests, viewer tile stats
