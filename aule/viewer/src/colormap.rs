@@ -142,11 +142,13 @@ fn parse_hex_rgb(tok: &str) -> Result<[u8; 3], String> {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn srgb_u8_to_linear(rgb: [u8; 3]) -> [f32; 3] {
     [srgb_to_linear(rgb[0]), srgb_to_linear(rgb[1]), srgb_to_linear(rgb[2])]
 }
 
 #[inline]
+#[allow(dead_code)]
 fn srgb_to_linear(c: u8) -> f32 {
     let x = (c as f32) / 255.0;
     if x <= 0.04045 {
@@ -157,6 +159,7 @@ fn srgb_to_linear(c: u8) -> f32 {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn linear_to_srgb_u8(c: f32) -> u8 {
     let y = if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
     (y.clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u8
@@ -164,6 +167,7 @@ fn linear_to_srgb_u8(c: f32) -> u8 {
 
 /// Sample palette at x with linear-RGB interpolation (gamma-correct).
 /// Values are clamped to [vmin, vmax].
+#[allow(dead_code)]
 pub fn sample_linear_srgb(p: &Palette, x: f32) -> [u8; 3] {
     let n = p.stops.len();
     if n == 0 {

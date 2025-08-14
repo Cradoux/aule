@@ -1,11 +1,13 @@
 use egui::Color32;
 use egui_plot::{Line, PlotPoints, Points};
 
+#[allow(dead_code)]
 pub struct AgeDepthPlotParams {
     pub sample_cap: usize,
     pub bin_width_myr: f32,
 }
 
+#[allow(dead_code)]
 pub struct AgeDepthStats {
     pub rms_m: f32,
     pub n_samples: usize,
@@ -13,6 +15,7 @@ pub struct AgeDepthStats {
     pub depth_minmax: (f32, f32),
 }
 
+#[allow(dead_code)]
 pub struct AgeDepthPlotData {
     pub scatter: Points,
     pub binned: Line,
@@ -20,10 +23,12 @@ pub struct AgeDepthPlotData {
     pub stats: AgeDepthStats,
 }
 
+#[allow(dead_code)]
 fn subsample_stride(n: usize, cap: usize) -> usize {
     (n / cap.max(1)).max(1)
 }
 
+#[allow(dead_code)]
 pub fn build_age_depth_plot(
     age_myr: &[f32],
     depth_m: &[f32],

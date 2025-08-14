@@ -4,6 +4,7 @@ use egui::{
 };
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 const R_EARTH_M: f32 = 6_371_000.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -189,9 +190,11 @@ pub struct OverlayState {
     pub tile_halo_min: usize,
     pub tile_halo_max: usize,
     pub tile_halo_rings: u32,
+    pub high_f_available: bool,
 
     // Simple/Advanced UI (T-500)
     pub mode_simple: bool,
+    pub mode_was_simple: bool,
     pub drawer_open: bool,
     pub simple_seed: u64,
     pub simple_preset: u8, // index into WorldPreset
@@ -199,6 +202,11 @@ pub struct OverlayState {
     pub simple_t_end_myr: f64,
     pub simple_palette: u8, // 0=Hyps, 1=Biomes
     pub simple_f: u32,
+
+    // Simple-mode realtime run (T-505)
+    pub run_active: bool,
+    pub run_target_myr: f64,
+    pub steps_per_frame: u32,
 
     // Advanced panels expanded states (T-505)
     pub adv_open_kinematics: bool,
@@ -208,6 +216,9 @@ pub struct OverlayState {
     pub adv_open_transforms: bool,
     pub adv_open_snapshots: bool,
     pub adv_open_hypsometry: bool,
+    pub adv_open_resolution: bool,
+    pub adv_open_map_color: bool,
+    pub adv_open_playback: bool,
 
     // One-time log
     pub t505_logged: bool,
@@ -365,8 +376,10 @@ impl Default for OverlayState {
             tile_halo_min: 0,
             tile_halo_max: 0,
             tile_halo_rings: 1,
+            high_f_available: false,
 
             mode_simple: true,
+            mode_was_simple: true,
             drawer_open: true,
             simple_seed: 1_234_567,
             simple_preset: 0,
@@ -375,6 +388,10 @@ impl Default for OverlayState {
             simple_palette: 0,
             simple_f: 64,
 
+            run_active: false,
+            run_target_myr: 0.0,
+            steps_per_frame: 4,
+
             adv_open_kinematics: false,
             adv_open_flexure: false,
             adv_open_surface: false,
@@ -382,6 +399,9 @@ impl Default for OverlayState {
             adv_open_transforms: false,
             adv_open_snapshots: false,
             adv_open_hypsometry: false,
+            adv_open_resolution: false,
+            adv_open_map_color: false,
+            adv_open_playback: false,
 
             t505_logged: false,
         }
@@ -390,6 +410,7 @@ impl Default for OverlayState {
 
 impl OverlayState {
     /// Invalidate all cached overlay meshes so they will rebuild next frame.
+    #[allow(dead_code)]
     pub fn invalidate_all_meshes(&mut self) {
         self.plates_cache = None;
         self.vel_cache = None;
@@ -409,6 +430,7 @@ impl OverlayState {
     }
 }
 
+#[allow(dead_code)]
 pub fn color_for_plate(id: u16) -> Color32 {
     // Simple hash to color
     let h = (id as u32).wrapping_mul(0x9E37_79B9);
@@ -431,6 +453,7 @@ pub fn project_equirect(lat: f32, lon: f32, rect: Rect) -> Pos2 {
 /// If the segment crosses the antimeridian (|dx| > 0.5*width), virtually unwrap one
 /// endpoint so the midpoint is computed along the shorter wrapped arc, then wrap the
 /// result back to the viewport.
+#[allow(dead_code)]
 pub fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
     let w = rect.width();
     let x1 = pu.x;
@@ -456,6 +479,7 @@ pub fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
     Pos2::new(xr, ym)
 }
 
+#[allow(dead_code)]
 pub fn build_plate_points(rect: Rect, latlon: &[[f32; 2]], plate_id: &[u16]) -> Vec<Shape> {
     let mut shapes = Vec::with_capacity(plate_id.len());
     for (i, &pid) in plate_id.iter().enumerate() {
@@ -466,6 +490,7 @@ pub fn build_plate_points(rect: Rect, latlon: &[[f32; 2]], plate_id: &[u16]) -> 
     shapes
 }
 
+#[allow(dead_code)]
 pub fn build_velocity_arrows(
     rect: Rect,
     latlon: &[[f32; 2]],
@@ -486,6 +511,7 @@ pub fn build_velocity_arrows(
     shapes
 }
 
+#[allow(dead_code)]
 pub fn build_boundary_strokes(
     rect: Rect,
     latlon: &[[f32; 2]],
@@ -521,11 +547,13 @@ pub fn build_boundary_strokes(
     shapes
 }
 
+#[allow(dead_code)]
 fn rect_key(rect: Rect) -> [f32; 4] {
     [rect.left(), rect.top(), rect.right(), rect.bottom()]
 }
 
 impl OverlayState {
+    #[allow(dead_code)]
     pub fn effective_arrows_cap(&self) -> u32 {
         if self.adaptive_cap {
             self.live_arrows_cap
@@ -533,6 +561,7 @@ impl OverlayState {
             self.max_arrows_slider
         }
     }
+    #[allow(dead_code)]
     pub fn effective_bounds_cap(&self) -> u32 {
         if self.adaptive_cap {
             self.live_bounds_cap
@@ -540,6 +569,7 @@ impl OverlayState {
             self.max_bounds_slider
         }
     }
+    #[allow(dead_code)]
     pub fn effective_subd_cap(&self) -> u32 {
         if self.adaptive_cap {
             self.live_subd_cap
@@ -548,6 +578,7 @@ impl OverlayState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn ensure_params_and_invalidate_if_needed(
         &mut self,
         rect: Rect,
@@ -613,6 +644,7 @@ impl OverlayState {
         self.max_subd_slider.max(500)
     }
 
+    #[allow(dead_code)]
     pub fn shapes_for_plates(
         &mut self,
         rect: Rect,
@@ -625,6 +657,7 @@ impl OverlayState {
         self.plates_cache.as_deref().unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub fn shapes_for_velocities(
         &mut self,
         rect: Rect,
@@ -639,6 +672,7 @@ impl OverlayState {
         self.vel_cache.as_deref().unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub fn shapes_for_boundaries(
         &mut self,
         rect: Rect,
@@ -753,6 +787,7 @@ fn blue_ramp(value: f32, min_v: f32, max_v: f32) -> Color32 {
 }
 
 impl OverlayState {
+    #[allow(dead_code)]
     pub fn rebuild_age_shapes(&mut self, rect: Rect, latlon: &[[f32; 2]], age_myr: &[f32]) {
         let mut shapes = Vec::with_capacity(latlon.len());
         let (amin, amax) = self.age_minmax;
@@ -764,6 +799,7 @@ impl OverlayState {
         self.age_cache = Some(shapes);
     }
 
+    #[allow(dead_code)]
     pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
         let mut shapes = Vec::with_capacity(grid.latlon.len());
         let (dmin, dmax) = self.depth_minmax;
@@ -835,6 +871,7 @@ impl OverlayState {
     }
 
     /// Simple C overlay: viridis ramp from oceanic (0) to continental (1)
+    #[allow(dead_code)]
     pub fn rebuild_c_overlay(&mut self, rect: Rect, latlon: &[[f32; 2]], c: &[f32]) {
         let mut shapes = Vec::with_capacity(latlon.len());
         for i in 0..latlon.len().min(c.len()) {
@@ -845,6 +882,7 @@ impl OverlayState {
         self.cont_c_cache = Some(shapes);
     }
 
+    #[allow(dead_code)]
     pub fn draw_legend(&self, painter: &egui::Painter, rect: Rect) {
         let pad = 8.0;
         let w = 280.0;
@@ -860,6 +898,7 @@ impl OverlayState {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_legend_hyps(&self, painter: &egui::Painter, r: Rect) {
         let pal = crate::colormap::hyps_default_palette();
         let elev_min = -self.depth_minmax.1;
@@ -916,6 +955,7 @@ impl OverlayState {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_legend_biome(&self, painter: &egui::Painter, r: Rect) {
         let classes = crate::colormap::biome_default_classes();
         let cols = 4usize;
@@ -1035,9 +1075,11 @@ impl OverlayState {
         (mesh_land, mesh_coast)
     }
 
+    #[allow(dead_code)]
     pub fn age_shapes(&self) -> &[Shape] {
         self.age_cache.as_deref().unwrap_or_default()
     }
+    #[allow(dead_code)]
     pub fn bathy_shapes(&self) -> &[Shape] {
         self.bathy_cache.as_deref().unwrap_or_default()
     }
@@ -1053,6 +1095,7 @@ impl OverlayState {
     }
 
     /// Build subduction point meshes (one mesh per color), subsampled to a cap.
+    #[allow(dead_code)]
     pub fn rebuild_subduction_meshes(
         &mut self,
         rect: Rect,
@@ -1178,6 +1221,124 @@ impl OverlayState {
         }
         self.trans_pull = Some(shapes_p);
         self.trans_rest = Some(shapes_r);
+    }
+}
+
+/// Draw the primary color layer for Simple mode. Ensures a color/bathy layer is available
+/// and paints it every frame so the map is never empty. Logs a one-line diagnostic.
+pub fn draw_color_layer(
+    _ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    world: &engine::world::World,
+    _grid: &engine::grid::Grid,
+    ov: &mut OverlayState,
+) {
+    if ov.bathy_cache.is_none() || ov.color_dirty || ov.world_dirty {
+        ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
+        ov.color_dirty = false;
+    }
+    let mut n_pts = 0usize;
+    if let Some(shapes) = ov.bathy_cache.as_ref() {
+        n_pts = shapes.len();
+        for s in shapes {
+            painter.add(s.clone());
+        }
+    }
+    if ov.legend_on {
+        ov.draw_legend(painter, rect);
+    }
+    // Elevation stats (m)
+    let mut zmin = f32::INFINITY;
+    let mut zmax = f32::NEG_INFINITY;
+    let mut zsum = 0.0f64;
+    let mut n = 0usize;
+    let mut land = 0usize;
+    for &d in &world.depth_m {
+        if d.is_finite() {
+            let z = -d;
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
+            zsum += z as f64;
+            n += 1;
+            if d <= 0.0 {
+                land += 1;
+            }
+        }
+    }
+    let zmean = if n > 0 { zsum / (n as f64) } else { 0.0 };
+    let pal = if ov.color_mode == 0 { "Hypsometric" } else { "Biomes" };
+    println!(
+        "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}% | pts={} palette={} dirty=(w={} c={})",
+        zmin, zmean, zmax, 100.0 * (land as f64 / world.depth_m.len().max(1) as f64), n_pts, pal, ov.world_dirty, ov.color_dirty
+    );
+}
+
+/// Draw advanced overlays similar to legacy path (plates, velocities, boundaries, bathy if toggled).
+pub fn draw_advanced_layers(
+    _ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    world: &engine::world::World,
+    _grid: &engine::grid::Grid,
+    ov: &mut OverlayState,
+) {
+    if ov.show_bathy {
+        if ov.bathy_cache.is_none() || ov.color_dirty || ov.world_dirty {
+            ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
+        }
+        if let Some(shapes) = ov.bathy_cache.as_ref() {
+            for s in shapes {
+                painter.add(s.clone());
+            }
+        }
+        if ov.legend_on {
+            ov.draw_legend(painter, rect);
+        }
+    }
+    if ov.show_plates {
+        if ov.plates_cache.is_none() {
+            ov.plates_cache =
+                Some(build_plate_points(rect, &world.grid.latlon, &world.plates.plate_id));
+        }
+        if let Some(shapes) = ov.plates_cache.as_ref() {
+            for s in shapes {
+                painter.add(s.clone());
+            }
+        }
+    }
+    if ov.show_vel {
+        if ov.vel_cache.is_none() {
+            let cap = ov.effective_arrows_cap() as usize;
+            ov.vel_cache = Some(build_velocity_arrows(
+                rect,
+                &world.grid.latlon,
+                &world.v_en,
+                cap,
+                ov.vel_scale_px_per_cm_yr,
+            ));
+        }
+        if let Some(shapes) = ov.vel_cache.as_ref() {
+            for s in shapes {
+                painter.add(s.clone());
+            }
+        }
+    }
+    if ov.show_bounds {
+        if ov.bounds_cache.is_none() {
+            let cap = ov.effective_bounds_cap() as usize;
+            ov.bounds_cache = Some(build_boundary_strokes(
+                rect,
+                &world.grid.latlon,
+                &world.boundaries.edges,
+                cap,
+            ));
+        }
+        if let Some(shapes) = ov.bounds_cache.as_ref() {
+            for s in shapes {
+                painter.add(s.clone());
+            }
+        }
     }
 }
 
