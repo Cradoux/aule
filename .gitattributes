@@ -1,4 +1,12 @@
+* text=auto eol=lf
 *.rs text eol=lf
+*.wgsl text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
-
+*.csv text eol=lf
+*.pal text eol=lf
+*.cls text eol=lf
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.svg -text
