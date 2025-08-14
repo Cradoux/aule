@@ -189,6 +189,14 @@ pub struct OverlayState {
     pub tile_halo_min: usize,
     pub tile_halo_max: usize,
     pub tile_halo_rings: u32,
+
+    // Simple/Advanced UI (T-500)
+    pub mode_simple: bool,
+    pub simple_seed: u64,
+    pub simple_preset: u8, // index into WorldPreset
+    pub simple_target_land: f32,
+    pub simple_t_end_myr: f64,
+    pub simple_palette: u8, // 0=Hyps, 1=Biomes
 }
 
 impl Default for OverlayState {
@@ -343,6 +351,13 @@ impl Default for OverlayState {
             tile_halo_min: 0,
             tile_halo_max: 0,
             tile_halo_rings: 1,
+
+            mode_simple: true,
+            simple_seed: 1_234_567,
+            simple_preset: 0,
+            simple_target_land: 0.30,
+            simple_t_end_myr: 500.0,
+            simple_palette: 0,
         }
     }
 }

@@ -272,6 +272,12 @@ fn main() {
 
                             egui::TopBottomPanel::top("hud").show_animated(ctx, ov.show_hud, |ui| {
                                 ui.horizontal_wrapped(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Mode:");
+                                        ui.selectable_value(&mut ov.mode_simple, true, "Simple");
+                                        ui.selectable_value(&mut ov.mode_simple, false, "Advanced");
+                                    });
+                                    ui.separator();
                                     ui.label("1: Plates  2: Velocities  3: Boundaries  4: Age  5: Bathy  6: Age–Depth  7: Subduction  C: Continents  H: HUD");
                                     ui.separator();
                                     ui.group(|ui| {
@@ -356,6 +362,135 @@ fn main() {
                                     ));
                                 });
                                 ui.separator();
+                                if ov.mode_simple {
+                                    ui.group(|ui| {
+                                        ui.heading("Simulation Basics");
+                                        // Resolution
+                                        ui.horizontal(|ui| {
+                                            ui.label("F:");
+                                            let mut f_sel = ov.preset_f;
+                                            egui::ComboBox::from_id_source("simple_f").selected_text(format!("{}", f_sel)).show_ui(ui, |ui| {
+                                                for f in [64u32,128,256,512] { ui.selectable_value(&mut f_sel, f, format!("{}", f)); }
+                                            });
+                                            if f_sel != ov.preset_f { ov.preset_f = f_sel; }
+                                            ui.add(egui::DragValue::new(&mut ov.simple_t_end_myr).clamp_range(10.0..=2000.0).speed(1.0).prefix("t_end ").suffix(" Myr"));
+                                            if ui.button("Generate world").clicked() {
+                                                // Reset world and run using defaults
+                                                world = engine::world::World::new(ov.preset_f.max(1), 8, ov.simple_seed);
+                                                // Continents preset (basic Earth-like MVP)
+                                                let cp = engine::continent::ContinentParams { seed: ov.simple_seed, n_continents: 3, mean_radius_km: 2200.0, falloff_km: 600.0, plateau_uplift_m: 1.0, target_land_fraction: None };
+                                                let cf = engine::continent::build_continents(&world.grid, cp);
+                                                let tmpl = cf.uplift_template_m;
+                                                let amp_m = engine::continent::solve_amplitude_for_target_land_fraction(&world.depth_m, &tmpl, &world.area_m2, ov.simple_target_land as f64, 1e-3, 64);
+                                                let (_mask_land, land_frac) = engine::continent::apply_continents(&mut world.depth_m, &tmpl, amp_m, &world.area_m2);
+                                                ov.cont_land_frac = land_frac;
+                                                // Re-baseline sea level
+                                                let area_clone = world.area_m2.clone();
+                                                let _ = engine::isostasy::rebaseline(&mut world, &area_clone);
+                                                // Run to t_end
+                                                let sp = engine::world::StepParams {
+                                                    dt_myr: 2.0,
+                                                    do_flexure: false,
+                                                    do_isostasy: ov.apply_sea_level,
+                                                    do_transforms: false,
+                                                    do_subduction: false,
+                                                    do_continents: false,
+                                                    do_ridge_birth: true,
+                                                    auto_rebaseline_after_continents: false,
+                                                    do_rigid_motion: ov.kin_enable,
+                                                    do_orogeny: false,
+                                                    do_accretion: false,
+                                                    do_rifting: false,
+                                                    do_surface: false,
+                                                    surface_params: engine::surface::SurfaceParams::default(),
+                                                };
+                                                engine::world::run_to_t(&mut world, &sp, ov.simple_t_end_myr, 16);
+                                                println!("[simple] t={:.0} Myr | land={:.1}% | F={}", world.clock.t_myr, ov.cont_land_frac * 100.0, world.grid.frequency);
+                                                ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
+                                            }
+                                        });
+                                    });
+                                    ui.group(|ui| {
+                                        ui.heading("Continents & Seeds");
+                                        ui.add(egui::DragValue::new(&mut ov.simple_seed).speed(1.0).prefix("Seed "));
+                                        ui.add(egui::Slider::new(&mut ov.simple_target_land, 0.0..=0.60).text("Target land %"));
+                                    });
+                                    ui.group(|ui| {
+                                        ui.heading("Maps & Colours");
+                                        ui.horizontal(|ui| {
+                                            ui.radio_value(&mut ov.simple_palette, 0u8, "Hypsometric");
+                                            ui.radio_value(&mut ov.simple_palette, 1u8, "Biomes");
+                                        });
+                                    });
+                                    ui.group(|ui| { ui.heading("Export"); ui.label("(Export buttons to be wired in subsequent card)"); });
+                                }
+                                ui.collapsing("Resolution", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Preset F:");
+                                        let mut f_sel = ov.preset_f;
+                                        egui::ComboBox::from_id_source("preset_f")
+                                            .selected_text(format!("{}", f_sel))
+                                            .show_ui(ui, |ui| {
+                                                for f in [64u32, 128, 256, 512] {
+                                                    ui.selectable_value(&mut f_sel, f, format!("{}", f));
+                                                }
+                                            });
+                                        if f_sel != ov.preset_f { ov.preset_f = f_sel; }
+                                        if ui.button("Rebuild grid @ F").clicked() {
+                                            let fnew = ov.preset_f.max(1);
+                                            if fnew > 256 {
+                                                println!("[resolution] rebuilding grid at high F={} (confirm implicit)", fnew);
+                                            }
+                                            // Reset world state at new resolution
+                                            world = engine::world::World::new(fnew, 8, 12345);
+                                            // Build tile plan for stats (halo=1)
+                                            match engine::tileplan::build_tileplan(
+                                                &world.grid,
+                                                engine::tileplan::TileBuildParams {
+                                                    target_cells_per_tile: 4096,
+                                                    halo_rings: 1,
+                                                    max_tile_cells: 32_768,
+                                                },
+                                            ) {
+                                                Ok(plan) => {
+                                                    ov.tiles_last = plan.tiles.len();
+                                                    ov.tile_halo_rings = plan.halo_rings;
+                                                    let mut imin = usize::MAX;
+                                                    let mut imax = 0usize;
+                                                    let mut hmin = usize::MAX;
+                                                    let mut hmax = 0usize;
+                                                    for t in &plan.tiles {
+                                                        imin = imin.min(t.interior.len());
+                                                        imax = imax.max(t.interior.len());
+                                                        hmin = hmin.min(t.halo.len());
+                                                        hmax = hmax.max(t.halo.len());
+                                                    }
+                                                    ov.tile_interior_min = if imin == usize::MAX { 0 } else { imin };
+                                                    ov.tile_interior_max = imax;
+                                                    ov.tile_halo_min = if hmin == usize::MAX { 0 } else { hmin };
+                                                    ov.tile_halo_max = hmax;
+                                                }
+                                                Err(e) => {
+                                                    println!("[resolution] tileplan build error: {}", e);
+                                                    ov.tiles_last = 0; ov.tile_interior_min=0; ov.tile_interior_max=0; ov.tile_halo_min=0; ov.tile_halo_max=0;
+                                                }
+                                            }
+                                            // Invalidate visuals
+                                            ov.invalidate_all_meshes();
+                                            ov.age_cache=None; ov.bathy_cache=None; ov.bounds_cache=None; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None;
+                                        }
+                                    });
+                                    ui.label(format!(
+                                        "cells={} tiles={} halo_rings={} interior[min/max]=[{}/{}] halo[min/max]=[{}/{}]",
+                                        world.grid.cells,
+                                        ov.tiles_last,
+                                        ov.tile_halo_rings,
+                                        ov.tile_interior_min,
+                                        ov.tile_interior_max,
+                                        ov.tile_halo_min,
+                                        ov.tile_halo_max
+                                    ));
+                                });
                                 ui.collapsing("Kinematics (K)", |ui| {
                                     let mut changed = false;
                                     changed |= ui.checkbox(&mut ov.kin_enable, "Enable rigid motion").changed();
