@@ -192,11 +192,25 @@ pub struct OverlayState {
 
     // Simple/Advanced UI (T-500)
     pub mode_simple: bool,
+    pub drawer_open: bool,
     pub simple_seed: u64,
     pub simple_preset: u8, // index into WorldPreset
     pub simple_target_land: f32,
     pub simple_t_end_myr: f64,
     pub simple_palette: u8, // 0=Hyps, 1=Biomes
+    pub simple_f: u32,
+
+    // Advanced panels expanded states (T-505)
+    pub adv_open_kinematics: bool,
+    pub adv_open_flexure: bool,
+    pub adv_open_surface: bool,
+    pub adv_open_sea_level: bool,
+    pub adv_open_transforms: bool,
+    pub adv_open_snapshots: bool,
+    pub adv_open_hypsometry: bool,
+
+    // One-time log
+    pub t505_logged: bool,
 }
 
 impl Default for OverlayState {
@@ -353,11 +367,23 @@ impl Default for OverlayState {
             tile_halo_rings: 1,
 
             mode_simple: true,
+            drawer_open: true,
             simple_seed: 1_234_567,
             simple_preset: 0,
             simple_target_land: 0.30,
             simple_t_end_myr: 500.0,
             simple_palette: 0,
+            simple_f: 64,
+
+            adv_open_kinematics: false,
+            adv_open_flexure: false,
+            adv_open_surface: false,
+            adv_open_sea_level: false,
+            adv_open_transforms: false,
+            adv_open_snapshots: false,
+            adv_open_hypsometry: false,
+
+            t505_logged: false,
         }
     }
 }
