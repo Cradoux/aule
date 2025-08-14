@@ -88,6 +88,7 @@ impl FlexureUI {
         self.rms = rms / ref_rms;
     }
 
+    #[allow(dead_code)]
     pub fn ui(&mut self, ui: &mut Ui) {
         if !self.show {
             return;

@@ -17,13 +17,21 @@ pub struct AgeDepthUIState {
     pub sample_cap: usize,
     pub use_final_depth: bool,
     // cache
+    #[allow(dead_code)]
     last_hash: u64,
+    #[allow(dead_code)]
     scatter_pts: Option<Vec<[f64; 2]>>,
+    #[allow(dead_code)]
     reference_pts: Option<Vec<[f64; 2]>>,
+    #[allow(dead_code)]
     binned_pts: Option<Vec<[f64; 2]>>,
+    #[allow(dead_code)]
     rms_m: f32,
+    #[allow(dead_code)]
     n_samples: usize,
+    #[allow(dead_code)]
     age_minmax: (f32, f32),
+    #[allow(dead_code)]
     depth_minmax: (f32, f32),
 }
 
@@ -50,6 +58,7 @@ impl Default for AgeDepthUIState {
     }
 }
 
+#[allow(dead_code)]
 fn compute_hash(params: (&AgeDepthUIState, usize, usize)) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -75,6 +84,7 @@ impl std::hash::Hash for AgeDepthUIState {
     }
 }
 
+#[allow(dead_code)]
 pub fn ui(
     st: &mut AgeDepthUIState,
     ui: &mut Ui,
