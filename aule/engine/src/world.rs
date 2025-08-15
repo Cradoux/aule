@@ -4,6 +4,7 @@ use crate::{
     age::depth_from_age, boundaries::Boundaries, continent, flexure_loads, grid::Grid, isostasy,
     plates::Plates, ridge, subduction, transforms,
 };
+use std::time::Instant;
 
 /// Simulation clock information.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,6 +51,28 @@ pub struct World {
     pub last_rebaseline_epoch: u64,
 }
 
+/// Simple-mode preset parameters for deterministic world generation.
+#[derive(Clone, Copy, Debug)]
+pub struct SimplePreset {
+    /// Number of plates to seed deterministically
+    pub plates: u32,
+    /// Number of synthetic continental caps
+    pub continents_n: u32,
+    /// Target land fraction in [0,1]
+    pub target_land_frac: f32,
+}
+
+/// Summary of the simple generation pass.
+#[derive(Clone, Copy, Debug)]
+pub struct SimpleReport {
+    /// Area-weighted ocean fraction (0..1)
+    pub ocean_frac: f32,
+    /// Min/max of depth (m); depth>0 water, depth<0 land elevation = -depth
+    pub depth_min_max: (f32, f32),
+    /// Area-weighted land fraction (0..1)
+    pub land_frac: f32,
+}
+
 /// Reference sea-level bookkeeping
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SeaLevelRef {
@@ -60,6 +83,125 @@ pub struct SeaLevelRef {
 }
 
 impl World {
+    // removed old helpers in favor of sea_level module functions
+
+    /// Evaluate land fraction after rebaseline to a fixed target water volume.
+    fn land_frac_after_rebaseline_to_volume(
+        &self,
+        base_depth: &[f32],
+        cont_mask: &[f32],
+        amp_m: f32,
+        target_volume_m3: f64,
+    ) -> (f32, f64) {
+        let mut depth = base_depth.to_vec();
+        for i in 0..depth.len() {
+            depth[i] -= amp_m * cont_mask[i];
+        }
+        let off =
+            isostasy::solve_offset_for_volume(&depth, &self.area_m2, target_volume_m3, 1e6, 64);
+        let mut land_area = 0.0f64;
+        let mut total_area = 0.0f64;
+        for (d, a) in depth.iter().zip(self.area_m2.iter()) {
+            let val = (*d as f64) + off;
+            total_area += *a as f64;
+            if val < 0.0 {
+                land_area += *a as f64;
+            }
+        }
+        let frac = if total_area > 0.0 { (land_area / total_area) as f32 } else { 0.0 };
+        (frac, off)
+    }
+
+    /// Bisection on amplitude while locking water volume to a fixed target.
+    fn solve_amplitude_for_land_fraction_locked_volume(
+        &mut self,
+        cont_mask: &[f32],
+        target_land: f32,
+        target_volume_m3: f64,
+        amp_hi_m: f32,
+        tol_land: f32,
+    ) -> f32 {
+        let base_depth = self.depth_m.clone();
+        let mut lo = 0.0f32;
+        let mut hi = amp_hi_m;
+        let mut _f_lo = {
+            let (lf, _) = self.land_frac_after_rebaseline_to_volume(
+                &base_depth,
+                cont_mask,
+                lo,
+                target_volume_m3,
+            );
+            lf - target_land
+        };
+        let mut _f_hi = {
+            let (lf, _) = self.land_frac_after_rebaseline_to_volume(
+                &base_depth,
+                cont_mask,
+                hi,
+                target_volume_m3,
+            );
+            lf - target_land
+        };
+        if _f_lo.abs() <= tol_land {
+            // Already matching at zero amplitude
+            self.depth_m = base_depth;
+            return lo;
+        }
+        if _f_hi <= 0.0 {
+            // Even huge uplift cannot reach target: clamp to hi
+            let (_lf, off) = self.land_frac_after_rebaseline_to_volume(
+                &base_depth,
+                cont_mask,
+                hi,
+                target_volume_m3,
+            );
+            let off_f = off as f32;
+            self.depth_m.clone_from(&base_depth);
+            for (i, &cm) in cont_mask.iter().enumerate().take(self.depth_m.len()) {
+                self.depth_m[i] -= hi * cm;
+                self.depth_m[i] += off_f;
+            }
+            return hi;
+        }
+        for _ in 0..48 {
+            let mid = 0.5 * (lo + hi);
+            let (lf, off) = self.land_frac_after_rebaseline_to_volume(
+                &base_depth,
+                cont_mask,
+                mid,
+                target_volume_m3,
+            );
+            let f_mid = lf - target_land;
+            if f_mid.abs() <= tol_land {
+                let off_f = off as f32;
+                self.depth_m.clone_from(&base_depth);
+                for (i, &cm) in cont_mask.iter().enumerate().take(self.depth_m.len()) {
+                    self.depth_m[i] -= mid * cm;
+                    self.depth_m[i] += off_f;
+                }
+                return mid;
+            }
+            if f_mid > 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let mid = 0.5 * (lo + hi);
+        let (_lf, off) = self.land_frac_after_rebaseline_to_volume(
+            &base_depth,
+            cont_mask,
+            mid,
+            target_volume_m3,
+        );
+        let off_f = off as f32;
+        self.depth_m.clone_from(&base_depth);
+        for (i, &cm) in cont_mask.iter().enumerate().take(self.depth_m.len()) {
+            self.depth_m[i] -= mid * cm;
+            self.depth_m[i] += off_f;
+        }
+        mid
+    }
     /// Construct a world with deterministic plates and zeroed ages/depths.
     pub fn new(f: u32, num_plates: u32, seed: u64) -> Self {
         let grid = Grid::new(f);
@@ -99,6 +241,153 @@ impl World {
             last_rebaseline_epoch: 0,
         }
     }
+
+    /// Deterministic end-to-end generation for Simple mode.
+    pub fn generate_simple(&mut self, preset: &SimplePreset, seed: u64) -> SimpleReport {
+        // 1) Reset/normalize world state for current F & plates
+        self.plates = crate::plates::Plates::new(&self.grid, preset.plates, seed);
+        self.v_en.clone_from(&self.plates.vel_en);
+        self.age_myr.fill(0.0);
+        self.depth_m.fill(0.0);
+        self.c.fill(0.0);
+        self.th_c_m.fill(0.0);
+        self.sediment_m.fill(0.0);
+        self.clock = Clock { t_myr: 0.0, step_idx: 0 };
+        self.sea_level_ref = None;
+        self.boundaries =
+            Boundaries::classify(&self.grid, &self.plates.plate_id, &self.v_en, 0.005);
+
+        // 2) Initialize ridge births then baseline bathymetry from age (ocean depths)
+        {
+            let mut ages_tmp = self.age_myr.clone();
+            let _ridge_stats = crate::ridge::apply_ridge(
+                &self.grid,
+                &self.boundaries,
+                &mut ages_tmp,
+                crate::ridge::RidgeParams { fringe_age_myr: 0.0 },
+            );
+            self.age_myr = ages_tmp;
+        }
+        let n_cells = self.grid.cells;
+        for i in 0..n_cells {
+            let mut d =
+                crate::age::depth_from_age(self.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+            if !d.is_finite() {
+                d = 6000.0;
+            }
+            self.depth_m[i] = d.clamp(0.0, 6000.0);
+        }
+        // Capture reference ocean volume for constant-volume isostasy
+        let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2);
+        self.sea_level_ref = Some(ref_sea);
+
+        // 3) Continents: build template
+        let cp = crate::continent::ContinentParams {
+            seed,
+            n_continents: preset.continents_n,
+            mean_radius_km: 2200.0,
+            falloff_km: 600.0,
+            plateau_uplift_m: 1.0,
+            target_land_fraction: None,
+        };
+        let cf = crate::continent::build_continents(&self.grid, cp);
+
+        // 4) Lock water inventory to the base-ocean state volume at the offset that hits target ocean area
+        let target_ocean_frac = (1.0 - preset.target_land_frac as f64).clamp(0.0, 1.0);
+        let off_area = crate::sea_level::solve_offset_for_ocean_area_fraction(
+            &self.depth_m,
+            &self.area_m2,
+            target_ocean_frac as f32,
+        );
+        let (target_volume_m3, _dummy): (f64, f64) = {
+            // compute volume at offset using existing isostasy helper
+            let mut vol = 0.0f64;
+            for (d, a) in self.depth_m.iter().zip(self.area_m2.iter()) {
+                let w = (*d as f64 + off_area).max(0.0);
+                vol += w * (*a as f64);
+            }
+            (vol, off_area)
+        };
+
+        // 5) Solve amplitude; low-F fallback uses simpler area-only solver for stability
+        if self.grid.frequency <= 16 {
+            let amp_simple = crate::continent::solve_amplitude_for_target_land_fraction(
+                &self.depth_m,
+                &cf.uplift_template_m,
+                &self.area_m2,
+                preset.target_land_frac as f64,
+                1e-3,
+                64,
+            );
+            for (i, &cm) in cf.uplift_template_m.iter().enumerate() {
+                self.depth_m[i] -= amp_simple * cm;
+            }
+            // Rebaseline to hit target ocean area fraction directly
+            let off0 = crate::sea_level::solve_offset_for_ocean_area_fraction(
+                &self.depth_m,
+                &self.area_m2,
+                target_ocean_frac as f32,
+            );
+            isostasy::apply_sea_level_offset(&mut self.depth_m, off0);
+        } else {
+            let _amp = self.solve_amplitude_for_land_fraction_locked_volume(
+                &cf.uplift_template_m,
+                preset.target_land_frac,
+                target_volume_m3,
+                3000.0,
+                0.02,
+            );
+        }
+
+        // 6) Skip subduction/flexure in Simple; keep land fraction stable
+
+        // 7) Final rebaseline to hit target ocean AREA fraction precisely
+        let off_final = crate::sea_level::solve_offset_for_ocean_area_fraction(
+            &self.depth_m,
+            &self.area_m2,
+            target_ocean_frac as f32,
+        );
+        isostasy::apply_sea_level_offset(&mut self.depth_m, off_final);
+
+        // Report stats
+        let mut dmin = f32::INFINITY;
+        let mut dmax = f32::NEG_INFINITY;
+        let mut dsum = 0.0f64;
+        for &d in &self.depth_m {
+            if d.is_finite() {
+                if d < dmin {
+                    dmin = d;
+                }
+                if d > dmax {
+                    dmax = d;
+                }
+                dsum += d as f64;
+            }
+        }
+        let mut ocean_area = 0.0f64;
+        let mut total_area = 0.0f64;
+        for (d, a) in self.depth_m.iter().zip(self.area_m2.iter()) {
+            total_area += *a as f64;
+            if *d > 0.0 {
+                ocean_area += *a as f64;
+            }
+        }
+        let ocean_frac = if total_area > 0.0 { ocean_area / total_area } else { 0.0 };
+        let land_frac = 1.0 - ocean_frac;
+        println!(
+            "[simple] land_target={:.0}% land={:.1}% depth[min/mean/max]={:.0}/{:.0}/{:.0} m",
+            preset.target_land_frac as f64 * 100.0,
+            land_frac * 100.0,
+            dmin,
+            (dsum / (self.depth_m.len().max(1) as f64)),
+            dmax
+        );
+        SimpleReport {
+            ocean_frac: ocean_frac as f32,
+            depth_min_max: (dmin, dmax),
+            land_frac: land_frac as f32,
+        }
+    }
 }
 
 /// Parameters that control a single evolution step.
@@ -132,6 +421,20 @@ pub struct StepParams {
     pub do_surface: bool,
     /// Parameter set for surface processes.
     pub surface_params: crate::surface::SurfaceParams,
+    /// Cadence: run advection every N steps (>=1). When 1, runs each step.
+    pub advection_every: u32,
+    /// Cadence for transforms
+    pub transforms_every: u32,
+    /// Cadence for subduction
+    pub subduction_every: u32,
+    /// Cadence for flexure
+    pub flexure_every: u32,
+    /// Cadence for sea-level/isostasy
+    pub sea_every: u32,
+    /// Gate advection explicitly (combined with cadence)
+    pub do_advection: bool,
+    /// Gate sea-level explicitly (combined with cadence)
+    pub do_sea: bool,
 }
 
 /// Result summary for one step.
@@ -188,6 +491,20 @@ pub fn run_to_t(world: &mut World, sp: &StepParams, t_end_myr: f64, max_steps_pe
 /// E) ridge birth; F) subduction; G) transforms; H) continents uplift;
 /// I) flexure; J) isostasy; clock += dt.
 pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
+    // Micro-profiler accumulators (ms)
+    let mut ms_boundaries = 0.0f64;
+    let mut ms_advection = 0.0f64;
+    let mut ms_ridge = 0.0f64;
+    let mut ms_subduction = 0.0f64;
+    let mut ms_transforms = 0.0f64;
+    let mut ms_flexure = 0.0f64;
+    let mut ms_sea = 0.0f64;
+    // Skip counters for cadence
+    let mut sk_advection: u32 = 0;
+    let mut sk_transforms: u32 = 0;
+    let mut sk_subduction: u32 = 0;
+    let mut sk_flexure: u32 = 0;
+    let mut sk_sea: u32 = 0;
     let n = world.grid.cells;
     let dt_myr_f32 = sp.dt_myr as f32;
 
@@ -219,7 +536,15 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     }
 
     // C) advect continents
-    if sp.do_continents {
+    // Determine cadence phase using step_idx (1-based to avoid all-zero edge case)
+    let k = world.clock.step_idx.saturating_add(1);
+    let do_adv_step = k % sp.advection_every.max(1) as u64 == 0;
+    let do_trf_step = sp.do_transforms && (k % sp.transforms_every.max(1) as u64 == 0);
+    let do_sub_step = sp.do_subduction && (k % sp.subduction_every.max(1) as u64 == 0);
+    let do_flx_step = sp.do_flexure && (k % sp.flexure_every.max(1) as u64 == 0);
+    let do_sea_step = sp.do_isostasy && (k % sp.sea_every.max(1) as u64 == 0);
+
+    if sp.do_continents && do_adv_step {
         // Seed once if empty (simple deterministic template and uniform thickness)
         if world.c.iter().all(|&c| c == 0.0) && world.th_c_m.iter().all(|&x| x == 0.0) {
             let cp = continent::ContinentParams {
@@ -236,6 +561,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             // Uniform initial thickness 2500 m
             world.th_c_m.fill(2500.0);
         }
+        let t0 = Instant::now();
         continent::advect_c_thc(
             &world.grid,
             &world.v_en,
@@ -243,6 +569,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &mut world.c,
             &mut world.th_c_m,
         );
+        ms_advection += t0.elapsed().as_secs_f64() * 1000.0;
+    } else if sp.do_continents && !do_adv_step {
+        sk_advection += 1;
     }
 
     // C) advect plate_id via semi-Lagrangian nearest-neighbor
@@ -260,12 +589,15 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
 
     // D) boundaries classify
     const TAU_OPEN_M_PER_YR: f64 = 0.005;
+    let t0b = Instant::now();
     world.boundaries =
         Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, TAU_OPEN_M_PER_YR);
+    ms_boundaries += t0b.elapsed().as_secs_f64() * 1000.0;
 
     // E) ridge birth: reset ages on divergent cells (placeholder: edge-based)
     if sp.do_ridge_birth {
         // Use existing ridge helper on a clone to decide resets
+        let t0r = Instant::now();
         let mut ages_tmp = world.age_myr.clone();
         let _ridge_stats = ridge::apply_ridge(
             &world.grid,
@@ -278,6 +610,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 *aw = 0.0;
             }
         }
+        ms_ridge += t0r.elapsed().as_secs_f64() * 1000.0;
     }
 
     // Baseline bathymetry from age (overwrite)
@@ -290,7 +623,8 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     }
 
     // F) subduction bands
-    if sp.do_subduction {
+    if sp.do_subduction && do_sub_step {
+        let t0s = Instant::now();
         let _sub = subduction::apply_subduction(
             &world.grid,
             &world.boundaries,
@@ -313,6 +647,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 backarc_extension_deepen_m: 600.0,
             },
         );
+        ms_subduction += t0s.elapsed().as_secs_f64() * 1000.0;
+    } else if sp.do_subduction && !do_sub_step {
+        sk_subduction += 1;
     }
 
     // F.5) O–C accretion: after subduction, before transforms/orogeny
@@ -405,7 +742,8 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     }
 
     // G) transforms
-    if sp.do_transforms {
+    if sp.do_transforms && do_trf_step {
+        let t0t = Instant::now();
         let _ = transforms::apply_transforms(
             &world.grid,
             &world.boundaries,
@@ -420,6 +758,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 basin_deepen_m: 400.0,
             },
         );
+        ms_transforms += t0t.elapsed().as_secs_f64() * 1000.0;
+    } else if sp.do_transforms && !do_trf_step {
+        sk_transforms += 1;
     }
 
     // G.5) Orogeny (C–C): after transforms, before continents uplift/flexure
@@ -479,6 +820,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
         if sp.surface_params.couple_flexure {
             // Run a quick Winkler-like flexure response to approximate coupling
             world.last_flex_residual = -1.0;
+            let tf0 = Instant::now();
             let lp = flexure_loads::LoadParams {
                 rho_w: 1030.0,
                 rho_c: 2900.0,
@@ -505,12 +847,14 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             }
             // Skip generic flexure stage below if we already coupled here
             run_flexure_stage_i = false;
+            ms_flexure += tf0.elapsed().as_secs_f64() * 1000.0;
         }
     }
 
     // I) flexure (Winkler placeholder)
     world.last_flex_residual = -1.0;
-    if run_flexure_stage_i {
+    if run_flexure_stage_i && do_flx_step {
+        let tf1 = Instant::now();
         let lp =
             flexure_loads::LoadParams { rho_w: 1030.0, rho_c: 2900.0, g: 9.81, sea_level_m: 0.0 };
         let f_load = flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
@@ -533,10 +877,14 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
         for (d, wi) in world.depth_m.iter_mut().zip(w.iter()) {
             *d = (*d + *wi).clamp(-8000.0, 8000.0);
         }
+        ms_flexure += tf1.elapsed().as_secs_f64() * 1000.0;
+    } else if run_flexure_stage_i && !do_flx_step {
+        sk_flexure += 1;
     }
 
     // J) isostasy / sea-level: maintain reference ocean volume if available, plus slow eustasy
-    if sp.do_isostasy {
+    if sp.do_isostasy && do_sea_step {
+        let ts0 = Instant::now();
         if world.sea_level_ref.is_none() {
             world.sea_level_ref = Some(isostasy::compute_ref(&world.depth_m, &world.area_m2));
         }
@@ -593,6 +941,9 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
                 println!("[isostasy] offset≈0 after rebaseline (|Δ|={:.4} m)", l_iso.abs());
             }
         }
+        ms_sea += ts0.elapsed().as_secs_f64() * 1000.0;
+    } else if sp.do_isostasy && !do_sea_step {
+        sk_sea += 1;
     }
 
     // Update clock
@@ -606,6 +957,30 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
         weighted_c += (world.c[i] as f64) * (world.area_m2[i] as f64);
     }
     let c_bar = if total_area > 0.0 { weighted_c / total_area } else { 0.0 };
+
+    // Perf log
+    let step_ms = ms_boundaries
+        + ms_advection
+        + ms_ridge
+        + ms_subduction
+        + ms_transforms
+        + ms_flexure
+        + ms_sea;
+    println!(
+        "[perf] step={:.2} ms | boundaries={:.2} | sea={:.2}/skip:{} | advection={:.2}/skip:{} | transforms={:.2}/skip:{} | subduction={:.2}/skip:{} | flexure={:.2}/skip:{}",
+        step_ms,
+        ms_boundaries,
+        ms_sea,
+        sk_sea,
+        ms_advection,
+        sk_advection,
+        ms_transforms,
+        sk_transforms,
+        ms_subduction,
+        sk_subduction,
+        ms_flexure,
+        sk_flexure
+    );
 
     // Advect diagnostics (rough backtrace distance)
     let backtrace_km = (vmax * (sp.dt_myr * 1.0e6)) / 1000.0;

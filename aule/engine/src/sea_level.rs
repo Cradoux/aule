@@ -111,3 +111,40 @@ pub fn update_eustasy_eta(
         }
     }
 }
+
+/// Returns offset `off_m` so that the ocean area fraction equals `target_ocean_frac`.
+/// `depth_m`: positive is water depth (ocean); negative is land elevation.
+pub fn solve_offset_for_ocean_area_fraction(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_ocean_frac: f32,
+) -> f64 {
+    let total: f64 = area_m2.iter().map(|a| *a as f64).sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut lo = -12_000.0_f64;
+    let mut hi = 12_000.0_f64;
+    let area = |off: f64| -> f64 {
+        let mut acc = 0.0;
+        for (d, a) in depth_m.iter().zip(area_m2.iter()) {
+            if (*d as f64 + off) > 0.0 {
+                acc += *a as f64;
+            }
+        }
+        acc / total
+    };
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        let f = area(mid) - (target_ocean_frac as f64);
+        if f.abs() < 1e-6 {
+            return mid;
+        }
+        if f > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
