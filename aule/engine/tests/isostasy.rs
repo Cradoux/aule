@@ -33,8 +33,12 @@ fn amplitude_solves_land_fraction_and_is_deterministic() {
     // Synthesize a simple continent template with two caps (handmade)
     let n = 100usize;
     let mut tpl = vec![0.0f32; n];
-    for t in tpl.iter_mut().take(40).skip(20) { *t = 1.0; }
-    for t in tpl.iter_mut().take(75).skip(60) { *t = 0.7; }
+    for t in tpl.iter_mut().take(40).skip(20) {
+        *t = 1.0;
+    }
+    for t in tpl.iter_mut().take(75).skip(60) {
+        *t = 0.7;
+    }
     let base: Vec<f32> = (0..n).map(|i| if i % 3 == 0 { 3000.0 } else { 2000.0 }).collect();
     let area: Vec<f32> = vec![2.0; n];
     let target_land = 0.30f32;

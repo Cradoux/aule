@@ -169,7 +169,26 @@ fn render_simple_panels(
             for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
                 if (*d as f64) > 0.0 { ocean_area += *a as f64; }
             }
-            let land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+            let mut land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+            // Final correction: ensure ocean fraction matches target by re-solving offset on the applied depths
+            let target_ocean = 1.0 - (target_land as f64);
+            let tol_land_final = 0.02f64;
+            if ((1.0 - land_frac) - target_ocean).abs() > tol_land_final {
+                let off2 = engine::isostasy::solve_offset_for_ocean_area_fraction(
+                    &world.depth_m,
+                    &world.area_m2,
+                    target_ocean as f32,
+                    1e-4,
+                    64,
+                );
+                engine::isostasy::apply_sea_level_offset(&mut world.depth_m, off2);
+                // Recompute fractions after correction
+                ocean_area = 0.0;
+                for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                    if (*d as f64) > 0.0 { ocean_area += *a as f64; }
+                }
+                land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+            }
             // Elevation stats (m)
             let mut zmin = f32::INFINITY; let mut zmax = f32::NEG_INFINITY; let mut zsum = 0.0f64; let mut zn = 0usize;
             for &d in &world.depth_m { if d.is_finite() { let z = -d; zmin = zmin.min(z); zmax = zmax.max(z); zsum += z as f64; zn += 1; } }
@@ -184,6 +203,7 @@ fn render_simple_panels(
                 zmean,
                 zmax
             );
+            // Guards (non-panicking in release; keep as debug only)
             debug_assert!(world.depth_m.iter().any(|d| *d < 0.0), "no land after solve");
             debug_assert!(world.depth_m.iter().any(|d| *d > 0.0), "no ocean after solve");
             // Apply palette then mark dirty
