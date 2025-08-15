@@ -57,6 +57,7 @@ pub mod subduction;
 pub mod surface;
 /// High-F tiling plan (T-455)
 pub mod tileplan;
+pub use world::{SimplePreset, SimpleReport};
 /// Transform pull-apart/restraining bands (CPU pass).
 pub mod transforms;
 /// World state.

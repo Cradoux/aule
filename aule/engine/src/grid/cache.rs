@@ -124,7 +124,18 @@ impl Grid {
             n2.push(v);
         }
 
-        Ok(Self { cells, pos_xyz, latlon, area, n1, n2, frequency })
+        Ok(Self {
+            cells,
+            pos_xyz,
+            latlon,
+            area,
+            n1,
+            n2,
+            frequency,
+            face_offsets: Vec::new(),
+            face_vert_ids: Vec::new(),
+            face_corners: Vec::new(),
+        })
     }
 }
 

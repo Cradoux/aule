@@ -24,6 +24,10 @@ pub struct Grid {
     pub n2: Vec<SmallVec<[u32; 12]>>,
     /// Icosphere subdivision frequency
     pub frequency: u32,
+    // T-902A: flattened per-face vertex id tables and offsets for Class-I lattice
+    face_offsets: Vec<u32>,
+    face_vert_ids: Vec<u32>,
+    face_corners: Vec<[u32; 3]>,
 }
 
 impl Grid {
@@ -69,9 +73,18 @@ impl Grid {
         };
 
         // ID assignment grid per face
+        // Also capture per-face triangular vertex-id tables
+        let mut face_offsets: Vec<u32> = Vec::with_capacity(20);
+        let mut face_vert_ids: Vec<u32> = Vec::new();
+        let mut face_corners: Vec<[u32; 3]> = Vec::with_capacity(20);
         let mut tris: Vec<[u32; 3]> = Vec::new();
         for (fid, face) in faces.iter().enumerate() {
             let (a_id, b_id, c_id) = (face[0], face[1], face[2]);
+            // Global ids of the 3 base corners for this face
+            let gc_a = corner_map[&a_id];
+            let gc_b = corner_map[&b_id];
+            let gc_c = corner_map[&c_id];
+            face_corners.push([gc_a, gc_b, gc_c]);
             // Build grid_ids for this face
             let mut grid_ids: Vec<Vec<u32>> = Vec::with_capacity((f as usize) + 1);
             for i in 0..=f {
@@ -141,6 +154,15 @@ impl Grid {
                     row.push(id);
                 }
                 grid_ids.push(row);
+            }
+            // Flatten this face's triangular table into face_vert_ids
+            let offset = face_vert_ids.len() as u32;
+            face_offsets.push(offset);
+            for (i, row) in grid_ids.iter().enumerate().take(f as usize + 1) {
+                let upto = (f as usize).saturating_sub(i) + 1;
+                for &vid in row.iter().take(upto) {
+                    face_vert_ids.push(vid);
+                }
             }
 
             // Canonical two-loop triangulation: exactly F^2 triangles per face (no guards)
@@ -333,7 +355,46 @@ impl Grid {
             area.push(*a as f32);
         }
 
-        Self { cells, pos_xyz, latlon, area, n1, n2, frequency }
+        Self {
+            cells,
+            pos_xyz,
+            latlon,
+            area,
+            n1,
+            n2,
+            frequency,
+            face_offsets,
+            face_vert_ids,
+            face_corners,
+        }
+    }
+}
+
+impl Grid {
+    /// Geodesic frequency F (Class-I)
+    pub fn freq(&self) -> u32 {
+        self.frequency
+    }
+    /// Global vertex count (cells)
+    pub fn num_vertices(&self) -> usize {
+        self.cells
+    }
+    /// Per-face base corners (global vertex ids)
+    pub fn face_corners(&self) -> &[[u32; 3]] {
+        &self.face_corners
+    }
+    /// Flattened per-face vertex-id table
+    pub fn face_vertex_table(&self) -> (&[u32], &[u32]) {
+        (&self.face_vert_ids, &self.face_offsets)
+    }
+    /// Return global vertex id at (face, i, j) with i+j<=F
+    pub fn idx(&self, face: usize, i: u32, j: u32) -> usize {
+        let f = self.frequency;
+        debug_assert!(face < 20);
+        debug_assert!(i + j <= f);
+        let row_base = |ii: u32| -> u32 { ii * (f + 1) - (ii * (ii - 1)) / 2 };
+        let base = self.face_offsets[face] + row_base(i) + j;
+        self.face_vert_ids[base as usize] as usize
     }
 }
 

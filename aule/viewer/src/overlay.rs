@@ -3,6 +3,7 @@ use egui::{
     Color32, Pos2, Rect, Stroke, Vec2,
 };
 use std::collections::HashMap;
+use std::time::Instant;
 
 #[allow(dead_code)]
 const R_EARTH_M: f32 = 6_371_000.0;
@@ -14,6 +15,15 @@ pub struct ContKey {
     pub radius_km: u32,
     pub falloff_km: u32,
     pub f: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct StepperState {
+    pub playing: bool,
+    pub t_target_myr: f32,
+    pub max_steps_per_frame: u32,
+    pub min_ms_between_raster: u64,
+    pub last_raster_at: Instant,
 }
 
 #[allow(dead_code)]
@@ -207,6 +217,22 @@ pub struct OverlayState {
     pub run_active: bool,
     pub run_target_myr: f64,
     pub steps_per_frame: u32,
+    pub stepper: StepperState,
+
+    // Sea-aware hypsometric scales (T-602a)
+    pub hypso_d_max: f32,
+    pub hypso_h_max: f32,
+    pub hypso_snowline: f32,
+
+    // Rasterized texture (T-902A)
+    pub raster_tex: Option<egui::TextureHandle>,
+    pub raster_tex_id: Option<egui::TextureId>,
+    pub use_gpu_raster: bool,
+    pub raster_size: (u32, u32),
+    pub raster_dirty: bool,
+    pub last_raster_at: Instant,
+    pub raster_min_interval_ms: u64,
+    pub high_quality_when_paused: bool,
 
     // Advanced panels expanded states (T-505)
     pub adv_open_kinematics: bool,
@@ -222,6 +248,15 @@ pub struct OverlayState {
 
     // One-time log
     pub t505_logged: bool,
+
+    // Debug / cadence controls (T-907)
+    pub debug_enable_all: bool,
+    pub debug_burst_steps: u32,
+    pub cadence_adv_every: u32,
+    pub cadence_trf_every: u32,
+    pub cadence_sub_every: u32,
+    pub cadence_flx_every: u32,
+    pub cadence_sea_every: u32,
 }
 
 impl Default for OverlayState {
@@ -391,6 +426,26 @@ impl Default for OverlayState {
             run_active: false,
             run_target_myr: 0.0,
             steps_per_frame: 4,
+            stepper: StepperState {
+                playing: false,
+                t_target_myr: 0.0,
+                max_steps_per_frame: 4,
+                min_ms_between_raster: 200,
+                last_raster_at: Instant::now(),
+            },
+
+            hypso_d_max: 4000.0,
+            hypso_h_max: 4000.0,
+            hypso_snowline: 2500.0,
+
+            raster_tex: None,
+            raster_tex_id: None,
+            use_gpu_raster: true,
+            raster_size: (1024, 512),
+            raster_dirty: true,
+            last_raster_at: Instant::now(),
+            raster_min_interval_ms: 200,
+            high_quality_when_paused: true,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,
@@ -404,6 +459,15 @@ impl Default for OverlayState {
             adv_open_playback: false,
 
             t505_logged: false,
+
+            // Debug / cadence controls defaults
+            debug_enable_all: false,
+            debug_burst_steps: 0,
+            cadence_adv_every: 1,
+            cadence_trf_every: 5,
+            cadence_sub_every: 10,
+            cadence_flx_every: 10,
+            cadence_sea_every: 1,
         }
     }
 }
@@ -802,42 +866,54 @@ impl OverlayState {
     #[allow(dead_code)]
     pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
         let mut shapes = Vec::with_capacity(grid.latlon.len());
-        let (dmin, dmax) = self.depth_minmax;
-        let elev_min_locked = -dmax;
-        let elev_max_locked = -dmin;
         // Optional hillshade
         let mut shade: Vec<f32> = vec![1.0; grid.cells];
         if self.shade_on {
             compute_hillshade(&mut shade, grid, depth_m, self.sun_az_deg, self.sun_alt_deg);
         }
+        // Sea-aware scales: scan once
+        let mut max_ocean = 0.0f32;
+        let mut max_land = 0.0f32;
+        for &d in depth_m {
+            if d > 0.0 {
+                if d > max_ocean {
+                    max_ocean = d;
+                }
+            } else if -d > max_land {
+                max_land = -d;
+            }
+        }
+        self.hypso_d_max = max_ocean.max(4000.0);
+        self.hypso_h_max = max_land.max(4000.0);
+        let snow = self.hypso_snowline;
         for (i, &ll) in grid.latlon.iter().enumerate() {
             let p = project_equirect(ll[0], ll[1], rect);
-            let elev = -depth_m[i];
-            let base_rgb = match self.color_mode {
-                0 => {
-                    let pal = crate::colormap::hyps_default_palette();
-                    let t = if elev_max_locked > elev_min_locked {
-                        ((elev - elev_min_locked) / (elev_max_locked - elev_min_locked))
-                            .clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let x = pal.vmin + t * (pal.vmax - pal.vmin);
-                    crate::colormap::sample_linear_srgb(pal, x)
+            let d = depth_m[i];
+            let mut col = if self.color_mode == 0 {
+                if d >= 0.0 {
+                    ocean_color32(d, self.hypso_d_max)
+                } else {
+                    land_color32(-d, self.hypso_h_max, snow)
                 }
-                _ => crate::colormap::pick_biome_color(ll[0], elev),
+            } else {
+                // Biomes over land only; oceans use ocean ramp
+                if d >= 0.0 {
+                    ocean_color32(d, self.hypso_d_max)
+                } else {
+                    let rgb = crate::colormap::pick_biome_color(ll[0], -d);
+                    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+                }
             };
-            let rgb = if self.shade_on {
+            if self.shade_on {
                 let sh = shade[i];
                 let k = 1.0 - self.shade_strength + self.shade_strength * sh;
-                let r = ((base_rgb[0] as f32) * k).round().clamp(0.0, 255.0) as u8;
-                let g = ((base_rgb[1] as f32) * k).round().clamp(0.0, 255.0) as u8;
-                let b = ((base_rgb[2] as f32) * k).round().clamp(0.0, 255.0) as u8;
-                [r, g, b]
-            } else {
-                base_rgb
-            };
-            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                col = Color32::from_rgba_unmultiplied(
+                    ((col.r() as f32) * k).round().clamp(0.0, 255.0) as u8,
+                    ((col.g() as f32) * k).round().clamp(0.0, 255.0) as u8,
+                    ((col.b() as f32) * k).round().clamp(0.0, 255.0) as u8,
+                    col.a(),
+                );
+            }
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }
         // Draw 0 m coastline as thin black segments where any neighbor crosses zero
@@ -1226,6 +1302,7 @@ impl OverlayState {
 
 /// Draw the primary color layer for Simple mode. Ensures a color/bathy layer is available
 /// and paints it every frame so the map is never empty. Logs a one-line diagnostic.
+#[allow(dead_code)]
 pub fn draw_color_layer(
     _ui: &mut egui::Ui,
     painter: &egui::Painter,
@@ -1403,5 +1480,51 @@ fn compute_hillshade(
         let nz = nz * inv_len;
         let shade = (nx * l_e + ny * l_n + nz * l_u).max(0.0);
         out[i] = shade;
+    }
+}
+
+#[inline]
+fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let (ar, ag, ab, aa) = (a.r() as f32, a.g() as f32, a.b() as f32, a.a() as f32);
+    let (br, bg, bb, ba) = (b.r() as f32, b.g() as f32, b.b() as f32, b.a() as f32);
+    Color32::from_rgba_unmultiplied(
+        (ar + (br - ar) * t).round() as u8,
+        (ag + (bg - ag) * t).round() as u8,
+        (ab + (bb - ab) * t).round() as u8,
+        (aa + (ba - aa) * t).round() as u8,
+    )
+}
+
+const O_DEEP: Color32 = Color32::from_rgb(6, 35, 66);
+const O_MID: Color32 = Color32::from_rgb(28, 102, 163);
+const O_SHAL: Color32 = Color32::from_rgb(117, 188, 210);
+const L_BEACH: Color32 = Color32::from_rgb(236, 224, 186);
+const L_HILL: Color32 = Color32::from_rgb(146, 129, 100);
+const L_HIGH: Color32 = Color32::from_rgb(186, 191, 200);
+const L_SNOW: Color32 = Color32::from_rgb(245, 248, 250);
+
+#[inline]
+pub(crate) fn ocean_color32(depth_pos_m: f32, d_max: f32) -> Color32 {
+    let t = (depth_pos_m / d_max.max(1.0)).clamp(0.0, 1.0);
+    if t < 0.7 {
+        lerp(O_DEEP, O_MID, t / 0.7)
+    } else {
+        lerp(O_MID, O_SHAL, (t - 0.7) / 0.3)
+    }
+}
+
+#[inline]
+pub(crate) fn land_color32(height_pos_m: f32, h_max: f32, snowline_m: f32) -> Color32 {
+    let h = height_pos_m.max(0.0);
+    if h >= snowline_m {
+        let t = ((h - snowline_m) / (h_max.max(snowline_m + 1.0) - snowline_m)).clamp(0.0, 1.0);
+        return lerp(L_HIGH, L_SNOW, t);
+    }
+    let t = (h / snowline_m.max(1.0)).clamp(0.0, 1.0);
+    if t < 0.5 {
+        lerp(L_BEACH, L_HILL, t / 0.5)
+    } else {
+        lerp(L_HILL, L_HIGH, (t - 0.5) / 0.5)
     }
 }
