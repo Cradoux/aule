@@ -163,6 +163,10 @@ fn render_simple_panels(
             for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
                 *d = *d - (amp_m as f32) * *t + (off_m as f32);
             }
+            // Seed continents fields so subsequent steps preserve uplift
+            world.c.clone_from(&continent_tpl);
+            world.th_c_m.fill(amp_m as f32);
+            world.epoch_continents = world.epoch_continents.wrapping_add(1);
             // Diagnostics and UI updates
             let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
             let mut ocean_area = 0.0f64;
@@ -1178,7 +1182,23 @@ fn main() {
                                             ov.color_dirty = true;
                                             ov.world_dirty = true;
                                             ctx.request_repaint();
-                                            println!("[step/ui] t={:.1}→{:.1} Myr (+{} steps)", t0, world.clock.t_myr, steps_done);
+                                            // Per-step land fraction (area-weighted)
+                                            let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                            let land_area: f64 = world
+                                                .depth_m
+                                                .iter()
+                                                .zip(world.area_m2.iter())
+                                                .filter(|(&d, _)| d <= 0.0)
+                                                .map(|(_, &a)| a as f64)
+                                                .sum();
+                                            let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                            println!(
+                                                "[step/ui] t={:.1}→{:.1} Myr (+{} steps) | land={:.1}%",
+                                                t0,
+                                                world.clock.t_myr,
+                                                steps_done,
+                                                land_frac * 100.0
+                                            );
                                         }
                                         if steps_done > 0 && ov.debug_burst_steps > 0 { ov.debug_burst_steps = ov.debug_burst_steps.saturating_sub(steps_done); if ov.debug_burst_steps == 0 { println!("[debug] profiling burst complete."); } }
                                         if world.clock.t_myr >= ov.run_target_myr { ov.run_active = false; }
