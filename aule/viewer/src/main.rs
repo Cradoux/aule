@@ -100,34 +100,95 @@ fn render_simple_panels(
         });
 
         if ui.button("Generate world").clicked() {
-            // Use new engine pipeline
-            let preset = engine::world::SimplePreset {
-                plates: match ov.simple_preset {
-                    1 => 10,
-                    2 => 6,
-                    _ => 8,
-                },
-                continents_n: match ov.simple_preset {
-                    1 => 4,
-                    2 => 2,
-                    _ => 3,
-                },
-                target_land_frac: ov.simple_target_land,
-            };
-            let rep = world.generate_simple(&preset, ov.simple_seed);
-            println!(
-                "[ui] simple: ocean={:.1}% land={:.1}% depth=[{:.0},{:.0}] m",
-                rep.ocean_frac * 100.0,
-                rep.land_frac * 100.0,
-                rep.depth_min_max.0,
-                rep.depth_min_max.1
+            // Simple-mode generation using area-based land solver (T-603c)
+            let plates = match ov.simple_preset { 1 => 10, 2 => 6, _ => 8 };
+            let continents_n = match ov.simple_preset { 1 => 4, 2 => 2, _ => 3 };
+            // Reset/normalize world state for current F & plates
+            world.plates = engine::plates::Plates::new(&world.grid, plates, ov.simple_seed);
+            world.v_en.clone_from(&world.plates.vel_en);
+            world.age_myr.fill(0.0);
+            world.depth_m.fill(0.0);
+            world.c.fill(0.0);
+            world.th_c_m.fill(0.0);
+            world.sediment_m.fill(0.0);
+            world.clock = engine::world::Clock { t_myr: 0.0, step_idx: 0 };
+            world.sea_level_ref = None;
+            world.boundaries = engine::boundaries::Boundaries::classify(
+                &world.grid,
+                &world.plates.plate_id,
+                &world.v_en,
+                0.005,
             );
+            // Initialize ridge births then baseline bathymetry from age (ocean depths)
+            {
+                let mut ages_tmp = world.age_myr.clone();
+                let _ridge_stats = engine::ridge::apply_ridge(
+                    &world.grid,
+                    &world.boundaries,
+                    &mut ages_tmp,
+                    engine::ridge::RidgeParams { fringe_age_myr: 0.0 },
+                );
+                world.age_myr = ages_tmp;
+            }
+            let n_cells = world.grid.cells;
+            for i in 0..n_cells {
+                let mut d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+                if !d.is_finite() { d = 6000.0; }
+                world.depth_m[i] = d.clamp(0.0, 6000.0);
+            }
+            // Build continent template (unitless 0..1)
+            let cp = engine::continent::ContinentParams {
+                seed: ov.simple_seed,
+                n_continents: continents_n,
+                mean_radius_km: 2200.0,
+                falloff_km: 600.0,
+                plateau_uplift_m: 1.0,
+                target_land_fraction: None,
+            };
+            let cf = engine::continent::build_continents(&world.grid, cp);
+            let continent_tpl: Vec<f32> = cf.uplift_template_m;
+            // Solve amplitude and sea-level offset for target land fraction (area-based)
+            let target_land = ov.simple_target_land.clamp(0.0, 0.5);
+            let (amp_m, off_m) = engine::isostasy::solve_amplitude_for_land_fraction(
+                &continent_tpl,
+                &world.depth_m,
+                &world.area_m2,
+                target_land,
+                0.0,
+                6000.0,
+                2e-2,
+                1e-4,
+                48,
+            );
+            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
+                *d = *d - (amp_m as f32) * *t + (off_m as f32);
+            }
+            // Diagnostics and UI updates
+            let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+            let mut ocean_area = 0.0f64;
+            for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                if (*d as f64) > 0.0 { ocean_area += *a as f64; }
+            }
+            let land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+            // Elevation stats (m)
+            let mut zmin = f32::INFINITY; let mut zmax = f32::NEG_INFINITY; let mut zsum = 0.0f64; let mut zn = 0usize;
+            for &d in &world.depth_m { if d.is_finite() { let z = -d; zmin = zmin.min(z); zmax = zmax.max(z); zsum += z as f64; zn += 1; } }
+            let zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
+            println!(
+                "[simple] land_target={:.1}% land={:.1}% amp={:.0} m off={:.0} m elev[min/mean/max]={:.0}/{:.0}/{:.0}",
+                target_land * 100.0,
+                land_frac * 100.0,
+                amp_m,
+                off_m,
+                zmin,
+                zmean,
+                zmax
+            );
+            debug_assert!(world.depth_m.iter().any(|d| *d < 0.0), "no land after solve");
+            debug_assert!(world.depth_m.iter().any(|d| *d > 0.0), "no ocean after solve");
             // Apply palette then mark dirty
             apply_simple_palette(ov, world, ctx);
-            ov.world_dirty = true;
-            ov.color_dirty = true;
-            ov.raster_dirty = true;
-            ov.bathy_cache = None;
+            ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true; ov.bathy_cache = None;
             ctx.request_repaint();
             // e) Run to t_end (safe dt) with realtime redraw
             let burst = ov.debug_burst_steps > 0;

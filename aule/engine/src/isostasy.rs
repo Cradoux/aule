@@ -57,6 +57,134 @@ pub fn apply_sea_level_offset(depth_m: &mut [f32], offset_m: f64) {
     }
 }
 
+/// Bisection on uniform offset (meters) so ocean-area fraction == target_ocean_frac.
+///
+/// Convention: ocean if (depth_m[i] + off) > 0.0. Returns the offset in meters.
+pub fn solve_offset_for_ocean_area_fraction(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_ocean_frac: f32,
+    tol_frac: f64,
+    max_iter: u32,
+) -> f64 {
+    assert_eq!(depth_m.len(), area_m2.len());
+    let total_area: f64 = area_m2.iter().map(|&a| a as f64).sum();
+    if total_area <= 0.0 {
+        return 0.0;
+    }
+    let target = target_ocean_frac.clamp(0.0, 1.0) as f64;
+    let area_frac = |off: f64| -> f64 {
+        let mut ocean_area = 0.0f64;
+        for (d, a) in depth_m.iter().zip(area_m2.iter()) {
+            if (*d as f64 + off) > 0.0 {
+                ocean_area += *a as f64;
+            }
+        }
+        ocean_area / total_area
+    };
+    // Fixed bracket sufficient for global range
+    let mut lo = -12_000.0f64;
+    let mut hi = 12_000.0f64;
+    let mut a_lo = area_frac(lo) - target;
+    let mut a_hi = area_frac(hi) - target;
+    // If bracket doesn't straddle, expand a few times conservatively
+    let mut expand = 0;
+    while a_lo > 0.0 && expand < 4 {
+        lo -= 12_000.0;
+        a_lo = area_frac(lo) - target;
+        expand += 1;
+    }
+    expand = 0;
+    while a_hi < 0.0 && expand < 4 {
+        hi += 12_000.0;
+        a_hi = area_frac(hi) - target;
+        expand += 1;
+    }
+    let mut mid = 0.5 * (lo + hi);
+    for _ in 0..max_iter {
+        mid = 0.5 * (lo + hi);
+        let f_mid = area_frac(mid) - target;
+        if f_mid.abs() <= tol_frac || (hi - lo).abs() < 1e-6 {
+            return mid;
+        }
+        if (f_mid > 0.0) == (a_lo > 0.0) {
+            lo = mid;
+            a_lo = f_mid;
+        } else {
+            hi = mid;
+        }
+    }
+    mid
+}
+
+/// Outer bisection on uplift amplitude (meters) over a continent template (0..1),
+/// inner solve on sea-level offset to hit target land fraction.
+/// Returns (amp_m, off_m).
+#[allow(clippy::too_many_arguments)]
+pub fn solve_amplitude_for_land_fraction(
+    tpl: &[f32],
+    base_depth_m: &[f32],
+    area_m2: &[f32],
+    target_land_frac: f32,
+    amp_lo_m: f64,
+    amp_hi_m: f64,
+    tol_land: f64,
+    tol_ocean: f64,
+    max_iter: u32,
+) -> (f64, f64) {
+    assert_eq!(tpl.len(), base_depth_m.len());
+    assert_eq!(tpl.len(), area_m2.len());
+    let total_area: f64 = area_m2.iter().map(|&a| a as f64).sum();
+    if total_area <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let target_land = target_land_frac.clamp(0.0, 1.0) as f64;
+    let target_ocean = 1.0 - target_land;
+    // Degenerate template → only sea-level offset
+    if tpl.iter().all(|&t| t == 0.0) {
+        let off = solve_offset_for_ocean_area_fraction(
+            base_depth_m,
+            area_m2,
+            target_ocean as f32,
+            tol_ocean,
+            64,
+        );
+        return (0.0, off);
+    }
+    let mut lo = amp_lo_m.max(0.0);
+    let mut hi = amp_hi_m.max(lo);
+    let mut best = (lo, 0.0, 1.0f64); // (amp, off, land_frac)
+    let mut tmp: Vec<f32> = vec![0.0; base_depth_m.len()];
+    for _ in 0..max_iter {
+        let amp = 0.5 * (lo + hi);
+        // tmp = base - amp * tpl
+        for ((out, &d), &t) in tmp.iter_mut().zip(base_depth_m.iter()).zip(tpl.iter()) {
+            *out = d - (amp as f32) * t;
+        }
+        let off =
+            solve_offset_for_ocean_area_fraction(&tmp, area_m2, target_ocean as f32, tol_ocean, 64);
+        // Compute achieved land fraction with applied offset
+        let mut ocean_area = 0.0f64;
+        for (&d, &a) in tmp.iter().zip(area_m2.iter()) {
+            if (d as f64 + off) > 0.0 {
+                ocean_area += a as f64;
+            }
+        }
+        let land = 1.0 - (ocean_area / total_area);
+        best = (amp, off, land);
+        let err = land - target_land;
+        if err.abs() <= tol_land {
+            return (amp, off);
+        }
+        if err > 0.0 {
+            hi = amp;
+        } else {
+            lo = amp;
+        }
+    }
+    (best.0, best.1)
+}
+
 /// Solve for offset (m) so that ocean_volume(depth+offset) ~= target_volume_m3 via bisection.
 pub fn solve_offset_for_volume(
     depth_m: &[f32],
