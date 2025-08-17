@@ -158,9 +158,9 @@ fn render_simple_panels(
             };
             let cf = engine::continent::build_continents(&world.grid, cp);
             let continent_tpl: Vec<f32> = cf.uplift_template_m;
-            // Solve amplitude and sea-level offset for target land fraction (area-based)
+            // Solve amplitude for target land fraction (area-based). We'll apply uplift only; sea offset handled via world.sea.eta_m
             let target_land = ov.simple_target_land.clamp(0.0, 0.5);
-            let (amp_m, off_m) = engine::isostasy::solve_amplitude_for_land_fraction(
+            let (amp_m, _off_m_unused) = engine::isostasy::solve_amplitude_for_land_fraction(
                 &continent_tpl,
                 &world.depth_m,
                 &world.area_m2,
@@ -171,51 +171,48 @@ fn render_simple_panels(
                 1e-4,
                 48,
             );
-            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
-                *d = *d - (amp_m as f32) * *t + (off_m as f32);
-            }
-            // Final land-fraction lock: uniform offset so land area == target within tolerance
-            let off_land = engine::isostasy::solve_offset_for_land_fraction(
+            // Apply uplift to a base copy so we can retry amplitude if needed
+            let base_depth = world.depth_m.clone();
+            let mut amp_used_m = amp_m as f32;
+            world.depth_m.clone_from(&base_depth);
+            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_used_m * *t; }
+            // Solve η so that land fraction with elev=η−depth matches target
+            let eta_off = engine::isostasy::solve_offset_for_land_fraction(
                 &world.depth_m,
                 &world.area_m2,
                 ov.simple_target_land,
                 64,
             );
-            engine::isostasy::apply_sea_level_offset(&mut world.depth_m, off_land);
+            // Solver returns an offset 'off' used in elevation = -(depth + off). Our convention is elev = η − depth, so η = -off.
+            world.sea.eta_m = -(eta_off as f32);
             // Seed continents fields so subsequent steps preserve uplift
             world.c.clone_from(&continent_tpl);
-            world.th_c_m.fill(amp_m as f32);
+            world.th_c_m.fill(amp_used_m);
             world.epoch_continents = world.epoch_continents.wrapping_add(1);
-            // Diagnostics and UI updates
+            // Diagnostics and UI updates using elev = η − depth
             let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-            let mut ocean_area = 0.0f64;
-            for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                if (*d as f64) > 0.0 {
-                    ocean_area += *a as f64;
+            let mut land_area = 0.0f64;
+            for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                if (world.sea.eta_m as f64 - d as f64) > 0.0 {
+                    land_area += a as f64;
                 }
             }
-            let mut land_frac =
-                if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
-            // Final correction: ensure ocean fraction matches target by re-solving offset on the applied depths
-            let target_ocean = 1.0 - (target_land as f64);
-            let tol_land_final = 0.02f64;
-            if ((1.0 - land_frac) - target_ocean).abs() > tol_land_final {
-                let off2 = engine::isostasy::solve_offset_for_ocean_area_fraction(
+            let land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
+            // If we saturated amplitude and still miss target significantly, boost once and resolve again
+            if (land_frac - ov.simple_target_land as f64).abs() > 0.05 {
+                let amp_boost = amp_used_m * 1.5;
+                println!("[simple] land target not reachable with current amplitude; boosting A → {:.0} m", amp_boost);
+                world.depth_m.clone_from(&base_depth);
+                for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_boost * *t; }
+                let eta_off2 = engine::isostasy::solve_offset_for_land_fraction(
                     &world.depth_m,
                     &world.area_m2,
-                    target_ocean as f32,
-                    1e-4,
+                    ov.simple_target_land,
                     64,
                 );
-                engine::isostasy::apply_sea_level_offset(&mut world.depth_m, off2);
-                // Recompute fractions after correction
-                ocean_area = 0.0;
-                for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                    if (*d as f64) > 0.0 {
-                        ocean_area += *a as f64;
-                    }
-                }
-                land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+                world.sea.eta_m = -(eta_off2 as f32);
+                amp_used_m = amp_boost;
+                world.th_c_m.fill(amp_used_m);
             }
             // Elevation stats (m)
             let mut zmin = f32::INFINITY;
@@ -224,7 +221,7 @@ fn render_simple_panels(
             let mut zn = 0usize;
             for &d in &world.depth_m {
                 if d.is_finite() {
-                    let z = -d;
+                    let z = world.sea.eta_m - d;
                     zmin = zmin.min(z);
                     zmax = zmax.max(z);
                     zsum += z as f64;
@@ -235,8 +232,16 @@ fn render_simple_panels(
             println!(
                 "[simple] target_land={:.2} solved_eta={:+.0} m | land={:.3}",
                 ov.simple_target_land,
-                (off_m + off_land) as f32,
+                world.sea.eta_m,
                 land_frac
+            );
+            debug_assert!((land_frac - ov.simple_target_land as f64).abs() < 0.05);
+            println!(
+                "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%",
+                zmin,
+                _zmean,
+                zmax,
+                land_frac * 100.0
             );
             // Guards (non-panicking in release; keep as debug only)
             debug_assert!(world.depth_m.iter().any(|d| *d < 0.0), "no land after solve");
@@ -1016,15 +1021,12 @@ fn main() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
                                     ui.separator();
-                                    // Live land fraction (area-weighted)
+                                    // Live land fraction (area-weighted) using elev = η − depth
                                     let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                                    let land_area: f64 = world
-                                        .depth_m
-                                        .iter()
-                                        .zip(world.area_m2.iter())
-                                        .filter(|(&d, _)| d <= 0.0)
-                                        .map(|(_, &a)| a as f64)
-                                        .sum();
+                                    let mut land_area: f64 = 0.0;
+                                    for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                                        if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
+                                    }
                                     let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                     ui.label(format!("Land: {:.1}%", land_frac * 100.0));
                                 });
@@ -1127,15 +1129,12 @@ fn main() {
                                                         let sp = engine::world::StepParams { dt_myr: 1.0, do_flexure: ov.enable_flexure || enable_all, do_isostasy: ov.apply_sea_level || enable_all, do_transforms: ov.show_transforms || enable_all, do_subduction: ov.show_subduction || enable_all, do_continents: ov.continents_apply || enable_all, do_ridge_birth: true, auto_rebaseline_after_continents: ov.auto_rebaseline_l, do_rigid_motion: ov.kin_enable || enable_all, do_orogeny: false, do_accretion: false, do_rifting: false, do_surface: ov.surface_enable && !enable_all, surface_params: engine::surface::SurfaceParams { k_stream: ov.surf_k_stream, m_exp: ov.surf_m_exp, n_exp: ov.surf_n_exp, k_diff: ov.surf_k_diff, k_tr: ov.surf_k_tr, p_exp: ov.surf_p_exp, q_exp: ov.surf_q_exp, rho_sed: ov.surf_rho_sed, min_slope: ov.surf_min_slope, subcycles: ov.surf_subcycles.max(1), couple_flexure: ov.surf_couple_flexure }, advection_every: adv_every, transforms_every: trf_every, subduction_every: sub_every, flexure_every: flx_every, sea_every, do_advection: ov.continents_apply || enable_all, do_sea: ov.apply_sea_level || enable_all };
                                                         let t0 = world.clock.t_myr;
                                                         let _ = engine::world::step_once(&mut world, &sp);
-                                                        // Per-step land fraction (area-weighted)
+                                                        // Per-step land fraction (area-weighted) using elev = η − depth
                                                         let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                                                        let land_area: f64 = world
-                                                            .depth_m
-                                                            .iter()
-                                                            .zip(world.area_m2.iter())
-                                                            .filter(|(&d, _)| d <= 0.0)
-                                                            .map(|(_, &a)| a as f64)
-                                                            .sum();
+                                                        let mut land_area: f64 = 0.0;
+                                                        for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                                                            if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
+                                                        }
                                                         let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                                         println!(
                                                             "[step/ui] t={:.1}→{:.1} Myr | land={:.1}%",
@@ -1245,15 +1244,12 @@ fn main() {
                                             ov.color_dirty = true;
                                             ov.world_dirty = true;
                                             ctx.request_repaint();
-                                            // Per-step land fraction (area-weighted)
+                                            // Per-step land fraction (area-weighted) using elev = η − depth
                                             let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                                            let land_area: f64 = world
-                                                .depth_m
-                                                .iter()
-                                                .zip(world.area_m2.iter())
-                                                .filter(|(&d, _)| d <= 0.0)
-                                                .map(|(_, &a)| a as f64)
-                                                .sum();
+                                            let mut land_area: f64 = 0.0;
+                                            for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                                                if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
+                                            }
                                             let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                             println!(
                                                 "[step/ui] t={:.1}→{:.1} Myr (+{} steps) | land={:.1}%",
@@ -1382,15 +1378,12 @@ fn main() {
                                     do_sea: ov.apply_sea_level || enable_all,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
-                                // Step log (one line per step)
+                                // Step log (one line per step) using elev = η − depth
                                 let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                                let land_area: f64 = world
-                                    .depth_m
-                                    .iter()
-                                    .zip(world.area_m2.iter())
-                                    .filter(|(&d, _)| d <= 0.0)
-                                    .map(|(_, &a)| a as f64)
-                                    .sum();
+                                let mut land_area: f64 = 0.0;
+                                for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                                    if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
+                                }
                                 let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                 println!(
                                     "[step] t={:.1} Myr dt={:.1} | div={} conv={} trans={} | land={:.1}% C̄={:.1}% | residual flex={}",
