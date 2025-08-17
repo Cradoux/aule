@@ -1103,8 +1103,9 @@ fn main() {
                                                     face_geom.push([cx, cy, cz, 0.0]);
                                                     face_geom.push([nx, ny, nz, 0.0]);
                                                 }
-                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m };
+                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m);
+                                                rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 pipes.face_cache = Some(FaceCache { f: f_now, face_ids, face_offs, face_geom });
                                                 // Register texture once
                                                 if ov.raster_tex_id.is_none() {
@@ -1158,9 +1159,10 @@ fn main() {
                                                 }
                                                 // Dispatch only when flagged dirty
                                                 if ov.raster_dirty {
-                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m };
+                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                     rg.write_uniforms(&gpu.queue, &u);
                                                     rg.write_vertex_values(&gpu.queue, &world.depth_m);
+                                                    rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                     rg.dispatch(&gpu.device, &gpu.queue);
                                                     if ov.raster_tex_id.is_none() { let tid = egui_renderer.register_native_texture(&gpu.device, &rg.out_view, wgpu::FilterMode::Linear); ov.raster_tex_id = Some(tid); }
                                                     ov.raster_dirty = false; ov.world_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();

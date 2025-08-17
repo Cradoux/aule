@@ -5,11 +5,13 @@ pub struct Uniforms {
     pub height: u32,
     pub f: u32,
     pub palette_mode: u32,
-    pub _pad0: u32,
+    pub debug_flags: u32,
     pub d_max: f32,
     pub h_max: f32,
     pub snowline: f32,
     pub eta_m: f32,
+    pub inv_dmax: f32,
+    pub inv_hmax: f32,
 }
 
 pub struct RasterGpu {
@@ -20,6 +22,9 @@ pub struct RasterGpu {
     pub face_offsets: wgpu::Buffer,
     pub face_geom: wgpu::Buffer,
     pub vertex_values: wgpu::Buffer,
+    pub lut_tex: wgpu::Texture,
+    pub lut_view: wgpu::TextureView,
+    pub lut_sampler: wgpu::Sampler,
     #[allow(dead_code)]
     pub out_tex: wgpu::Texture,
     pub out_view: wgpu::TextureView,
@@ -72,15 +77,21 @@ impl RasterGpu {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
                     },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -90,7 +101,17 @@ impl RasterGpu {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
@@ -129,6 +150,38 @@ impl RasterGpu {
         });
         let out_view = out_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // LUT texture (1D x 512)
+        let lut_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("palette LUT"),
+            size: wgpu::Extent3d { width: 512, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D1,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let lut_view = lut_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("palette LUT view"),
+            format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            dimension: Some(wgpu::TextureViewDimension::D1),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
+        let lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("palette LUT sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
@@ -149,10 +202,12 @@ impl RasterGpu {
                 wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: empty.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: empty.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: empty.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&lut_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: empty.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 7,
                     resource: wgpu::BindingResource::TextureView(&out_view),
                 },
             ],
@@ -184,6 +239,9 @@ impl RasterGpu {
             face_offsets: empty2,
             face_geom: empty3,
             vertex_values: empty4,
+            lut_tex,
+            lut_view,
+            lut_sampler,
             out_tex,
             out_view,
             bind_group,
@@ -193,19 +251,23 @@ impl RasterGpu {
         }
     }
 
-    fn pack_uniforms(u: &Uniforms) -> [u8; 40] {
-        let mut bytes = [0u8; 40];
+    fn pack_uniforms(u: &Uniforms) -> [u8; 56] {
+        let mut bytes = [0u8; 56];
         bytes[0..4].copy_from_slice(&u.width.to_le_bytes());
         bytes[4..8].copy_from_slice(&u.height.to_le_bytes());
         bytes[8..12].copy_from_slice(&u.f.to_le_bytes());
         bytes[12..16].copy_from_slice(&u.palette_mode.to_le_bytes());
-        bytes[16..20].copy_from_slice(&u._pad0.to_le_bytes());
+        bytes[16..20].copy_from_slice(&u.debug_flags.to_le_bytes());
         bytes[20..24].copy_from_slice(&u.d_max.to_le_bytes());
         bytes[24..28].copy_from_slice(&u.h_max.to_le_bytes());
         bytes[28..32].copy_from_slice(&u.snowline.to_le_bytes());
         bytes[32..36].copy_from_slice(&u.eta_m.to_le_bytes());
-        // pad last 4 bytes to 16-byte alignment
-        bytes[36..40].copy_from_slice(&0u32.to_le_bytes());
+        bytes[36..40].copy_from_slice(&u.inv_dmax.to_le_bytes());
+        bytes[40..44].copy_from_slice(&u.inv_hmax.to_le_bytes());
+        // pad to 16-byte alignment
+        bytes[44..48].copy_from_slice(&0u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&0u32.to_le_bytes());
+        bytes[52..56].copy_from_slice(&0u32.to_le_bytes());
         bytes
     }
 
@@ -292,13 +354,12 @@ impl RasterGpu {
                     binding: 2,
                     resource: self.face_offsets.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry { binding: 3, resource: self.face_geom.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lut_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: self.face_geom.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.vertex_values.as_entire_binding() },
                 wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.vertex_values.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 7,
                     resource: wgpu::BindingResource::TextureView(&self.out_view),
                 },
             ],
@@ -334,5 +395,36 @@ impl RasterGpu {
             buf.extend_from_slice(&f.to_le_bytes());
         }
         queue.write_buffer(&self.vertex_values, 0, &buf);
+    }
+
+    pub fn write_lut_from_overlay(&self, queue: &wgpu::Queue, ov: &crate::overlay::OverlayState) {
+        // Build 512 RGBA rows: 0..255 ocean (deep->0), 256..511 land
+        let mut px: Vec<u8> = Vec::with_capacity(512 * 4);
+        for i in 0..256 {
+            let depth = (i as f32) / 255.0 * ov.hypso_d_max.max(1.0);
+            let col = crate::overlay::ocean_color32(depth, ov.hypso_d_max.max(1.0));
+            px.push(col.r()); px.push(col.g()); px.push(col.b()); px.push(255);
+        }
+        for i in 0..256 {
+            let elev = (i as f32) / 255.0 * ov.hypso_h_max.max(1.0);
+            let col = crate::overlay::land_color32(elev, ov.hypso_h_max.max(1.0), ov.hypso_snowline);
+            px.push(col.r()); px.push(col.g()); px.push(col.b()); px.push(255);
+        }
+        let layout = wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(std::num::NonZeroU32::new(512 * 4).unwrap().into()),
+            rows_per_image: Some(std::num::NonZeroU32::new(1).unwrap().into()),
+        };
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.lut_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &px,
+            layout,
+            wgpu::Extent3d { width: 512, height: 1, depth_or_array_layers: 1 },
+        );
     }
 }
