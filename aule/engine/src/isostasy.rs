@@ -82,23 +82,29 @@ pub fn solve_offset_for_ocean_area_fraction(
         }
         ocean_area / total_area
     };
-    // Fixed bracket sufficient for global range
+    // Bracket such that g(lo) <= 0 <= g(hi), where g(off) = area_frac(off) - target
     let mut lo = -12_000.0f64;
     let mut hi = 12_000.0f64;
     let mut a_lo = area_frac(lo) - target;
     let mut a_hi = area_frac(hi) - target;
-    // If bracket doesn't straddle, expand a few times conservatively
-    let mut expand = 0;
-    while a_lo > 0.0 && expand < 4 {
-        lo -= 12_000.0;
-        a_lo = area_frac(lo) - target;
-        expand += 1;
+    // Expand adaptively if needed (monotonic in off)
+    let mut step = 12_000.0f64;
+    let mut iters = 0;
+    while !(a_lo <= 0.0 && a_hi >= 0.0) && iters < 32 {
+        if a_lo > 0.0 {
+            lo -= step;
+            a_lo = area_frac(lo) - target;
+        }
+        if a_hi < 0.0 {
+            hi += step;
+            a_hi = area_frac(hi) - target;
+        }
+        step *= 2.0;
+        iters += 1;
     }
-    expand = 0;
-    while a_hi < 0.0 && expand < 4 {
-        hi += 12_000.0;
-        a_hi = area_frac(hi) - target;
-        expand += 1;
+    // If still not bracketed (degenerate cases), return the closer endpoint
+    if !(a_lo <= 0.0 && a_hi >= 0.0) {
+        return if a_lo.abs() < a_hi.abs() { lo } else { hi };
     }
     let mut mid = 0.5 * (lo + hi);
     for _ in 0..max_iter {
@@ -241,4 +247,69 @@ pub fn solve_offset_for_volume(
         }
     }
     off
+}
+
+/// Solve uniform offset (meters) so that land fraction equals `target_land_frac`.
+///
+/// Land is defined where elevation > 0, with elevation = -(depth + off).
+/// Positive `off` makes water deeper (more ocean); negative `off` raises land.
+pub fn solve_offset_for_land_fraction(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_land_frac: f32,
+    max_iter: u32,
+) -> f64 {
+    assert_eq!(depth_m.len(), area_m2.len());
+    let total_area: f64 = area_m2.iter().map(|&a| a as f64).sum();
+    if total_area <= 0.0 {
+        return 0.0;
+    }
+    let target = (target_land_frac.clamp(0.0, 1.0)) as f64;
+    let land_frac = |off: f64| -> f64 {
+        let mut land = 0.0f64;
+        for (&d, &a) in depth_m.iter().zip(area_m2.iter()) {
+            if (-(d as f64 + off)) > 0.0 {
+                land += a as f64;
+            }
+        }
+        land / total_area
+    };
+    // Bracket off so that f(lo) >= target >= f(hi) (monotone decreasing in off)
+    let mut lo = -8000.0f64;
+    let mut hi = 8000.0f64;
+    let mut f_lo = land_frac(lo);
+    let mut f_hi = land_frac(hi);
+    let mut step = 8000.0f64;
+    let mut it = 0;
+    while !(f_lo >= target && f_hi <= target) && it < 32 {
+        if f_lo < target {
+            lo -= step;
+            f_lo = land_frac(lo);
+        }
+        if f_hi > target {
+            hi += step;
+            f_hi = land_frac(hi);
+        }
+        step *= 2.0;
+        it += 1;
+    }
+    if !(f_lo >= target && f_hi <= target) {
+        return if (f_lo - target).abs() < (f_hi - target).abs() { lo } else { hi };
+    }
+    // Bisection
+    for _ in 0..max_iter {
+        let mid = 0.5 * (lo + hi);
+        let f_mid = land_frac(mid);
+        if (f_mid - target).abs() <= 1e-4 {
+            // fraction tolerance
+            return mid;
+        }
+        if f_mid > target {
+            // too much land → move toward deeper water
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }

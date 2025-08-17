@@ -9,7 +9,7 @@ pub struct Uniforms {
     pub d_max: f32,
     pub h_max: f32,
     pub snowline: f32,
-    pub _pad1: f32,
+    pub eta_m: f32,
 }
 
 pub struct RasterGpu {
@@ -193,8 +193,8 @@ impl RasterGpu {
         }
     }
 
-    fn pack_uniforms(u: &Uniforms) -> [u8; 36] {
-        let mut bytes = [0u8; 36];
+    fn pack_uniforms(u: &Uniforms) -> [u8; 40] {
+        let mut bytes = [0u8; 40];
         bytes[0..4].copy_from_slice(&u.width.to_le_bytes());
         bytes[4..8].copy_from_slice(&u.height.to_le_bytes());
         bytes[8..12].copy_from_slice(&u.f.to_le_bytes());
@@ -203,7 +203,9 @@ impl RasterGpu {
         bytes[20..24].copy_from_slice(&u.d_max.to_le_bytes());
         bytes[24..28].copy_from_slice(&u.h_max.to_le_bytes());
         bytes[28..32].copy_from_slice(&u.snowline.to_le_bytes());
-        bytes[32..36].copy_from_slice(&u._pad1.to_le_bytes());
+        bytes[32..36].copy_from_slice(&u.eta_m.to_le_bytes());
+        // pad last 4 bytes to 16-byte alignment
+        bytes[36..40].copy_from_slice(&0u32.to_le_bytes());
         bytes
     }
 

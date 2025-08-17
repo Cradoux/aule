@@ -74,12 +74,12 @@ pub fn render_map(world: &World, ov: &OverlayState, width: u32, height: u32) -> 
                     }
                 }
             }
-            let val = values[best_i];
-            let col = if val >= 0.0 {
-                // Ocean
-                super::overlay::ocean_color32(val, d_max)
+            let depth = values[best_i];
+            let elev = world.sea.eta_m - depth;
+            let col = if elev <= 0.0 {
+                super::overlay::ocean_color32((-elev).max(0.0), d_max)
             } else {
-                super::overlay::land_color32(-val, h_max, snow)
+                super::overlay::land_color32(elev.max(0.0), h_max, snow)
             };
             img.pixels[y * w + x] = col;
         }

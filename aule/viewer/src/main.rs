@@ -101,8 +101,16 @@ fn render_simple_panels(
 
         if ui.button("Generate world").clicked() {
             // Simple-mode generation using area-based land solver (T-603c)
-            let plates = match ov.simple_preset { 1 => 10, 2 => 6, _ => 8 };
-            let continents_n = match ov.simple_preset { 1 => 4, 2 => 2, _ => 3 };
+            let plates = match ov.simple_preset {
+                1 => 10,
+                2 => 6,
+                _ => 8,
+            };
+            let continents_n = match ov.simple_preset {
+                1 => 4,
+                2 => 2,
+                _ => 3,
+            };
             // Reset/normalize world state for current F & plates
             world.plates = engine::plates::Plates::new(&world.grid, plates, ov.simple_seed);
             world.v_en.clone_from(&world.plates.vel_en);
@@ -132,8 +140,11 @@ fn render_simple_panels(
             }
             let n_cells = world.grid.cells;
             for i in 0..n_cells {
-                let mut d = engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
-                if !d.is_finite() { d = 6000.0; }
+                let mut d =
+                    engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+                if !d.is_finite() {
+                    d = 6000.0;
+                }
                 world.depth_m[i] = d.clamp(0.0, 6000.0);
             }
             // Build continent template (unitless 0..1)
@@ -163,6 +174,14 @@ fn render_simple_panels(
             for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
                 *d = *d - (amp_m as f32) * *t + (off_m as f32);
             }
+            // Final land-fraction lock: uniform offset so land area == target within tolerance
+            let off_land = engine::isostasy::solve_offset_for_land_fraction(
+                &world.depth_m,
+                &world.area_m2,
+                ov.simple_target_land,
+                64,
+            );
+            engine::isostasy::apply_sea_level_offset(&mut world.depth_m, off_land);
             // Seed continents fields so subsequent steps preserve uplift
             world.c.clone_from(&continent_tpl);
             world.th_c_m.fill(amp_m as f32);
@@ -171,9 +190,12 @@ fn render_simple_panels(
             let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
             let mut ocean_area = 0.0f64;
             for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                if (*d as f64) > 0.0 { ocean_area += *a as f64; }
+                if (*d as f64) > 0.0 {
+                    ocean_area += *a as f64;
+                }
             }
-            let mut land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
+            let mut land_frac =
+                if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
             // Final correction: ensure ocean fraction matches target by re-solving offset on the applied depths
             let target_ocean = 1.0 - (target_land as f64);
             let tol_land_final = 0.02f64;
@@ -189,30 +211,42 @@ fn render_simple_panels(
                 // Recompute fractions after correction
                 ocean_area = 0.0;
                 for (d, a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                    if (*d as f64) > 0.0 { ocean_area += *a as f64; }
+                    if (*d as f64) > 0.0 {
+                        ocean_area += *a as f64;
+                    }
                 }
                 land_frac = if total_area > 0.0 { 1.0 - (ocean_area / total_area) } else { 0.0 };
             }
             // Elevation stats (m)
-            let mut zmin = f32::INFINITY; let mut zmax = f32::NEG_INFINITY; let mut zsum = 0.0f64; let mut zn = 0usize;
-            for &d in &world.depth_m { if d.is_finite() { let z = -d; zmin = zmin.min(z); zmax = zmax.max(z); zsum += z as f64; zn += 1; } }
-            let zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
+            let mut zmin = f32::INFINITY;
+            let mut zmax = f32::NEG_INFINITY;
+            let mut zsum = 0.0f64;
+            let mut zn = 0usize;
+            for &d in &world.depth_m {
+                if d.is_finite() {
+                    let z = -d;
+                    zmin = zmin.min(z);
+                    zmax = zmax.max(z);
+                    zsum += z as f64;
+                    zn += 1;
+                }
+            }
+            let _zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
             println!(
-                "[simple] land_target={:.1}% land={:.1}% amp={:.0} m off={:.0} m elev[min/mean/max]={:.0}/{:.0}/{:.0}",
-                target_land * 100.0,
-                land_frac * 100.0,
-                amp_m,
-                off_m,
-                zmin,
-                zmean,
-                zmax
+                "[simple] target_land={:.2} solved_eta={:+.0} m | land={:.3}",
+                ov.simple_target_land,
+                (off_m + off_land) as f32,
+                land_frac
             );
             // Guards (non-panicking in release; keep as debug only)
             debug_assert!(world.depth_m.iter().any(|d| *d < 0.0), "no land after solve");
             debug_assert!(world.depth_m.iter().any(|d| *d > 0.0), "no ocean after solve");
             // Apply palette then mark dirty
             apply_simple_palette(ov, world, ctx);
-            ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true; ov.bathy_cache = None;
+            ov.world_dirty = true;
+            ov.color_dirty = true;
+            ov.raster_dirty = true;
+            ov.bathy_cache = None;
             ctx.request_repaint();
             // e) Run to t_end (safe dt) with realtime redraw
             let burst = ov.debug_burst_steps > 0;
@@ -981,6 +1015,18 @@ fn main() {
                                     if ui.button(if ov.drawer_open { "⟨⟩" } else { "☰" }).clicked() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
+                                    ui.separator();
+                                    // Live land fraction (area-weighted)
+                                    let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                    let land_area: f64 = world
+                                        .depth_m
+                                        .iter()
+                                        .zip(world.area_m2.iter())
+                                        .filter(|(&d, _)| d <= 0.0)
+                                        .map(|(_, &a)| a as f64)
+                                        .sum();
+                                    let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                    ui.label(format!("Land: {:.1}%", land_frac * 100.0));
                                 });
                             });
                             // Left drawer under the top bar
@@ -1054,7 +1100,7 @@ fn main() {
                                                     face_geom.push([cx, cy, cz, 0.0]);
                                                     face_geom.push([nx, ny, nz, 0.0]);
                                                 }
-                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, _pad1: 0.0 };
+                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m };
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m);
                                                 pipes.face_cache = Some(FaceCache { f: f_now, face_ids, face_offs, face_geom });
                                                 // Register texture once
@@ -1079,7 +1125,24 @@ fn main() {
                                                         let flx_every = if enable_all { 1 } else { ov.cadence_flx_every.max(1) };
                                                         let sea_every = if enable_all { 1 } else { ov.cadence_sea_every.max(1) };
                                                         let sp = engine::world::StepParams { dt_myr: 1.0, do_flexure: ov.enable_flexure || enable_all, do_isostasy: ov.apply_sea_level || enable_all, do_transforms: ov.show_transforms || enable_all, do_subduction: ov.show_subduction || enable_all, do_continents: ov.continents_apply || enable_all, do_ridge_birth: true, auto_rebaseline_after_continents: ov.auto_rebaseline_l, do_rigid_motion: ov.kin_enable || enable_all, do_orogeny: false, do_accretion: false, do_rifting: false, do_surface: ov.surface_enable && !enable_all, surface_params: engine::surface::SurfaceParams { k_stream: ov.surf_k_stream, m_exp: ov.surf_m_exp, n_exp: ov.surf_n_exp, k_diff: ov.surf_k_diff, k_tr: ov.surf_k_tr, p_exp: ov.surf_p_exp, q_exp: ov.surf_q_exp, rho_sed: ov.surf_rho_sed, min_slope: ov.surf_min_slope, subcycles: ov.surf_subcycles.max(1), couple_flexure: ov.surf_couple_flexure }, advection_every: adv_every, transforms_every: trf_every, subduction_every: sub_every, flexure_every: flx_every, sea_every, do_advection: ov.continents_apply || enable_all, do_sea: ov.apply_sea_level || enable_all };
+                                                        let t0 = world.clock.t_myr;
                                                         let _ = engine::world::step_once(&mut world, &sp);
+                                                        // Per-step land fraction (area-weighted)
+                                                        let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+                                                        let land_area: f64 = world
+                                                            .depth_m
+                                                            .iter()
+                                                            .zip(world.area_m2.iter())
+                                                            .filter(|(&d, _)| d <= 0.0)
+                                                            .map(|(_, &a)| a as f64)
+                                                            .sum();
+                                                        let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
+                                                        println!(
+                                                            "[step/ui] t={:.1}→{:.1} Myr | land={:.1}%",
+                                                            t0,
+                                                            world.clock.t_myr,
+                                                            land_frac * 100.0
+                                                        );
                                                         ov.world_dirty = true;
                                                         if start.elapsed().as_millis() > 10 { break; }
                                                     }
@@ -1094,7 +1157,7 @@ fn main() {
                                                 }
                                                 // Dispatch only when flagged dirty
                                                 if ov.raster_dirty {
-                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, _pad1: 0.0 };
+                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, _pad0: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m };
                                                     rg.write_uniforms(&gpu.queue, &u);
                                                     rg.write_vertex_values(&gpu.queue, &world.depth_m);
                                                     rg.dispatch(&gpu.device, &gpu.queue);
