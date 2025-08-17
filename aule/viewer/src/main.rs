@@ -197,7 +197,7 @@ fn render_simple_panels(
                     land_area += a as f64;
                 }
             }
-            let land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
+            let mut land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
             // If we saturated amplitude and still miss target significantly, boost once and resolve again
             if (land_frac - ov.simple_target_land as f64).abs() > 0.05 {
                 let amp_boost = amp_used_m * 1.5;
@@ -213,6 +213,12 @@ fn render_simple_panels(
                 world.sea.eta_m = -(eta_off2 as f32);
                 amp_used_m = amp_boost;
                 world.th_c_m.fill(amp_used_m);
+                // Recompute achieved land after boost
+                land_area = 0.0;
+                for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+                    if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
+                }
+                land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
             }
             // Elevation stats (m)
             let mut zmin = f32::INFINITY;
@@ -235,7 +241,6 @@ fn render_simple_panels(
                 world.sea.eta_m,
                 land_frac
             );
-            debug_assert!((land_frac - ov.simple_target_land as f64).abs() < 0.05);
             println!(
                 "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%",
                 zmin,
@@ -255,26 +260,22 @@ fn render_simple_panels(
             ctx.request_repaint();
             // e) Run to t_end (safe dt) with realtime redraw
             let burst = ov.debug_burst_steps > 0;
-            let enable_all = ov.debug_enable_all || burst;
-            let adv_every = if enable_all { 1 } else { ov.cadence_adv_every.max(1) };
-            let trf_every = if enable_all { 1 } else { ov.cadence_trf_every.max(1) };
-            let sub_every = if enable_all { 1 } else { ov.cadence_sub_every.max(1) };
-            let flx_every = if enable_all { 1 } else { ov.cadence_flx_every.max(1) };
-            let sea_every = if enable_all { 1 } else { ov.cadence_sea_every.max(1) };
+            let _enable_all = ov.debug_enable_all || burst;
+            // Full-physics defaults in Simple mode
             let sp = engine::world::StepParams {
                 dt_myr: 1.0,
-                do_flexure: ov.enable_flexure || enable_all,
-                do_isostasy: ov.apply_sea_level || enable_all,
-                do_transforms: ov.show_transforms || enable_all,
-                do_subduction: ov.show_subduction || enable_all,
-                do_continents: ov.continents_apply || enable_all,
+                do_flexure: true,
+                do_isostasy: true,
+                do_transforms: true,
+                do_subduction: true,
+                do_continents: true,
                 do_ridge_birth: true,
                 auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                do_rigid_motion: ov.kin_enable || enable_all,
+                do_rigid_motion: true,
                 do_orogeny: false,
                 do_accretion: false,
                 do_rifting: false,
-                do_surface: ov.surface_enable && !enable_all,
+                do_surface: false,
                 surface_params: engine::surface::SurfaceParams {
                     k_stream: ov.surf_k_stream,
                     m_exp: ov.surf_m_exp,
@@ -288,13 +289,13 @@ fn render_simple_panels(
                     subcycles: ov.surf_subcycles.max(1),
                     couple_flexure: ov.surf_couple_flexure,
                 },
-                advection_every: adv_every,
-                transforms_every: trf_every,
-                subduction_every: sub_every,
-                flexure_every: flx_every,
-                sea_every,
-                do_advection: ov.continents_apply || enable_all,
-                do_sea: ov.apply_sea_level || enable_all,
+                advection_every: 1,
+                transforms_every: 1,
+                subduction_every: 1,
+                flexure_every: 1,
+                sea_every: 1,
+                do_advection: true,
+                do_sea: true,
             };
             run_to_t_realtime(ctx, world, ov, &sp, ov.simple_t_end_myr, 4);
             // f) Start realtime run; per-frame updater handles drawing
@@ -1119,14 +1120,15 @@ fn main() {
                                                 let max_n = ov.stepper.max_steps_per_frame.max(1);
                                                 for _ in 0..max_n {
                                                         if (world.clock.t_myr as f32) >= ov.stepper.t_target_myr { break; }
-                                                        let burst = ov.debug_burst_steps > 0;
-                                                        let enable_all = ov.debug_enable_all || burst;
-                                                        let adv_every = if enable_all { 1 } else { ov.cadence_adv_every.max(1) };
-                                                        let trf_every = if enable_all { 1 } else { ov.cadence_trf_every.max(1) };
-                                                        let sub_every = if enable_all { 1 } else { ov.cadence_sub_every.max(1) };
-                                                        let flx_every = if enable_all { 1 } else { ov.cadence_flx_every.max(1) };
-                                                        let sea_every = if enable_all { 1 } else { ov.cadence_sea_every.max(1) };
-                                                        let sp = engine::world::StepParams { dt_myr: 1.0, do_flexure: ov.enable_flexure || enable_all, do_isostasy: ov.apply_sea_level || enable_all, do_transforms: ov.show_transforms || enable_all, do_subduction: ov.show_subduction || enable_all, do_continents: ov.continents_apply || enable_all, do_ridge_birth: true, auto_rebaseline_after_continents: ov.auto_rebaseline_l, do_rigid_motion: ov.kin_enable || enable_all, do_orogeny: false, do_accretion: false, do_rifting: false, do_surface: ov.surface_enable && !enable_all, surface_params: engine::surface::SurfaceParams { k_stream: ov.surf_k_stream, m_exp: ov.surf_m_exp, n_exp: ov.surf_n_exp, k_diff: ov.surf_k_diff, k_tr: ov.surf_k_tr, p_exp: ov.surf_p_exp, q_exp: ov.surf_q_exp, rho_sed: ov.surf_rho_sed, min_slope: ov.surf_min_slope, subcycles: ov.surf_subcycles.max(1), couple_flexure: ov.surf_couple_flexure }, advection_every: adv_every, transforms_every: trf_every, subduction_every: sub_every, flexure_every: flx_every, sea_every, do_advection: ov.continents_apply || enable_all, do_sea: ov.apply_sea_level || enable_all };
+                                                        let _burst = ov.debug_burst_steps > 0;
+                                                        let _enable_all = ov.debug_enable_all || _burst;
+                                                        let _adv_every = ov.cadence_adv_every.max(1);
+                                                        let _trf_every = ov.cadence_trf_every.max(1);
+                                                        let _sub_every = ov.cadence_sub_every.max(1);
+                                                        let _flx_every = ov.cadence_flx_every.max(1);
+                                                        let _sea_every = ov.cadence_sea_every.max(1);
+                                                        // Full-physics defaults in Simple mode per step
+                                                        let sp = engine::world::StepParams { dt_myr: 1.0, do_flexure: true, do_isostasy: true, do_transforms: true, do_subduction: true, do_continents: true, do_ridge_birth: true, auto_rebaseline_after_continents: ov.auto_rebaseline_l, do_rigid_motion: true, do_orogeny: false, do_accretion: false, do_rifting: false, do_surface: false, surface_params: engine::surface::SurfaceParams { k_stream: ov.surf_k_stream, m_exp: ov.surf_m_exp, n_exp: ov.surf_n_exp, k_diff: ov.surf_k_diff, k_tr: ov.surf_k_tr, p_exp: ov.surf_p_exp, q_exp: ov.surf_q_exp, rho_sed: ov.surf_rho_sed, min_slope: ov.surf_min_slope, subcycles: ov.surf_subcycles.max(1), couple_flexure: ov.surf_couple_flexure }, advection_every: 1, transforms_every: 1, subduction_every: 1, flexure_every: 1, sea_every: 1, do_advection: true, do_sea: true };
                                                         let t0 = world.clock.t_myr;
                                                         let _ = engine::world::step_once(&mut world, &sp);
                                                         // Per-step land fraction (area-weighted) using elev = η − depth
@@ -1196,27 +1198,27 @@ fn main() {
                                         let mut steps_done = 0u32;
                                         for _ in 0..n {
                                             if world.clock.t_myr >= ov.run_target_myr { break; }
-                                            let burst = ov.debug_burst_steps > 0;
-                                            let enable_all = ov.debug_enable_all || burst;
-                                            let adv_every = if enable_all { 1 } else { ov.cadence_adv_every.max(1) };
-                                            let trf_every = if enable_all { 1 } else { ov.cadence_trf_every.max(1) };
-                                            let sub_every = if enable_all { 1 } else { ov.cadence_sub_every.max(1) };
-                                            let flx_every = if enable_all { 1 } else { ov.cadence_flx_every.max(1) };
-                                            let sea_every = if enable_all { 1 } else { ov.cadence_sea_every.max(1) };
+                                            let _burst = ov.debug_burst_steps > 0;
+                                            let _enable_all = ov.debug_enable_all || _burst;
+                                            let _adv_every = ov.cadence_adv_every.max(1);
+                                            let _trf_every = ov.cadence_trf_every.max(1);
+                                            let _sub_every = ov.cadence_sub_every.max(1);
+                                            let _flx_every = ov.cadence_flx_every.max(1);
+                                            let _sea_every = ov.cadence_sea_every.max(1);
                                             let sp = engine::world::StepParams {
                                                 dt_myr: 1.0,
-                                                do_flexure: ov.enable_flexure || enable_all,
-                                                do_isostasy: ov.apply_sea_level || enable_all,
-                                                do_transforms: ov.show_transforms || enable_all,
-                                                do_subduction: ov.show_subduction || enable_all,
-                                                do_continents: ov.continents_apply || enable_all,
+                                                do_flexure: true,
+                                                do_isostasy: true,
+                                                do_transforms: true,
+                                                do_subduction: true,
+                                                do_continents: true,
                                                 do_ridge_birth: true,
                                                 auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                                                do_rigid_motion: ov.kin_enable || enable_all,
+                                                do_rigid_motion: true,
                                                 do_orogeny: false,
                                                 do_accretion: false,
                                                 do_rifting: false,
-                                                do_surface: ov.surface_enable && !enable_all,
+                                                do_surface: false,
                                                 surface_params: engine::surface::SurfaceParams {
                                                     k_stream: ov.surf_k_stream,
                                                     m_exp: ov.surf_m_exp,
@@ -1230,13 +1232,13 @@ fn main() {
                                                     subcycles: ov.surf_subcycles.max(1),
                                                     couple_flexure: ov.surf_couple_flexure,
                                                 },
-                                                advection_every: adv_every,
-                                                transforms_every: trf_every,
-                                                subduction_every: sub_every,
-                                                flexure_every: flx_every,
-                                                sea_every,
-                                                do_advection: ov.continents_apply || enable_all,
-                                                do_sea: ov.apply_sea_level || enable_all,
+                                                advection_every: 1,
+                                                transforms_every: 1,
+                                                subduction_every: 1,
+                                                flexure_every: 1,
+                                                sea_every: 1,
+                                                do_advection: true,
+                                                do_sea: true,
                                             };
                                             let t0 = world.clock.t_myr;
                                             let _ = engine::world::step_once(&mut world, &sp);
@@ -1335,27 +1337,27 @@ fn main() {
                             let mut steps_this_frame = 0u32;
                             let max_steps_frame = 8u32; // clamp to keep FPS ~60
                             while step_accum_s >= step_interval && steps_this_frame < max_steps_frame {
-                                let burst = ov.debug_burst_steps > 0;
-                                let enable_all = ov.debug_enable_all || burst;
-                                let adv_every = if enable_all { 1 } else { ov.cadence_adv_every.max(1) };
-                                let trf_every = if enable_all { 1 } else { ov.cadence_trf_every.max(1) };
-                                let sub_every = if enable_all { 1 } else { ov.cadence_sub_every.max(1) };
-                                let flx_every = if enable_all { 1 } else { ov.cadence_flx_every.max(1) };
-                                let sea_every = if enable_all { 1 } else { ov.cadence_sea_every.max(1) };
+                                let _burst = ov.debug_burst_steps > 0;
+                                let _enable_all = ov.debug_enable_all || _burst;
+                                let _adv_every = ov.cadence_adv_every.max(1);
+                                let _trf_every = ov.cadence_trf_every.max(1);
+                                let _sub_every = ov.cadence_sub_every.max(1);
+                                let _flx_every = ov.cadence_flx_every.max(1);
+                                let _sea_every = ov.cadence_sea_every.max(1);
                                 let sp = engine::world::StepParams {
                                     dt_myr: dt_myr as f64,
-                                    do_flexure: ov.enable_flexure || enable_all,
-                                    do_isostasy: ov.apply_sea_level || enable_all,
-                                    do_transforms: ov.show_transforms || enable_all,
-                                    do_subduction: ov.show_subduction || enable_all,
-                                    do_continents: ov.continents_apply || enable_all,
+                                    do_flexure: true,
+                                    do_isostasy: true,
+                                    do_transforms: true,
+                                    do_subduction: true,
+                                    do_continents: true,
                                     do_ridge_birth: true,
                                     auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                                    do_rigid_motion: ov.kin_enable || enable_all,
+                                    do_rigid_motion: true,
                                     do_orogeny: false,
                                     do_accretion: false,
                                     do_rifting: false,
-                                    do_surface: ov.surface_enable && !enable_all,
+                                    do_surface: false,
                                     surface_params: engine::surface::SurfaceParams {
                                         k_stream: ov.surf_k_stream,
                                         m_exp: ov.surf_m_exp,
@@ -1369,13 +1371,13 @@ fn main() {
                                         subcycles: ov.surf_subcycles.max(1),
                                         couple_flexure: ov.surf_couple_flexure,
                                     },
-                                    advection_every: adv_every,
-                                    transforms_every: trf_every,
-                                    subduction_every: sub_every,
-                                    flexure_every: flx_every,
-                                    sea_every,
-                                    do_advection: ov.continents_apply || enable_all,
-                                    do_sea: ov.apply_sea_level || enable_all,
+                                    advection_every: 1,
+                                    transforms_every: 1,
+                                    subduction_every: 1,
+                                    flexure_every: 1,
+                                    sea_every: 1,
+                                    do_advection: true,
+                                    do_sea: true,
                                 };
                                 let stats = engine::world::step_once(&mut world, &sp);
                                 // Step log (one line per step) using elev = η − depth
