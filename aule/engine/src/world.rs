@@ -49,6 +49,8 @@ pub struct World {
     pub epoch_continents: u64,
     /// Last epoch when sea-level was re-baselined (to debounce auto mode).
     pub last_rebaseline_epoch: u64,
+    /// Sea state (offset from geoid). Positive raises sea level (more ocean).
+    pub sea: SeaState,
 }
 
 /// Simple-mode preset parameters for deterministic world generation.
@@ -80,6 +82,13 @@ pub struct SeaLevelRef {
     pub volume_m3: f64,
     /// Ocean area used at reference state (m^2)
     pub ocean_area_m2: f64,
+}
+
+/// Sea state parameters (viewer-controlled for Simple mode)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeaState {
+    /// Sea-level offset η in meters relative to geoid. Positive is deeper water.
+    pub eta_m: f32,
 }
 
 impl World {
@@ -239,6 +248,7 @@ impl World {
             last_surface_stats: None,
             epoch_continents: 0,
             last_rebaseline_epoch: 0,
+            sea: SeaState { eta_m: 0.0 },
         }
     }
 
@@ -341,13 +351,7 @@ impl World {
 
         // 6) Skip subduction/flexure in Simple; keep land fraction stable
 
-        // 7) Final rebaseline to hit target ocean AREA fraction precisely
-        let off_final = crate::sea_level::solve_offset_for_ocean_area_fraction(
-            &self.depth_m,
-            &self.area_m2,
-            target_ocean_frac as f32,
-        );
-        isostasy::apply_sea_level_offset(&mut self.depth_m, off_final);
+        // 7) Final: keep η managed externally (viewer) in Simple mode; do not modify depths here
 
         // Report stats
         let mut dmin = f32::INFINITY;

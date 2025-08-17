@@ -7,7 +7,7 @@ struct Uniforms {
   d_max: f32,
   h_max: f32,
   snowline: f32,
-  _pad1: f32,
+  eta_m: f32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
@@ -140,10 +140,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     w0 = 1.0 - fu2 - fv2; w1 = fv2; w2 = fu2;
   }
 
-  let val = w0 * VERT_VALUE[id0] + w1 * VERT_VALUE[id1] + w2 * VERT_VALUE[id2];
-  let c = palette_color(val);
+  let depth = w0 * VERT_VALUE[id0] + w1 * VERT_VALUE[id1] + w2 * VERT_VALUE[id2];
+  let elev = U.eta_m - depth;
+  let c = palette_color(elev);
   textureStore(OUT_TEX, vec2<i32>(i32(gid.x), i32(gid.y)), c);
 }
+
 
 
 
