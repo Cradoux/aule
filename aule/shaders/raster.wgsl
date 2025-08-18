@@ -20,6 +20,8 @@ struct Uniforms {
 @group(0) @binding(5) var<storage, read> FACE_GEOM: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> VERT_VALUE: array<f32>;
 @group(0) @binding(7) var OUT_TEX: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(8) var<storage, read> FACE_TRI_OFFS: array<u32>;
+@group(0) @binding(9) var<storage, read> FACE_TRI_IDX: array<u32>;
 
 fn dot3(a: vec3<f32>, b: vec3<f32>) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z; }
 fn cross3(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return vec3<f32>(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
@@ -65,9 +67,11 @@ fn barycentric_in_face(p: vec3<f32>, A: vec3<f32>, B: vec3<f32>, C: vec3<f32>) -
   let v = (d11 * d20 - d01 * d21) / denom;
   let w = (d00 * d21 - d01 * d20) / denom;
   let u = 1.0 - v - w;
-  let uu = max(u, 0.0);
-  let vv = max(v, 0.0);
-  let ww = max(w, 0.0);
+  // Seam rollover epsilon clamp then renormalize
+  let eps = 1e-5;
+  let uu = max(u, -eps);
+  let vv = max(v, -eps);
+  let ww = max(w, -eps);
   let s = max(uu + vv + ww, 1e-9);
   return vec3<f32>(uu/s, vv/s, ww/s);
 }
@@ -90,37 +94,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let F = U.F;
   var u = clamp(bc.y * f32(F), 0.0, f32(F));
   var v = clamp(bc.z * f32(F), 0.0, f32(F));
-  var i = u32(floor(u));
-  var j = u32(floor(v));
-  if (i + j > F) {
-    let excess = i + j - F;
-    if (j >= excess) { j -= excess; } else { i -= excess - j; j = 0u; }
+  var iu = u32(floor(u));
+  var iv = u32(floor(v));
+  if (iu + iv > F - 1u) {
+    let fu = u - f32(iu);
+    let fv = v - f32(iv);
+    if (fu > fv) {
+      iu = (F - 1u) - iv;
+    } else {
+      iv = (F - 1u) - iu;
+    }
+    u = f32(iu) + fu;
+    v = f32(iv) + fv;
   }
-  var fu = clamp(u - f32(i), 1e-4, 1.0 - 1e-4);
-  var fv = clamp(v - f32(j), 1e-4, 1.0 - 1e-4);
-
-  let base = FACE_OFFSETS[f] + row_base(i, F) + j;
-  var id0: u32;
-  var id1: u32;
-  var id2: u32;
+  let fu = clamp(u - f32(iu), 1e-4, 1.0 - 1e-4);
+  let fv = clamp(v - f32(iv), 1e-4, 1.0 - 1e-4);
+  let upper = (fu + fv) > (1.0 - 1e-6);
+  let tri_base = FACE_TRI_OFFS[f];
+  let tri_idx = tri_base + (iv * F + iu) * 2u + select(0u, 1u, upper);
+  let id0 = FACE_TRI_IDX[tri_idx * 3u + 0u];
+  let id1 = FACE_TRI_IDX[tri_idx * 3u + 1u];
+  let id2 = FACE_TRI_IDX[tri_idx * 3u + 2u];
   var w0: f32;
   var w1: f32;
   var w2: f32;
-  if (fu + fv <= 1.0) {
-    let base_i1 = FACE_OFFSETS[f] + row_base(i+1u, F);
-    id0 = FACE_VERT_IDS[ base ];
-    id1 = FACE_VERT_IDS[ base_i1 + j ];
-    id2 = FACE_VERT_IDS[ base + 1u ];
-    w0 = 1.0 - fu - fv; w1 = fu; w2 = fv;
-  } else {
-    let base_i1 = FACE_OFFSETS[f] + row_base(i+1u, F);
-    id0 = FACE_VERT_IDS[ base_i1 + j ];
-    id1 = FACE_VERT_IDS[ base_i1 + (j + 1u) ];
-    id2 = FACE_VERT_IDS[ base + 1u ];
-    let fu2 = 1.0 - fu; let fv2 = 1.0 - fv;
-    w0 = 1.0 - fu2 - fv2; w1 = fv2; w2 = fu2;
-  }
-
+  if (upper) { w0 = fu; w1 = fv; w2 = 1.0 - fu - fv; } else { w0 = 1.0 - fu - fv; w1 = fu; w2 = fv; }
   let depth = w0 * VERT_VALUE[id0] + w1 * VERT_VALUE[id1] + w2 * VERT_VALUE[id2];
   let elev = U.eta_m - depth;
   var c = palette_color_from_lut(elev);

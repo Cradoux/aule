@@ -22,6 +22,8 @@ pub struct RasterGpu {
     pub face_offsets: wgpu::Buffer,
     pub face_geom: wgpu::Buffer,
     pub vertex_values: wgpu::Buffer,
+    pub face_tri_offsets: wgpu::Buffer,
+    pub face_tri_indices: wgpu::Buffer,
     pub lut_tex: wgpu::Texture,
     pub lut_view: wgpu::TextureView,
     pub lut_sampler: wgpu::Sampler,
@@ -120,6 +122,26 @@ impl RasterGpu {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -210,6 +232,8 @@ impl RasterGpu {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&out_view),
                 },
+                wgpu::BindGroupEntry { binding: 8, resource: empty.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: empty.as_entire_binding() },
             ],
         });
 
@@ -231,6 +255,18 @@ impl RasterGpu {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let empty5 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("empty5"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let empty6 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("empty6"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline,
             bind_group_layout,
@@ -239,6 +275,8 @@ impl RasterGpu {
             face_offsets: empty2,
             face_geom: empty3,
             vertex_values: empty4,
+            face_tri_offsets: empty5,
+            face_tri_indices: empty6,
             lut_tex,
             lut_view,
             lut_sampler,
@@ -341,6 +379,57 @@ impl RasterGpu {
         });
         queue.write_buffer(&self.vertex_values, 0, &vals_bytes);
         self.face_count = face_offsets.len();
+
+        // Build per-face triangle indices and offsets (lower then upper)
+        let f = u.f as u32;
+        let faces_n = 20u32;
+        let mut tri_offs: Vec<u32> = Vec::with_capacity(faces_n as usize);
+        let mut tris: Vec<u32> = Vec::new();
+        // helper to get global vertex id for (face,i,j)
+        let row_base = |ii: u32| -> u32 { ii * (f + 1) - (ii * (ii - 1)) / 2 };
+        for face in 0..faces_n {
+            let f_off = face_offsets[face as usize];
+            tri_offs.push((tris.len() as u32) / 3);
+            if f > 0 {
+                for iv in 0..f {
+                    let max_u = f - 1 - iv;
+                    for iu in 0..=max_u {
+                        // lower triangle (iu,iv) → (iu+1,iv) → (iu,iv+1)
+                        let id_ij = face_vert_ids[(f_off + row_base(iu) + iv) as usize];
+                        let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
+                        let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
+                        tris.push(id_ij);
+                        tris.push(id_i1j);
+                        tris.push(id_ij1);
+                        // upper triangle (iu+1,iv) → (iu+1,iv+1) → (iu,iv+1)
+                        let id_i1j1 = face_vert_ids[(f_off + row_base(iu + 1) + (iv + 1)) as usize];
+                        tris.push(id_i1j);
+                        tris.push(id_i1j1);
+                        tris.push(id_ij1);
+                    }
+                }
+            }
+        }
+        // Upload tri buffers
+        let mut tri_offs_bytes: Vec<u8> = Vec::with_capacity(tri_offs.len() * 4);
+        for v in &tri_offs { tri_offs_bytes.extend_from_slice(&v.to_le_bytes()); }
+        self.face_tri_offsets = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster face_tri_offsets"),
+            size: tri_offs_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&self.face_tri_offsets, 0, &tri_offs_bytes);
+        let mut tri_idx_bytes: Vec<u8> = Vec::with_capacity(tris.len() * 4);
+        for v in &tris { tri_idx_bytes.extend_from_slice(&v.to_le_bytes()); }
+        self.face_tri_indices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster face_tri_indices"),
+            size: tri_idx_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&self.face_tri_indices, 0, &tri_idx_bytes);
+
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster bg updated"),
             layout: &self.bind_group_layout,
@@ -362,6 +451,8 @@ impl RasterGpu {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&self.out_view),
                 },
+                wgpu::BindGroupEntry { binding: 8, resource: self.face_tri_offsets.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.face_tri_indices.as_entire_binding() },
             ],
         });
         let _ = queue; // not used after init here
