@@ -92,18 +92,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let C = FACE_GEOM[4u*f + 2u].xyz;
   let bc = barycentric_in_face(p, A, B, C);
   let F = U.F;
-  var u = clamp(bc.y * f32(F), 0.0, f32(F));
-  var v = clamp(bc.z * f32(F), 0.0, f32(F));
+  // Map to grid indices: i ~ a*F, j ~ b*F (grid uses i toward corner A, j toward B)
+  var u = clamp(bc.x * f32(F), 0.0, f32(F));
+  var v = clamp(bc.y * f32(F), 0.0, f32(F));
   var iu = u32(floor(u));
   var iv = u32(floor(v));
   if (iu + iv > F - 1u) {
     let fu = u - f32(iu);
     let fv = v - f32(iv);
-    if (fu > fv) {
-      iu = (F - 1u) - iv;
-    } else {
-      iv = (F - 1u) - iu;
-    }
+    // Reflect across the diagonal of the big face triangle
+    let s = iu + iv - (F - 1u);
+    if (fu > fv) { iu -= s; } else { iv -= s; }
     u = f32(iu) + fu;
     v = f32(iv) + fv;
   }
