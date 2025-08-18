@@ -386,27 +386,31 @@ impl RasterGpu {
         let mut tri_offs: Vec<u32> = Vec::with_capacity(faces_n as usize);
         let mut tris: Vec<u32> = Vec::new();
         // helper to get global vertex id for (face,i,j)
-        let row_base = |ii: u32| -> u32 { ii * (f + 1) - (ii * (ii - 1)) / 2 };
+        let row_base = |ii: u32| -> u32 {
+            if ii == 0 { 0 } else { ii * (f + 1) - (ii * (ii - 1)) / 2 }
+        };
         for face in 0..faces_n {
             let f_off = face_offsets[face as usize];
+            // each face reserves F*F*2 triangles
             tri_offs.push((tris.len() as u32) / 3);
-            if f > 0 {
-                for iv in 0..f {
-                    let max_u = f - 1 - iv;
-                    for iu in 0..=max_u {
-                        // lower triangle (iu,iv) → (iu+1,iv) → (iu,iv+1)
+            for iv in 0..f {
+                for iu in 0..f {
+                    let inside = iu + iv <= f - 1;
+                    let lower = if inside {
                         let id_ij = face_vert_ids[(f_off + row_base(iu) + iv) as usize];
                         let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
                         let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
-                        tris.push(id_ij);
-                        tris.push(id_i1j);
-                        tris.push(id_ij1);
-                        // upper triangle (iu+1,iv) → (iu+1,iv+1) → (iu,iv+1)
+                        [id_ij, id_i1j, id_ij1]
+                    } else { [0u32, 0u32, 0u32] };
+                    tris.extend_from_slice(&lower);
+                    let upper_exists = iu + iv <= f - 2;
+                    let upper_tri = if upper_exists {
+                        let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
                         let id_i1j1 = face_vert_ids[(f_off + row_base(iu + 1) + (iv + 1)) as usize];
-                        tris.push(id_i1j);
-                        tris.push(id_i1j1);
-                        tris.push(id_ij1);
-                    }
+                        let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
+                        [id_i1j, id_i1j1, id_ij1]
+                    } else { lower };
+                    tris.extend_from_slice(&upper_tri);
                 }
             }
         }
