@@ -135,6 +135,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bw = min(min(w0, w1), w2);
     if (bw < wire_w) { c = mix(c, vec4<f32>(0.0, 0.0, 0.0, 1.0), 0.6); }
   }
+  // Face tint
+  if ((U.debug_flags & 2u) != 0u) {
+    let t = fract(sin(f32(f)*12.9898)*43758.5453);
+    c.rgb = mix(c.rgb, vec3<f32>(t, 1.0 - t, 0.5*t), 0.15);
+  }
+  // Grid overlay every 8 cells
+  if ((U.debug_flags & 4u) != 0u) {
+    let mod8u = (iu & 7u) == 0u;
+    let mod8v = (iv & 7u) == 0u;
+    if (mod8u || mod8v) { c = mix(c, vec4<f32>(1.0,1.0,1.0,1.0), 0.35); }
+  }
+  // Tri parity
+  if ((U.debug_flags & 8u) != 0u) {
+    if (upper) { c.rgb = mix(c.rgb, vec3<f32>(1.0,0.0,0.0), 0.15); } else { c.rgb = mix(c.rgb, vec3<f32>(0.0,1.0,0.0), 0.15); }
+  }
   textureStore(OUT_TEX, vec2<i32>(i32(gid.x), i32(gid.y)), c);
 }
 

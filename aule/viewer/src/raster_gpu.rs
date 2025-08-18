@@ -381,7 +381,7 @@ impl RasterGpu {
         self.face_count = face_offsets.len();
 
         // Build per-face triangle indices and offsets (lower then upper)
-        let f = u.f as u32;
+        let f = u.f;
         let faces_n = 20u32;
         let mut tri_offs: Vec<u32> = Vec::with_capacity(faces_n as usize);
         let mut tris: Vec<u32> = Vec::new();
@@ -504,11 +504,10 @@ impl RasterGpu {
             let col = crate::overlay::land_color32(elev, ov.hypso_h_max.max(1.0), ov.hypso_snowline);
             px.push(col.r()); px.push(col.g()); px.push(col.b()); px.push(255);
         }
-        let layout = wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(std::num::NonZeroU32::new(512 * 4).unwrap().into()),
-            rows_per_image: Some(std::num::NonZeroU32::new(1).unwrap().into()),
-        };
+        // NonZeroU32::new returns Some for non-zero; since our inputs are compile-time non-zero, bypass fallbacks
+        let bpr = std::num::NonZeroU32::new(512 * 4).map(|nz| nz.into()).unwrap_or(512 * 4);
+        let rpi = std::num::NonZeroU32::new(1).map(|nz| nz.into()).unwrap_or(1);
+        let layout = wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(rpi) };
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.lut_tex,

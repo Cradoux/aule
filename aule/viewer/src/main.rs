@@ -333,6 +333,13 @@ fn render_simple_panels(
             ov.simple_palette = 1;
             changed = true;
         }
+        ui.separator();
+        ui.label("GPU raster debug:");
+        changed |= ui.checkbox(&mut ov.gpu_dbg_wire, "Wireframe").changed();
+        changed |= ui.checkbox(&mut ov.gpu_dbg_face_tint, "Face tint").changed();
+        changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
+        changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
+        if changed { ov.raster_dirty = true; }
         if changed {
             apply_simple_palette(ov, world, ctx);
         }
@@ -1103,7 +1110,11 @@ fn main() {
                                                     face_geom.push([cx, cy, cz, 0.0]);
                                                     face_geom.push([nx, ny, nz, 0.0]);
                                                 }
-                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
+                                                let dbg = (if ov.gpu_dbg_wire { 1u32 } else { 0 })
+                                                    | (if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 })
+                                                    | (if ov.gpu_dbg_grid { 1u32<<2 } else { 0 })
+                                                    | (if ov.gpu_dbg_tri_parity { 1u32<<3 } else { 0 });
+                                                let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 pipes.face_cache = Some(FaceCache { f: f_now, face_ids, face_offs, face_geom });
@@ -1159,7 +1170,11 @@ fn main() {
                                                 }
                                                 // Dispatch only when flagged dirty
                                                 if ov.raster_dirty {
-                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: 0, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
+                                                    let dbg = (if ov.gpu_dbg_wire { 1u32 } else { 0 })
+                                                        | (if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 })
+                                                        | (if ov.gpu_dbg_grid { 1u32<<2 } else { 0 })
+                                                        | (if ov.gpu_dbg_tri_parity { 1u32<<3 } else { 0 });
+                                                    let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                     rg.write_uniforms(&gpu.queue, &u);
                                                     rg.write_vertex_values(&gpu.queue, &world.depth_m);
                                                     rg.write_lut_from_overlay(&gpu.queue, &ov);

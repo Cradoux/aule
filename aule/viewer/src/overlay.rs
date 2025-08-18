@@ -234,6 +234,12 @@ pub struct OverlayState {
     pub raster_min_interval_ms: u64,
     pub high_quality_when_paused: bool,
 
+    // GPU Raster debug toggles
+    pub gpu_dbg_wire: bool,
+    pub gpu_dbg_face_tint: bool,
+    pub gpu_dbg_grid: bool,
+    pub gpu_dbg_tri_parity: bool,
+
     // Advanced panels expanded states (T-505)
     pub adv_open_kinematics: bool,
     pub adv_open_flexure: bool,
@@ -446,6 +452,11 @@ impl Default for OverlayState {
             last_raster_at: Instant::now(),
             raster_min_interval_ms: 200,
             high_quality_when_paused: true,
+
+            gpu_dbg_wire: false,
+            gpu_dbg_face_tint: false,
+            gpu_dbg_grid: false,
+            gpu_dbg_tri_parity: false,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,
