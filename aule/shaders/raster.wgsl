@@ -109,9 +109,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let fu = clamp(u - f32(iu), 1e-4, 1.0 - 1e-4);
   let fv = clamp(v - f32(iv), 1e-4, 1.0 - 1e-4);
+  // Determine if pixel falls in upper tri: fu+fv>1-eps
   let upper = (fu + fv) > (1.0 - 1e-6);
-  let tri_base = FACE_TRI_OFFS[f];
-  let tri_idx = tri_base + (iv * F + iu) * 2u + select(0u, 1u, upper);
+  // Triangular-row indexing: row length in tris L(v)=2*(F-1 - v)+1; base R(v)=sum_{y<v} L(y)
+  var row_base_tris: u32 = 0u;
+  if (iv > 0u) {
+    let a = (F - 1u);
+    let b = iv;
+    // Sum_{y=0}^{b-1} (2*(F-1 - y)+1) = b*(2*a+1) - b*(b-1)
+    row_base_tris = b * (2u * a + 1u) - b * (b - 1u);
+  }
+  let tri_idx = FACE_TRI_OFFS[f] + row_base_tris + 2u * iu + select(0u, 1u, upper);
   let id0 = FACE_TRI_IDX[tri_idx * 3u + 0u];
   let id1 = FACE_TRI_IDX[tri_idx * 3u + 1u];
   let id2 = FACE_TRI_IDX[tri_idx * 3u + 2u];
@@ -122,13 +130,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let depth = w0 * VERT_VALUE[id0] + w1 * VERT_VALUE[id1] + w2 * VERT_VALUE[id2];
   let elev = U.eta_m - depth;
   var c = palette_color_from_lut(elev);
-  // Debug wireframe: thin line where any bary < eps
+  // Debug wireframe: thin line where any bary weight near edge
   if ((U.debug_flags & 1u) != 0u) {
-    let wire_w = 0.002;
+    let wire_w = 0.02;
     let bw = min(min(w0, w1), w2);
-    if (bw < wire_w) {
-      c = mix(c, vec4<f32>(0.0, 0.0, 0.0, 1.0), 0.6);
-    }
+    if (bw < wire_w) { c = mix(c, vec4<f32>(0.0, 0.0, 0.0, 1.0), 0.6); }
   }
   textureStore(OUT_TEX, vec2<i32>(i32(gid.x), i32(gid.y)), c);
 }

@@ -391,26 +391,25 @@ impl RasterGpu {
         };
         for face in 0..faces_n {
             let f_off = face_offsets[face as usize];
-            // each face reserves F*F*2 triangles
+            // triangular row linearization: rows iv = 0..F-1, iu = 0..(F-1-iv)
             tri_offs.push((tris.len() as u32) / 3);
             for iv in 0..f {
-                for iu in 0..f {
-                    let inside = iu + iv <= f - 1;
-                    let lower = if inside {
-                        let id_ij = face_vert_ids[(f_off + row_base(iu) + iv) as usize];
-                        let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
-                        let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
-                        [id_ij, id_i1j, id_ij1]
-                    } else { [0u32, 0u32, 0u32] };
-                    tris.extend_from_slice(&lower);
-                    let upper_exists = iu + iv <= f - 2;
-                    let upper_tri = if upper_exists {
-                        let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
+                let max_u = f - 1 - iv;
+                for iu in 0..=max_u {
+                    // lower triangle (iu,iv) → (iu+1,iv) → (iu,iv+1)
+                    let id_ij = face_vert_ids[(f_off + row_base(iu) + iv) as usize];
+                    let id_i1j = face_vert_ids[(f_off + row_base(iu + 1) + iv) as usize];
+                    let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
+                    tris.push(id_ij);
+                    tris.push(id_i1j);
+                    tris.push(id_ij1);
+                    // upper triangle exists when iu < max_u
+                    if iu < max_u {
                         let id_i1j1 = face_vert_ids[(f_off + row_base(iu + 1) + (iv + 1)) as usize];
-                        let id_ij1 = face_vert_ids[(f_off + row_base(iu) + (iv + 1)) as usize];
-                        [id_i1j, id_i1j1, id_ij1]
-                    } else { lower };
-                    tris.extend_from_slice(&upper_tri);
+                        tris.push(id_i1j);
+                        tris.push(id_i1j1);
+                        tris.push(id_ij1);
+                    }
                 }
             }
         }
