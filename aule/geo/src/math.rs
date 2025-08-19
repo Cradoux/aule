@@ -92,9 +92,9 @@ pub fn pick_face(p: Vec3, faces: &[FaceGeom]) -> FaceId {
     let mut best_d = f32::NEG_INFINITY;
     for (i, f) in faces.iter().enumerate() {
         let d = f.n.dot(p);
-        if d > best_d || ((d - best_d).abs() < f32::EPSILON && u32::try_from(i).unwrap_or(0) < best_i) {
+        if d > best_d || (d == best_d && (i as u32) < best_i) {
             best_d = d;
-            best_i = u32::try_from(i).unwrap_or(0);
+            best_i = i as u32;
         }
     }
     best_i
