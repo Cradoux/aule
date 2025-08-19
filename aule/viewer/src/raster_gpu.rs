@@ -24,6 +24,9 @@ pub struct RasterGpu {
     pub vertex_values: wgpu::Buffer,
     pub face_tri_offsets: wgpu::Buffer,
     pub face_tri_indices: wgpu::Buffer,
+    pub face_edge_info: wgpu::Buffer,
+    pub debug_face_tri: wgpu::Buffer,
+    pub cpu_face_pick: wgpu::Buffer,
     pub lut_tex: wgpu::Texture,
     pub lut_view: wgpu::TextureView,
     pub lut_sampler: wgpu::Sampler,
@@ -122,8 +125,9 @@ impl RasterGpu {
                     },
                     count: None,
                 },
+                // Drop bindings 8,9 to stay under storage buffer limits
                 wgpu::BindGroupLayoutEntry {
-                    binding: 8,
+                    binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -133,7 +137,17 @@ impl RasterGpu {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 9,
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -224,16 +238,24 @@ impl RasterGpu {
                 wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: empty.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&lut_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&lut_sampler),
+                },
                 wgpu::BindGroupEntry { binding: 5, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&out_view),
                 },
-                wgpu::BindGroupEntry { binding: 8, resource: empty.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: empty.as_entire_binding() },
+                // bindings 8 and 9 unused in the layout; use placeholders here
+                wgpu::BindGroupEntry { binding: 10, resource: empty.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: empty.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: empty.as_entire_binding() },
             ],
         });
 
@@ -277,6 +299,26 @@ impl RasterGpu {
             vertex_values: empty4,
             face_tri_offsets: empty5,
             face_tri_indices: empty6,
+            face_edge_info: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("empty7"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            debug_face_tri: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("empty8"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            cpu_face_pick: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("empty9"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             lut_tex,
             lut_view,
             lut_sampler,
@@ -318,6 +360,7 @@ impl RasterGpu {
         face_offsets: Vec<u32>,
         face_geom: &[[f32; 4]],
         vertex_values: &[f32],
+        face_edge_info: &[u32],
     ) {
         // Recreate buffers and upload via write_buffer (no extra deps)
         let u_bytes = Self::pack_uniforms(u);
@@ -387,7 +430,11 @@ impl RasterGpu {
         let mut tris: Vec<u32> = Vec::new();
         // helper to get global vertex id for (face,i,j)
         let row_base = |ii: u32| -> u32 {
-            if ii == 0 { 0 } else { ii * (f + 1) - (ii * (ii - 1)) / 2 }
+            if ii == 0 {
+                0
+            } else {
+                ii * (f + 1) - (ii * (ii - 1)) / 2
+            }
         };
         for face in 0..faces_n {
             let f_off = face_offsets[face as usize];
@@ -415,23 +462,54 @@ impl RasterGpu {
         }
         // Upload tri buffers
         let mut tri_offs_bytes: Vec<u8> = Vec::with_capacity(tri_offs.len() * 4);
-        for v in &tri_offs { tri_offs_bytes.extend_from_slice(&v.to_le_bytes()); }
+        for v in &tri_offs {
+            tri_offs_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        // Keep buffers allocated but unused to maintain struct fields
         self.face_tri_offsets = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("raster face_tri_offsets"),
-            size: tri_offs_bytes.len() as u64,
+            label: Some("raster face_tri_offsets (unused)"),
+            size: 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&self.face_tri_offsets, 0, &tri_offs_bytes);
-        let mut tri_idx_bytes: Vec<u8> = Vec::with_capacity(tris.len() * 4);
-        for v in &tris { tri_idx_bytes.extend_from_slice(&v.to_le_bytes()); }
         self.face_tri_indices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("raster face_tri_indices"),
-            size: tri_idx_bytes.len() as u64,
+            label: Some("raster face_tri_indices (unused)"),
+            size: 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&self.face_tri_indices, 0, &tri_idx_bytes);
+
+        // Upload neighbor edge info (20 faces x 3 edges x 3 u32)
+        let mut e_bytes: Vec<u8> = Vec::with_capacity(face_edge_info.len() * 4);
+        for v in face_edge_info {
+            e_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        self.face_edge_info = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster face_edge_info"),
+            size: e_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&self.face_edge_info, 0, &e_bytes);
+
+        // Allocate debug face/tri buffer: 2 u32 per pixel
+        let dbg_len = (self.width as usize) * (self.height as usize) * 2 * 4;
+        self.debug_face_tri = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster debug_face_tri"),
+            size: dbg_len as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Allocate cpu_face_pick buffer: 1 u32 per pixel
+        let cpu_len = (self.width as usize) * (self.height as usize) * 4;
+        self.cpu_face_pick = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster cpu_face_pick"),
+            size: cpu_len as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster bg updated"),
@@ -446,16 +524,37 @@ impl RasterGpu {
                     binding: 2,
                     resource: self.face_offsets.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.lut_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.lut_sampler),
+                },
                 wgpu::BindGroupEntry { binding: 5, resource: self.face_geom.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: self.vertex_values.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.vertex_values.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&self.out_view),
                 },
-                wgpu::BindGroupEntry { binding: 8, resource: self.face_tri_offsets.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: self.face_tri_indices.as_entire_binding() },
+                // bindings 8,9 unused
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: self.face_edge_info.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.debug_face_tri.as_entire_binding(),
+                },
+                // binding 12 only when using CPU face pick; otherwise bind a small dummy to keep layout consistent
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.cpu_face_pick.as_entire_binding(),
+                },
             ],
         });
         let _ = queue; // not used after init here
@@ -497,17 +596,28 @@ impl RasterGpu {
         for i in 0..256 {
             let depth = (i as f32) / 255.0 * ov.hypso_d_max.max(1.0);
             let col = crate::overlay::ocean_color32(depth, ov.hypso_d_max.max(1.0));
-            px.push(col.r()); px.push(col.g()); px.push(col.b()); px.push(255);
+            px.push(col.r());
+            px.push(col.g());
+            px.push(col.b());
+            px.push(255);
         }
         for i in 0..256 {
             let elev = (i as f32) / 255.0 * ov.hypso_h_max.max(1.0);
-            let col = crate::overlay::land_color32(elev, ov.hypso_h_max.max(1.0), ov.hypso_snowline);
-            px.push(col.r()); px.push(col.g()); px.push(col.b()); px.push(255);
+            let col =
+                crate::overlay::land_color32(elev, ov.hypso_h_max.max(1.0), ov.hypso_snowline);
+            px.push(col.r());
+            px.push(col.g());
+            px.push(col.b());
+            px.push(255);
         }
         // NonZeroU32::new returns Some for non-zero; since our inputs are compile-time non-zero, bypass fallbacks
         let bpr = std::num::NonZeroU32::new(512 * 4).map(|nz| nz.into()).unwrap_or(512 * 4);
         let rpi = std::num::NonZeroU32::new(1).map(|nz| nz.into()).unwrap_or(1);
-        let layout = wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(rpi) };
+        let layout = wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(bpr),
+            rows_per_image: Some(rpi),
+        };
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.lut_tex,
@@ -519,5 +629,59 @@ impl RasterGpu {
             layout,
             wgpu::Extent3d { width: 512, height: 1, depth_or_array_layers: 1 },
         );
+    }
+
+    pub fn write_cpu_face_pick(&self, queue: &wgpu::Queue, data: &[u32]) {
+        let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 4);
+        for v in data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        queue.write_buffer(&self.cpu_face_pick, 0, &bytes);
+    }
+
+    /// Read back the debug face/tri buffer written by the compute shader when debug bit 6 is set.
+    /// Returns a Vec<u32> with length width*height*2 containing [face, tri] per pixel in row-major order.
+    pub fn read_debug_face_tri(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<Vec<u32>> {
+        let bytes_len = (self.width as usize) * (self.height as usize) * 2 * 4;
+        if bytes_len == 0 {
+            return None;
+        }
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster debug readback"),
+            size: bytes_len as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("copy debug buffer"),
+        });
+        enc.copy_buffer_to_buffer(&self.debug_face_tri, 0, &staging, 0, bytes_len as u64);
+        queue.submit(std::iter::once(enc.finish()));
+
+        // Map and wait
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r.is_ok());
+        });
+        device.poll(wgpu::Maintain::Wait);
+        if receiver.recv().ok() != Some(true) {
+            return None;
+        }
+        let data = slice.get_mapped_range();
+        let mut out: Vec<u32> = vec![0; bytes_len / 4];
+        // Copy bytes into u32 vec (little endian)
+        let mut i = 0usize;
+        for chunk in data.chunks_exact(4) {
+            out[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            i += 1;
+        }
+        drop(data);
+        staging.unmap();
+        Some(out)
     }
 }

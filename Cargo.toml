@@ -4,6 +4,7 @@ members = [
     "aule/viewer",
     "aule/export",
     "aule/python",
+    "aule/geo",
 ]
 resolver = "2"
 

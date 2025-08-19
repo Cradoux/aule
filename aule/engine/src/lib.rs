@@ -29,6 +29,8 @@ pub mod geo;
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
+/// CPU face/tri picker using shared `aule-geo`.
+pub mod face_pick;
 /// Hypsometry helpers.
 pub mod hypsometry;
 /// Global sea-level (isostasy MVP) utilities.

@@ -14,6 +14,7 @@ smallvec = "1.13"
 wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 rand.workspace = true
+aule-geo = { path = "../geo" }
 
 [dev-dependencies]
 pollster.workspace = true

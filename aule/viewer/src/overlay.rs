@@ -239,6 +239,13 @@ pub struct OverlayState {
     pub gpu_dbg_face_tint: bool,
     pub gpu_dbg_grid: bool,
     pub gpu_dbg_tri_parity: bool,
+    pub gpu_dbg_tri_index: bool,
+
+    // Parity heat overlay (CPU vs GPU)
+    pub show_parity_heat: bool,
+    pub parity_points: Option<Vec<[u32; 2]>>, // pixel coords in raster space
+    pub export_parity_csv_requested: bool,
+    pub force_cpu_face_pick: bool,
 
     // Advanced panels expanded states (T-505)
     pub adv_open_kinematics: bool,
@@ -457,6 +464,12 @@ impl Default for OverlayState {
             gpu_dbg_face_tint: false,
             gpu_dbg_grid: false,
             gpu_dbg_tri_parity: false,
+            gpu_dbg_tri_index: false,
+
+            show_parity_heat: false,
+            parity_points: None,
+            export_parity_csv_requested: false,
+            force_cpu_face_pick: false,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,
@@ -1171,7 +1184,7 @@ impl OverlayState {
         self.bathy_cache.as_deref().unwrap_or_default()
     }
 
-    fn mesh_add_dot(mesh: &mut Mesh, p: Pos2, r: f32, color: Color32) {
+    pub fn mesh_add_dot(mesh: &mut Mesh, p: Pos2, r: f32, color: Color32) {
         let base = mesh.vertices.len() as u32;
         let v0 = Vertex { pos: [p.x - r, p.y - r].into(), uv: WHITE_UV, color };
         let v1 = Vertex { pos: [p.x + r, p.y - r].into(), uv: WHITE_UV, color };

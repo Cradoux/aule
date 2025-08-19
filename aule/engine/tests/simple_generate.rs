@@ -30,4 +30,3 @@ fn simple_generate_variance_and_determinism() {
         assert!((w.depth_m[i] - w2.depth_m[i]).abs() < 1e-6);
     }
 }
-
