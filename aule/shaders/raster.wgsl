@@ -27,7 +27,11 @@ struct Uniforms {
 @group(0) @binding(11) var<storage, read_write> DEBUG_FACE_TRI: array<u32>;
 // binding(12): optional CPU-provided per-pixel face pick (row-major), enabled by debug bit 7
 @group(0) @binding(12) var<storage, read> CPU_FACE: array<u32>;
+// binding(13): per-pixel raw (alpha,beta) written under debug bit 11
+@group(0) @binding(13) var<storage, read_write> RAW_AB: array<vec2<f32>>;
 
+const EPS_ROLLOVER: f32 = 1e-6;
+const EPS_UPPER: f32 = 1e-6;
 fn dot3(a: vec3<f32>, b: vec3<f32>) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z; }
 fn cross3(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return vec3<f32>(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
 fn norm3(a: vec3<f32>) -> vec3<f32> { let l = max(length(a), 1e-9); return a / l; }
@@ -56,7 +60,7 @@ fn face_pick(p: vec3<f32>) -> u32 {
   for (var f: u32 = 0u; f < 20u; f = f + 1u) {
     let n = FACE_GEOM[4u*f + 3u].xyz;
     let d = dot3(n, p);
-    if (d > best_d) { best_d = d; best_f = f; }
+    if (d > best_d || (d == best_d && f < best_f)) { best_d = d; best_f = f; }
   }
   return best_f;
 }
@@ -96,13 +100,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lin = gid.y * U.width + gid.x;
     f = CPU_FACE[lin];
   }
+  // If debug bit 10 set: override picked face with CPU-provided face, then recompute barycentrics
+  if ((U.debug_flags & (1u<<10)) != 0u) {
+    let lin = gid.y * U.width + gid.x;
+    let f_cpu = CPU_FACE[lin];
+    f = f_cpu;
+  }
   // One-step neighbor rollover if outside
   var A = FACE_GEOM[4u*f + 0u].xyz;
   var B = FACE_GEOM[4u*f + 1u].xyz;
   var C = FACE_GEOM[4u*f + 2u].xyz;
   // Raw barycentrics for rollover decision
   var bc = barycentric_in_face_raw(p, A, B, C);
-  let eps_roll = 1e-5;
+  let eps_roll = EPS_ROLLOVER;
   // One-hop neighbor rollover per spec
   for (var s: u32 = 0u; s < 1u; s = s + 1u) {
     if (bc.x >= -eps_roll && bc.y >= -eps_roll && bc.z >= -eps_roll) { break; }
@@ -125,6 +135,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ww = max(bc.z, 0.0);
   let s_bc = max(uu + vv + ww, 1e-9);
   bc = vec3<f32>(uu/s_bc, vv/s_bc, ww/s_bc);
+  // Write raw (alpha,beta) for CPU lattice when debug bit 11 is set
+  if ((U.debug_flags & (1u<<11)) != 0u) {
+    let lin = gid.y * U.width + gid.x;
+    RAW_AB[lin] = vec2<f32>(bc.x, bc.y);
+  }
   // Align with CPU lattice and face vertex table:
   // i (rows) follows α toward A (C→A), j (cols) follows β along AB.
   // Therefore u <- α*F (bc.x), v <- β*F (bc.y).
@@ -143,9 +158,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     fu = clamp(u - f32(iu), 1e-4, 1.0 - 1e-4);
     fv = clamp(v - f32(iv), 1e-4, 1.0 - 1e-4);
   }
-  // Authoritative upper rule: diagonal belongs to lower; strict EPS
-  let EPS: f32 = 1e-6;
-  let upper = (fu + fv) >= (1.0 - EPS);
+  // Authoritative upper rule: diagonal belongs to lower; strict EPS (use raw residuals, not clamped)
+  let upper = ((u - f32(iu)) + (v - f32(iv))) >= (1.0 - EPS_UPPER);
   // Analytic tri index per senior dev: tri_idx = face*F*F + v*(2F - v) + 2*u + (upper?1:0)
   let tri_local = u32(iv) * (2u * F - u32(iv)) + 2u * u32(iu) + select(0u, 1u, upper);
   let tri_idx   = f * F*F + tri_local;

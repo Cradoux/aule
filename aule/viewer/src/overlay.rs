@@ -240,6 +240,9 @@ pub struct OverlayState {
     pub gpu_dbg_grid: bool,
     pub gpu_dbg_tri_parity: bool,
     pub gpu_dbg_tri_index: bool,
+    // Parity isolation toggles
+    pub dbg_cpu_bary_gpu_lattice: bool,
+    pub dbg_gpu_face_cpu_lattice: bool,
 
     // Parity heat overlay (CPU vs GPU)
     pub show_parity_heat: bool,
@@ -465,6 +468,8 @@ impl Default for OverlayState {
             gpu_dbg_grid: false,
             gpu_dbg_tri_parity: false,
             gpu_dbg_tri_index: false,
+            dbg_cpu_bary_gpu_lattice: false,
+            dbg_gpu_face_cpu_lattice: false,
 
             show_parity_heat: false,
             parity_points: None,

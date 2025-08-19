@@ -342,6 +342,8 @@ fn render_simple_panels(
         changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_index, "Tri index").changed();
+        changed |= ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
+        changed |= ui.checkbox(&mut ov.dbg_gpu_face_cpu_lattice, "GPU face+bary -> CPU lattice").changed();
         changed |= ui.checkbox(&mut ov.show_parity_heat, "Parity heat").changed();
         changed |=
             ui.checkbox(&mut ov.force_cpu_face_pick, "Force CPU face pick (debug)").changed();
@@ -1128,6 +1130,7 @@ fn main() {
                                                     | (if ov.gpu_dbg_tri_index { 1u32<<5 } else { 0 })
                                                     | (if ov.show_parity_heat || ov.export_parity_csv_requested { 1u32<<6 } else { 0 })
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
+                                                    | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 })
                                                     | 0u32;
                                                 // Build neighbor mapping from shared crate (opp A,B,C). Shader only uses the first u32 per triplet.
                                                 let mut face_edge_info: Vec<u32> = Vec::with_capacity(20 * 3 * 3);
@@ -1140,7 +1143,7 @@ fn main() {
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m, &face_edge_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
-                                                if ov.force_cpu_face_pick {
+                                                if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
                                                     let mut cpu_faces: Vec<u32> = vec![0; (rw * rh) as usize];
                                                     let picker = GeoPicker::new();
                                                     for y in 0..rh { for x in 0..rw {
@@ -1212,10 +1215,11 @@ fn main() {
                                                         | (if ov.gpu_dbg_tri_index { 1u32<<5 } else { 0 })
                                                         | (if ov.show_parity_heat || ov.export_parity_csv_requested { 1u32<<6 } else { 0 })
                                                         | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
+                                                        | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 })
                                                         | 0u32;
                                                     let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                     // If forcing CPU face pick, generate per-pixel face ids using FACE_GEOM (A,B,C,N)
-                                                    if ov.force_cpu_face_pick {
+                                                    if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
                                                         let mut cpu_faces: Vec<u32> = vec![0; (rw * rh) as usize];
                                                         let picker = GeoPicker::new();
                                                         for y in 0..rh { for x in 0..rw {
