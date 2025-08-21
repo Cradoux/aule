@@ -6,9 +6,8 @@ mod math;
 
 pub use icosa::{build_face_table, GpuFaceGeom, GpuNeighbors};
 pub use math::{
-    barycentrics_plane, lattice_from_ab, one_hop_rollover, pick_face, sph_to_unit, FaceGeom, FaceId,
-    TriIndex, Vec3,
-    EPS_ROLLOVER, EPS_UPPER,
+    barycentrics_plane, lattice_from_ab, one_hop_rollover, pick_face, sph_to_unit, FaceGeom,
+    FaceId, TriIndex, Vec3, EPS_ROLLOVER, EPS_UPPER,
 };
 
 /// Choose f32 everywhere to mirror WGSL exactly.

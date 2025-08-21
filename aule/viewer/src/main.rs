@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::dbg_macro, clippy::large_enum_variant)]
 
 mod colormap;
+mod globe;
 mod overlay;
 mod plot;
 mod plot_age_depth;
@@ -342,12 +343,15 @@ fn render_simple_panels(
         changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_index, "Tri index").changed();
-        changed |= ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
-        changed |= ui.checkbox(&mut ov.dbg_gpu_face_cpu_lattice, "GPU face+bary -> CPU lattice").changed();
+        changed |=
+            ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
+        changed |=
+            ui.checkbox(&mut ov.dbg_gpu_face_cpu_lattice, "GPU face+bary -> CPU lattice").changed();
         changed |= ui.checkbox(&mut ov.show_parity_heat, "Parity heat").changed();
         changed |=
             ui.checkbox(&mut ov.force_cpu_face_pick, "Force CPU face pick (debug)").changed();
-        changed |= ui.checkbox(&mut ov.dbg_rollover_probe, "Log rollover probe CSV (ROI)").changed();
+        changed |=
+            ui.checkbox(&mut ov.dbg_rollover_probe, "Log rollover probe CSV (ROI)").changed();
         if changed {
             ov.raster_dirty = true;
         }
@@ -935,8 +939,17 @@ fn main() {
     struct AppPipelines {
         raster: Option<raster_gpu::RasterGpu>,
         face_cache: Option<FaceCache>,
+        globe_mesh: Option<globe::GlobeMesh>,
+        globe: Option<globe::GlobeRenderer>,
+        globe_cam: Option<globe::OrbitCamera>,
     }
-    let mut pipes = AppPipelines { raster: None, face_cache: None };
+    let mut pipes = AppPipelines {
+        raster: None,
+        face_cache: None,
+        globe_mesh: None,
+        globe: None,
+        globe_cam: None,
+    };
     let mut ov = overlay::OverlayState::default();
     // Edge-triggered snapshots state
     let mut next_snapshot_t: f64 = f64::INFINITY;
@@ -948,6 +961,8 @@ fn main() {
         let g_tmp = engine::grid::Grid::new(f);
         let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
     }
+    // Temporary: enable globe rendering path by default for this card
+    let globe_enabled: bool = true;
     // Build world state and initial overlay data
     let f: u32 = 64;
     let mut world = engine::world::World::new(f, 8, 12345);
@@ -1087,7 +1102,26 @@ fn main() {
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 let rect = ui.max_rect();
                                 let painter = ui.painter_at(rect);
-                                if ov.mode_simple {
+                                if globe_enabled {
+                                    // Build globe once (or when F changes later)
+                                    if pipes.globe_mesh.is_none() || pipes.globe.is_none() {
+                                        let f_now = world.grid.freq();
+                                        let mesh = globe::build_globe_mesh(&gpu.device, &world.grid);
+                                        let gr = globe::GlobeRenderer::new(&gpu.device, gpu.config.format, mesh.vertex_count);
+                                        // Fill heights with zeros for now
+                                        let zeros = vec![0.0f32; mesh.vertex_count as usize];
+                                        gr.upload_heights(&gpu.queue, &zeros);
+                                        pipes.globe_mesh = Some(mesh);
+                                        pipes.globe = Some(gr);
+                                        pipes.globe_cam = Some(globe::OrbitCamera::default());
+                                        let _ = f_now; // silence if unused in some cfgs
+                                    }
+
+                                    // Update camera aspect each frame; actual draw happens later after the frame is acquired
+                                    if let Some(cam) = &mut pipes.globe_cam {
+                                        cam.aspect = (gpu.config.width.max(1) as f32) / (gpu.config.height.max(1) as f32);
+                                    }
+                                } else if ov.mode_simple {
                                     // T-902A-GPU: compute raster path
                                     if ov.use_gpu_raster {
                                         // Resolution policy: HQ when paused, LQ when running
@@ -1276,6 +1310,7 @@ fn main() {
                                                                     let _ = writeln!(fcsv, "x,y,face_gpu,face_sim,face_cpu,kneg_sim,kneg_cpu,wa_s,wb_s,wc_s,wa_c,wb_c,wc_c");
                                                                     // Build neighbor table once
                                                                     let mut neighbors: [[u32;3]; 20] = [[u32::MAX;3]; 20];
+                                                                    let corners = world.grid.face_corners();
                                                                     for fid in 0..20usize {
                                                                         let tri = corners[fid];
                                                                         let mk = |va:u32, vb:u32| -> u32 { let mut nf=u32::MAX; 's: for (j,t) in corners.iter().enumerate(){ if j==fid {continue;} let arr=*t; let mut a0=None; let mut a1=None; for k in 0..3u32 { if arr[k as usize]==va { a0=Some(k);} if arr[k as usize]==vb { a1=Some(k);} } if a0.is_some()&&a1.is_some(){ nf=j as u32; break 's;} } nf };
@@ -1306,7 +1341,7 @@ fn main() {
                                                                         let mut kneg_s = 0usize; let mut vmin = wa; if wb < vmin { vmin = wb; kneg_s = 1; } if wc < vmin { kneg_s = 2; }
                                                                         if wa < -1e-6 || wb < -1e-6 || wc < -1e-6 { let nf = neighbors[f_sim as usize][kneg_s]; if nf!=u32::MAX { f_sim = nf; } }
                                                                         // CPU-grid path
-                                                                        let mut best_fg = 0usize; let mut bdg = -1e9f32; let corners = world.grid.face_corners();
+                                                                        let mut best_fg = 0usize; let mut bdg = -1e9f32;
                                                                         for (fi, tri) in corners.iter().enumerate().take(20) {
                                                                             let a = world.grid.pos_xyz[tri[0] as usize]; let b = world.grid.pos_xyz[tri[1] as usize]; let c = world.grid.pos_xyz[tri[2] as usize];
                                                                             let n = [ (b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1]), (b[2]-a[2])*(c[0]-a[0]) - (b[0]-a[0])*(c[2]-a[2]), (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]) ];
@@ -1549,6 +1584,29 @@ fn main() {
                         let mut encoder = gpu
                             .device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+                        // If globe path is enabled, render globe before egui
+                        if globe_enabled {
+                            if let (Some(gr), Some(mesh)) = (pipes.globe.as_ref(), pipes.globe_mesh.as_ref()) {
+                                // Update uniforms and draw
+                                let view_proj = pipes.globe_cam.as_ref().unwrap().view_proj();
+                                let radius = 1.0f32;
+                                let exagger = 0.0f32;
+                                let dbg_flags = 0u32;
+                                gr.update_uniforms(&gpu.queue, view_proj, radius, exagger, dbg_flags);
+                                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("globe pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }), store: wgpu::StoreOp::Store },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    occlusion_query_set: None,
+                                    timestamp_writes: None,
+                                });
+                                gr.draw(&mut rpass, mesh);
+                            }
+                        }
 
                         let screen_desc = ScreenDescriptor {
                             size_in_pixels: [gpu.config.width, gpu.config.height],

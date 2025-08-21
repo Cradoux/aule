@@ -17,6 +17,8 @@ pub mod accretion;
 pub mod continent;
 /// Erosion helpers (stream-power law, slopes, drainage area).
 pub mod erosion;
+/// CPU face/tri picker using shared `aule-geo`.
+pub mod face_pick;
 /// Field and tiling views.
 pub mod fields;
 /// 1D elastic plate flexure (CPU reference; analytic + CG solver).
@@ -29,8 +31,6 @@ pub mod geo;
 pub mod gpu;
 /// Geodesic grid module.
 pub mod grid;
-/// CPU face/tri picker using shared `aule-geo`.
-pub mod face_pick;
 /// Hypsometry helpers.
 pub mod hypsometry;
 /// Global sea-level (isostasy MVP) utilities.

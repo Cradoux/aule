@@ -2,8 +2,9 @@
 //! Safe to call from parity/debug paths without affecting lattice construction.
 
 use aule_geo::{
-    barycentrics_plane, build_face_table, lattice_from_ab, one_hop_rollover, pick_face, sph_to_unit as geo_sph_to_unit,
-    FaceGeom, FaceId, TriIndex, Vec3 as GeoVec3, EPS_ROLLOVER, EPS_UPPER,
+    barycentrics_plane, build_face_table, lattice_from_ab, one_hop_rollover, pick_face,
+    sph_to_unit as geo_sph_to_unit, FaceGeom, FaceId, TriIndex, Vec3 as GeoVec3, EPS_ROLLOVER,
+    EPS_UPPER,
 };
 
 /// Minimal local Vec3 shim so the engine doesn’t pull in any extra math deps.
@@ -19,18 +20,28 @@ pub struct Vec3 {
 impl Vec3 {
     /// Construct from components.
     #[inline]
-    pub fn new(x: f32, y: f32, z: f32) -> Self { Self { x, y, z } }
+    pub fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
     /// Dot product with another vector.
     #[inline]
-    pub fn dot(self, o: Self) -> f32 { self.x * o.x + self.y * o.y + self.z * o.z }
+    pub fn dot(self, o: Self) -> f32 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
     /// Euclidean length.
     #[inline]
-    pub fn len(self) -> f32 { self.dot(self).sqrt() }
+    pub fn len(self) -> f32 {
+        self.dot(self).sqrt()
+    }
     /// Unit-normalize, returning the input if zero length.
     #[inline]
     pub fn norm(self) -> Self {
         let l = self.len();
-        if l == 0.0 { self } else { Self::new(self.x / l, self.y / l, self.z / l) }
+        if l == 0.0 {
+            self
+        } else {
+            Self::new(self.x / l, self.y / l, self.z / l)
+        }
     }
 }
 
@@ -66,11 +77,15 @@ pub struct GeoPicker {
 }
 impl GeoPicker {
     /// Create with canonical faces from `aule-geo`.
-    pub fn new() -> Self { Self { faces: build_face_table() } }
+    pub fn new() -> Self {
+        Self { faces: build_face_table() }
+    }
 
     /// Access the face table.
     #[inline]
-    pub fn faces(&self) -> &[FaceGeom] { &self.faces }
+    pub fn faces(&self) -> &[FaceGeom] {
+        &self.faces
+    }
 
     /// Pick (face,tri) for a unit vector `p` at lattice resolution F.
     pub fn pick_face_tri_from_p(&self, p: Vec3, f_subdiv: u32) -> FaceTri {
@@ -101,5 +116,3 @@ impl GeoPicker {
         self.pick_face_tri_from_p(p, f_subdiv)
     }
 }
-
-
