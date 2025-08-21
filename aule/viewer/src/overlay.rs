@@ -243,6 +243,7 @@ pub struct OverlayState {
     // Parity isolation toggles
     pub dbg_cpu_bary_gpu_lattice: bool,
     pub dbg_gpu_face_cpu_lattice: bool,
+    pub dbg_rollover_probe: bool,
 
     // Parity heat overlay (CPU vs GPU)
     pub show_parity_heat: bool,
@@ -470,10 +471,11 @@ impl Default for OverlayState {
             gpu_dbg_tri_index: false,
             dbg_cpu_bary_gpu_lattice: false,
             dbg_gpu_face_cpu_lattice: false,
+            dbg_rollover_probe: false,
 
             show_parity_heat: false,
             parity_points: None,
-            export_parity_csv_requested: false,
+            export_parity_csv_requested: true,
             force_cpu_face_pick: false,
 
             adv_open_kinematics: false,

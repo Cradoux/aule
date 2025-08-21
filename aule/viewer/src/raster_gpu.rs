@@ -27,7 +27,7 @@ pub struct RasterGpu {
     pub face_edge_info: wgpu::Buffer,
     pub debug_face_tri: wgpu::Buffer,
     pub cpu_face_pick: wgpu::Buffer,
-    pub raw_ab: wgpu::Buffer,
+    // Removed raw_ab and probe_u32 to stay under storage buffer limits
     pub lut_tex: wgpu::Texture,
     pub lut_view: wgpu::TextureView,
     pub lut_sampler: wgpu::Sampler,
@@ -157,16 +157,7 @@ impl RasterGpu {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                // Removed bindings 13 and 14 to stay under storage buffer limits
             ],
         });
 
@@ -267,7 +258,7 @@ impl RasterGpu {
                 wgpu::BindGroupEntry { binding: 10, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 11, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: empty.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 13, resource: empty.as_entire_binding() },
+                // Removed bindings 13 and 14 to stay under storage buffer limits
             ],
         });
 
@@ -301,12 +292,7 @@ impl RasterGpu {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let empty7 = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("empty7"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Removed empty7 and empty8 to stay under storage buffer limits
         Self {
             pipeline,
             bind_group_layout,
@@ -337,7 +323,7 @@ impl RasterGpu {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            raw_ab: empty7,
+            // Removed raw_ab and probe_u32 to stay under storage buffer limits
             lut_tex,
             lut_view,
             lut_sampler,
@@ -529,14 +515,7 @@ impl RasterGpu {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Allocate raw_ab buffer: 2 f32 per pixel (alpha,beta)
-        let ab_len = (self.width as usize) * (self.height as usize) * 2 * 4;
-        self.raw_ab = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("raster raw_ab"),
-            size: ab_len as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        // Removed raw_ab and probe_u32 buffer creation to stay under storage buffer limits
 
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster bg updated"),
@@ -582,10 +561,7 @@ impl RasterGpu {
                     binding: 12,
                     resource: self.cpu_face_pick.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 13,
-                    resource: self.raw_ab.as_entire_binding(),
-                },
+                // Removed bindings 13 and 14 to stay under storage buffer limits
             ],
         });
         let _ = queue; // not used after init here
@@ -716,28 +692,5 @@ impl RasterGpu {
         Some(out)
     }
 
-    pub fn read_raw_ab(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<f32>> {
-        let bytes_len = (self.width as usize) * (self.height as usize) * 2 * 4;
-        if bytes_len == 0 { return None; }
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("raster raw_ab readback"),
-            size: bytes_len as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("copy raw_ab buffer") });
-        enc.copy_buffer_to_buffer(&self.raw_ab, 0, &staging, 0, bytes_len as u64);
-        queue.submit(std::iter::once(enc.finish()));
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r.is_ok()); });
-        device.poll(wgpu::Maintain::Wait);
-        if rx.recv().ok() != Some(true) { return None; }
-        let data = slice.get_mapped_range();
-        let mut out: Vec<f32> = vec![0.0; bytes_len / 4];
-        let mut i = 0usize; for chunk in data.chunks_exact(4) { out[i] = f32::from_le_bytes([chunk[0],chunk[1],chunk[2],chunk[3]]); i+=1; }
-        drop(data);
-        staging.unmap();
-        Some(out)
-    }
+    // Removed read_raw_ab and read_probe_u32 functions to stay under storage buffer limits
 }

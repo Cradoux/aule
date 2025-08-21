@@ -27,8 +27,8 @@ struct Uniforms {
 @group(0) @binding(11) var<storage, read_write> DEBUG_FACE_TRI: array<u32>;
 // binding(12): optional CPU-provided per-pixel face pick (row-major), enabled by debug bit 7
 @group(0) @binding(12) var<storage, read> CPU_FACE: array<u32>;
-// binding(13): per-pixel raw (alpha,beta) written under debug bit 11
-@group(0) @binding(13) var<storage, read_write> RAW_AB: array<vec2<f32>>;
+// binding(13): per-pixel raw (alpha,beta) written under debug bit 11 - REMOVED
+// binding(14): per-pixel seam probe u32s: [f0, kneg, nf, f1] - REMOVED
 
 const EPS_ROLLOVER: f32 = 1e-6;
 const EPS_UPPER: f32 = 1e-6;
@@ -112,6 +112,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var C = FACE_GEOM[4u*f + 2u].xyz;
   // Raw barycentrics for rollover decision
   var bc = barycentric_in_face_raw(p, A, B, C);
+  let f0 = f;
+  let bc0 = bc;
   let eps_roll = EPS_ROLLOVER;
   // One-hop neighbor rollover per spec
   for (var s: u32 = 0u; s < 1u; s = s + 1u) {
@@ -129,17 +131,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Recompute barycentrics in the neighbor face's basis (destination perspective)
     bc = barycentric_in_face_raw(p, A, B, C);
   }
+  // Seam probe write: [f0, kneg (from bc0), nf (neighbor if hop else f0), f1] - REMOVED
   // Clamp tiny negatives and renormalize to keep inside
   let uu = max(bc.x, 0.0);
   let vv = max(bc.y, 0.0);
   let ww = max(bc.z, 0.0);
   let s_bc = max(uu + vv + ww, 1e-9);
   bc = vec3<f32>(uu/s_bc, vv/s_bc, ww/s_bc);
-  // Write raw (alpha,beta) for CPU lattice when debug bit 11 is set
-  if ((U.debug_flags & (1u<<11)) != 0u) {
-    let lin = gid.y * U.width + gid.x;
-    RAW_AB[lin] = vec2<f32>(bc.x, bc.y);
-  }
+  // Write raw (alpha,beta) for CPU lattice when debug bit 11 is set - REMOVED
   // Align with CPU lattice and face vertex table:
   // i (rows) follows α toward A (C→A), j (cols) follows β along AB.
   // Therefore u <- α*F (bc.x), v <- β*F (bc.y).

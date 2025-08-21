@@ -1,0 +1,23 @@
+{
+  "tallies": {
+    "rows": 2097152,
+    "hops": 482656,
+    "hop_rate": 0.2301483154296875,
+    "kneg_counts": {
+      "0": 571120,
+      "1": 752438,
+      "2": 773594
+    },
+    "width": 2048,
+    "height": 1024
+  },
+  "invariants": {
+    "gpu_vs_f1_mismatch": 0,
+    "illegal_final_face": 0
+  },
+  "predicate": {
+    "note": "wa/wb/wc columns not present; skipping predicate checks"
+  },
+  "heat_saved": true,
+  "heat_path": "rollover_probe_hops.png"
+}

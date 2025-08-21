@@ -347,6 +347,7 @@ fn render_simple_panels(
         changed |= ui.checkbox(&mut ov.show_parity_heat, "Parity heat").changed();
         changed |=
             ui.checkbox(&mut ov.force_cpu_face_pick, "Force CPU face pick (debug)").changed();
+        changed |= ui.checkbox(&mut ov.dbg_rollover_probe, "Log rollover probe CSV (ROI)").changed();
         if changed {
             ov.raster_dirty = true;
         }
@@ -1238,7 +1239,7 @@ fn main() {
                                                     // Optional parity readback and console stats when debug bit is set
                                                     if (dbg & (1u32<<6)) != 0 {
                                                         if let Some(dbg_buf) = rg.read_debug_face_tri(&gpu.device, &gpu.queue) {
-                                                            // Sample every 8th pixel to keep CPU cost small
+                                                            // Sample every 4th pixel with the shared GeoPicker to mirror WGSL exactly
                                                             let stride = 4u32;
                                                             let mut mismatches: u64 = 0;
                                                             let mut face_mismatches: u64 = 0;
@@ -1246,146 +1247,20 @@ fn main() {
                                                             let mut total: u64 = 0;
                                                             let mut pts: Vec<[u32;2]> = Vec::new();
                                                             let (w, h, f) = (rw, rh, f_now);
-                                                            // Build neighbor table once from face corners for one-hop rollover
-                                                            let corners = world.grid.face_corners();
-                                                            let mut neighbors: [[u32;3]; 20] = [[u32::MAX;3]; 20];
-                                                            for fid in 0..20usize {
-                                                                let tri = corners[fid];
-                                                                let mk = |va:u32, vb:u32| -> (u32,u32) {
-                                                                    let mut nf = u32::MAX; let mut i0 = 0u32; let mut i1 = 0u32;
-                                                                    'search: for (j, t) in corners.iter().enumerate() {
-                                                                        if j == fid { continue; }
-                                                                        let arr = *t;
-                                                                        let mut f0=None; let mut f1=None;
-                                                                        for k in 0..3u32 { if arr[k as usize]==va { f0=Some(k); } if arr[k as usize]==vb { f1=Some(k);} }
-                                                                        if let (Some(a0),Some(a1))=(f0,f1){ nf=j as u32; i0=a0; i1=a1; break 'search; }
-                                                                    }
-                                                                    (nf, if i0<i1 {i0} else {i1})
-                                                                };
-                                                                // Opp A → shared (B,C)
-                                                                neighbors[fid][0] = mk(tri[1], tri[2]).0;
-                                                                // Opp B → shared (C,A)
-                                                                neighbors[fid][1] = mk(tri[2], tri[0]).0;
-                                                                // Opp C → shared (A,B)
-                                                                neighbors[fid][2] = mk(tri[0], tri[1]).0;
-                                                            }
+                                                            let picker = GeoPicker::new();
                                                             for y in (0..h).step_by(stride as usize) {
                                                                 for x in (0..w).step_by(stride as usize) {
                                                                     let idx = ((y * w + x) * 2) as usize;
                                                                     let face_gpu = dbg_buf[idx + 0] as u32;
-                                                                    let tri_gpu = dbg_buf[idx + 1] as u32;
-                                                                    // Recompute CPU face/tri with same method as shader (one-hop rollover)
-                                                                    let (lon, lat) = pixel_to_lon_lat(x, y, w, h);
-                                                                    let p3 = sph_to_unit_px(lon, lat);
-                                                                    let p = [p3.x, p3.y, p3.z];
-                                                                    let lon = (p[0] / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
-                                                                    let lat = std::f32::consts::FRAC_PI_2 - (p[1] / h as f32) * std::f32::consts::PI;
-                                                                    let cl = lat.cos();
-                                                                    let p = [cl * lon.cos(), lat.sin(), cl * lon.sin()];
-                                                                    // pick face by normal dot
-                                                                    let mut best_f = 0usize; let mut bd = -1e9f32;
-                                                                    for (fi, tri) in corners.iter().enumerate().take(20) {
-                                                                        let a = world.grid.pos_xyz[tri[0] as usize];
-                                                                        let b = world.grid.pos_xyz[tri[1] as usize];
-                                                                        let c = world.grid.pos_xyz[tri[2] as usize];
-                                                                        let n = [
-                                                                            (b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1]),
-                                                                            (b[2]-a[2])*(c[0]-a[0]) - (b[0]-a[0])*(c[2]-a[2]),
-                                                                            (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-                                                                        ];
-                                                                        let d = n[0]*p[0] + n[1]*p[1] + n[2]*p[2];
-                                                                        if d > bd { bd = d; best_f = fi; }
-                                                                    }
-                                                                    let mut f_id = best_f as u32;
-                                                                    // final bary + tri with same mapping as shader
-                                                                    let tri = corners[f_id as usize];
-                                                                    let A = world.grid.pos_xyz[tri[0] as usize];
-                                                                    let B = world.grid.pos_xyz[tri[1] as usize];
-                                                                    let C = world.grid.pos_xyz[tri[2] as usize];
-                                                                    let n = {
-                                                                        let ab = [B[0]-A[0], B[1]-A[1], B[2]-A[2]];
-                                                                        let ac = [C[0]-A[0], C[1]-A[1], C[2]-A[2]];
-                                                                        let nx = ab[1]*ac[2]-ab[2]*ac[1];
-                                                                        let ny = ab[2]*ac[0]-ab[0]*ac[2];
-                                                                        let nz = ab[0]*ac[1]-ab[1]*ac[0];
-                                                                        let inv = 1.0f32 / (nx*nx+ny*ny+nz*nz).sqrt().max(1e-8);
-                                                                        [nx*inv, ny*inv, nz*inv]
-                                                                    };
-                                                                    let t = n[0]*(p[0]-A[0]) + n[1]*(p[1]-A[1]) + n[2]*(p[2]-A[2]);
-                                                                    let q = [p[0]-n[0]*t, p[1]-n[1]*t, p[2]-n[2]*t];
-                                                                    let v0 = [B[0]-A[0], B[1]-A[1], B[2]-A[2]];
-                                                                    let v1 = [C[0]-A[0], C[1]-A[1], C[2]-A[2]];
-                                                                    let v2 = [q[0]-A[0], q[1]-A[1], q[2]-A[2]];
-                                                                    let d00 = v0[0]*v0[0]+v0[1]*v0[1]+v0[2]*v0[2];
-                                                                    let d01 = v0[0]*v1[0]+v0[1]*v1[1]+v0[2]*v1[2];
-                                                                    let d11 = v1[0]*v1[0]+v1[1]*v1[1]+v1[2]*v1[2];
-                                                                    let d20 = v2[0]*v0[0]+v2[1]*v0[1]+v2[2]*v0[2];
-                                                                    let d21 = v2[0]*v1[0]+v2[1]*v1[1]+v2[2]*v1[2];
-                                                                    let denom = (d00*d11 - d01*d01).max(1e-12);
-                                                                    let wb = (d11*d20 - d01*d21)/denom;
-                                                                    let wc = (d00*d21 - d01*d20)/denom;
-                                                                    let mut wa = (1.0 - wb - wc);
-                                                                    let mut wb = wb;
-                                                                    let mut wc = wc;
-                                                                    // One-hop rollover if outside
-                                                                    let eps_roll = 1e-5f32;
-                                                                    if wa < -eps_roll || wb < -eps_roll || wc < -eps_roll {
-                                                                        let mut k = 0usize; let mut vmin = wa;
-                                                                        if wb < vmin { vmin = wb; k = 1; }
-                                                                        if wc < vmin { k = 2; }
-                                                                        let nf = neighbors[f_id as usize][k];
-                                                                        if nf != u32::MAX { f_id = nf; }
-                                                                        // recompute bary in neighbor
-                                                                        let tri2 = corners[f_id as usize];
-                                                                        let A2 = world.grid.pos_xyz[tri2[0] as usize];
-                                                                        let B2 = world.grid.pos_xyz[tri2[1] as usize];
-                                                                        let C2 = world.grid.pos_xyz[tri2[2] as usize];
-                                                                        let n2 = {
-                                                                            let ab = [B2[0]-A2[0], B2[1]-A2[1], B2[2]-A2[2]];
-                                                                            let ac = [C2[0]-A2[0], C2[1]-A2[1], C2[2]-A2[2]];
-                                                                            let nx = ab[1]*ac[2]-ab[2]*ac[1];
-                                                                            let ny = ab[2]*ac[0]-ab[0]*ac[2];
-                                                                            let nz = ab[0]*ac[1]-ab[1]*ac[0];
-                                                                            let inv = 1.0f32 / (nx*nx+ny*ny+nz*nz).sqrt().max(1e-8);
-                                                                            [nx*inv, ny*inv, nz*inv]
-                                                                        };
-                                                                        let t2 = n2[0]*(p[0]-A2[0]) + n2[1]*(p[1]-A2[1]) + n2[2]*(p[2]-A2[2]);
-                                                                        let q2 = [p[0]-n2[0]*t2, p[1]-n2[1]*t2, p[2]-n2[2]*t2];
-                                                                        let v0b = [B2[0]-A2[0], B2[1]-A2[1], B2[2]-A2[2]];
-                                                                        let v1b = [C2[0]-A2[0], C2[1]-A2[1], C2[2]-A2[2]];
-                                                                        let v2b = [q2[0]-A2[0], q2[1]-A2[1], q2[2]-A2[2]];
-                                                                        let d00b = v0b[0]*v0b[0]+v0b[1]*v0b[1]+v0b[2]*v0b[2];
-                                                                        let d01b = v0b[0]*v1b[0]+v0b[1]*v1b[1]+v0b[2]*v1b[2];
-                                                                        let d11b = v1b[0]*v1b[0]+v1b[1]*v1b[1]+v1b[2]*v1b[2];
-                                                                        let d20b = v2b[0]*v0b[0]+v2b[1]*v0b[1]+v2b[2]*v0b[2];
-                                                                        let d21b = v2b[0]*v1b[0]+v2b[1]*v1b[1]+v2b[2]*v1b[2];
-                                                                        let denb = (d00b*d11b - d01b*d01b).max(1e-12);
-                                                                        let wbb = (d11b*d20b - d01b*d21b)/denb;
-                                                                        let wcc = (d00b*d21b - d01b*d20b)/denb;
-                                                                        wa = 1.0 - wbb - wcc; wb = wbb; wc = wcc;
-                                                                    }
-                                                                    // Clamp/renorm
-                                                                    wa = wa.max(0.0); wb = wb.max(0.0); wc = wc.max(0.0);
-                                                                    let s_bc = (wa+wb+wc).max(1e-9);
-                                                                    wa/=s_bc; wb/=s_bc; wc/=s_bc;
-                                                                    let mut u = (wa * f as f32).clamp(0.0, f as f32);
-                                                                    let mut v = (wb * f as f32).clamp(0.0, f as f32);
-                                                                    let mut iu = u.floor() as u32;
-                                                                    let mut iv = v.floor() as u32;
-                                                                    let mut fu = (u - iu as f32).clamp(1e-4, 1.0-1e-4);
-                                                                    let mut fv = (v - iv as f32).clamp(1e-4, 1.0-1e-4);
-                                                                    if iu + iv > f - 1 { let s = iu + iv - (f - 1); if fu > fv { iu = iu.saturating_sub(s); } else { iv = iv.saturating_sub(s); } fu = (u - iu as f32).clamp(1e-4, 1.0-1e-4); fv = (v - iv as f32).clamp(1e-4, 1.0-1e-4); }
-                                                                    let upper = (fu + fv) >= (1.0 - 1e-6);
-                                                                    let tri_local = iv * (2 * f - iv) + 2 * iu + if upper { 1 } else { 0 };
-                                                                    let tri_cpu = f_id * f * f + tri_local;
-                                                                    if face_gpu != f_id {
-                                                                        face_mismatches += 1;
-                                                                        mismatches += 1;
-                                                                    } else if tri_gpu != tri_cpu {
-                                                                        tri_mismatches_same_face += 1;
-                                                                        mismatches += 1;
-                                                                        if ov.show_parity_heat { pts.push([x, y]); }
-                                                                    }
+                                                                    let tri_gpu_global = dbg_buf[idx + 1] as u32;
+                                                                    let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
+                                                                    let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
+                                                                    let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
+                                                                    let cl = lat.cos(); let p = Vec3::new(cl*lon.cos(), lat.sin(), cl*lon.sin()).norm();
+                                                                    let cpu = picker.pick_from_unit(p, f);
+                                                                    let tri_cpu_global = cpu.face * f * f + cpu.tri;
+                                                                    if face_gpu != cpu.face { face_mismatches += 1; mismatches += 1; }
+                                                                    else if tri_gpu_global != tri_cpu_global { tri_mismatches_same_face += 1; mismatches += 1; if ov.show_parity_heat { pts.push([x, y]); } }
                                                                     total += 1;
                                                                 }
                                                             }
@@ -1429,7 +1304,7 @@ fn main() {
                                                                         let denom = (d00*d11 - d01*d01).max(1e-12);
                                                                         let wb = (d11*d20 - d01*d21)/denom; let wc = (d00*d21 - d01*d20)/denom; let wa = 1.0 - wb - wc;
                                                                         let mut kneg_s = 0usize; let mut vmin = wa; if wb < vmin { vmin = wb; kneg_s = 1; } if wc < vmin { kneg_s = 2; }
-                                                                        if wa < -1e-5 || wb < -1e-5 || wc < -1e-5 { let nf = neighbors[f_sim as usize][kneg_s]; if nf!=u32::MAX { f_sim = nf; } }
+                                                                        if wa < -1e-6 || wb < -1e-6 || wc < -1e-6 { let nf = neighbors[f_sim as usize][kneg_s]; if nf!=u32::MAX { f_sim = nf; } }
                                                                         // CPU-grid path
                                                                         let mut best_fg = 0usize; let mut bdg = -1e9f32; let corners = world.grid.face_corners();
                                                                         for (fi, tri) in corners.iter().enumerate().take(20) {
@@ -1446,7 +1321,7 @@ fn main() {
                                                                         let d00b=v0b[0]*v0b[0]+v0b[1]*v0b[1]+v0b[2]*v0b[2]; let d01b=v0b[0]*v1b[0]+v0b[1]*v1b[1]+v0b[2]*v1b[2]; let d11b=v1b[0]*v1b[0]+v1b[1]*v1b[1]+v1b[2]*v1b[2]; let d20b=v2b[0]*v0b[0]+v2b[1]*v0b[1]+v2b[2]*v0b[2]; let d21b=v2b[0]*v1b[0]+v2b[1]*v1b[1]+v2b[2]*v1b[2];
                                                                         let denb=(d00b*d11b-d01b*d01b).max(1e-12); let wbb=(d11b*d20b-d01b*d21b)/denb; let wcc=(d00b*d21b-d01b*d20b)/denb; let waa=1.0-wbb-wcc;
                                                                         let mut kneg_c = 0usize; let mut vminc = waa; if wbb < vminc { vminc = wbb; kneg_c = 1; } if wcc < vminc { kneg_c = 2; }
-                                                                        if waa < -1e-5 || wbb < -1e-5 || wcc < -1e-5 { let nf = neighbors[f_cpu as usize][kneg_c]; if nf!=u32::MAX { f_cpu = nf; } }
+                                                                        if waa < -1e-6 || wbb < -1e-6 || wcc < -1e-6 { let nf = neighbors[f_cpu as usize][kneg_c]; if nf!=u32::MAX { f_cpu = nf; } }
                                                                         let _ = writeln!(fcsv, "{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}", x, y, face_gpu, f_sim, f_cpu, kneg_s, kneg_c, wa, wb, wc, waa, wbb, wcc);
                                                                     }}
                                                                     println!("[parity] wrote parity_roi.csv");
@@ -1476,20 +1351,58 @@ fn main() {
                                                     // Deferred CSV export (same pass) when requested
                                                     if ov.export_parity_csv_requested {
                                                         if let Some(buf) = rg.read_debug_face_tri(&gpu.device, &gpu.queue) {
+                                                            // Export existing parity view for reference
                                                             let path = std::path::Path::new("parity_debug.csv");
                                                             if let Ok(mut file) = std::fs::File::create(path) {
                                                                 use std::io::Write;
-                                                                let _ = writeln!(file, "x,y,lon,lat,face_gpu,tri_gpu,face_cpu,tri_cpu,diff");
+                                                                let _ = writeln!(file, "x,y,lon,lat,face_gpu,tri_gpu_global,face_cpu,tri_cpu_global,diff");
                                                                 let (rw, rh) = ov.raster_size; let f = f_now; let picker = GeoPicker::new();
                                                                 for y in 0..rh { for x in 0..rw {
-                                                                    let idx=((y*rw+x)*2) as usize; let face_gpu=buf[idx+0]; let tri_gpu=buf[idx+1];
+                                                                    let idx=((y*rw+x)*2) as usize; let face_gpu=buf[idx+0]; let tri_gpu_global=buf[idx+1];
                                                                     let fx=x as f32+0.5; let fy=y as f32+0.5; let lon=(fx / rw as f32)*std::f32::consts::TAU - std::f32::consts::PI; let lat=std::f32::consts::FRAC_PI_2 - (fy / rh as f32)*std::f32::consts::PI; let cl=lat.cos(); let p=Vec3::new(cl*lon.cos(), lat.sin(), cl*lon.sin()).norm();
-                                                                     let cpu = picker.pick_from_unit(p, f);
-                                                                     let diff=(face_gpu!=cpu.face)||(tri_gpu!=cpu.tri);
-                                                                     let _=writeln!(file, "{},{},{:.6},{:.6},{},{},{},{},{}", x, y, lon, lat, face_gpu, tri_gpu, cpu.face, cpu.tri, if diff {1} else {0});
+                                                                    let cpu = picker.pick_from_unit(p, f);
+                                                                    let tri_cpu_global = cpu.face * f * f + cpu.tri; // unify to global scheme like WGSL
+                                                                    let diff=(face_gpu!=cpu.face)||(tri_gpu_global!=tri_cpu_global);
+                                                                    let _=writeln!(file, "{},{},{:.6},{:.6},{},{},{},{},{}", x, y, lon, lat, face_gpu, tri_gpu_global, cpu.face, tri_cpu_global, if diff {1} else {0});
                                                                 } }
                                                             }
                                                             println!("[parity] wrote parity_debug.csv ({}x{})", ov.raster_size.0, ov.raster_size.1);
+
+                                                            // Export rollover probe CSV per checklist
+                                                            let path_probe = std::path::Path::new("rollover_probe.csv");
+                                                            if let Ok(mut file2) = std::fs::File::create(path_probe) {
+                                                                use std::io::Write;
+                                                                let _ = writeln!(file2, "x,y,f0,kneg,nf,f1,face_gpu,tri_gpu,wa0,wb0,wc0,wa1,wb1,wc1");
+                                                                let (rw, rh) = ov.raster_size; let picker = GeoPicker::new();
+                                                                // Access canonical faces from the shared picker to compute f0/kneg/nf
+                                                                let faces = picker.faces();
+                                                                for y in 0..rh { for x in 0..rw {
+                                                                    let idx = ((y*rw + x) * 2) as usize;
+                                                                    let face_gpu = buf[idx + 0];
+                                                                    let tri_gpu  = buf[idx + 1];
+                                                                    // Pixel center mapping must match WGSL exactly
+                                                                    let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
+                                                                    let lon = (fx / rw as f32) * std::f32::consts::TAU - std::f32::consts::PI;
+                                                                    let lat = std::f32::consts::FRAC_PI_2 - (fy / rh as f32) * std::f32::consts::PI;
+                                                                    let cl = lat.cos(); let p = aule_geo::Vec3 { x: cl*lon.cos(), y: lat.sin(), z: cl*lon.sin() };
+                                                                    // f0: argmax before rollover
+                                                                    let f0 = aule_geo::pick_face(p, faces);
+                                                                    // Pre-rollover planar barycentrics on f0 (wa0,wb0,wc0)
+                                                                    let w0 = aule_geo::barycentrics_plane(p, &faces[f0 as usize]);
+                                                                    // kneg: index of most-negative component
+                                                                    let mut kneg: u32 = 0; let mut minv = w0[0];
+                                                                    if w0[1] < minv { kneg = 1; minv = w0[1]; }
+                                                                    if w0[2] < minv { kneg = 2; /* minv = w0[2]; */ }
+                                                                    // nf: neighbor across edge opposite kneg (table lookup)
+                                                                    let nf = faces[f0 as usize].neighbor_opp[kneg as usize];
+                                                                    // f1 per shader path: use GPU-written face as ground truth
+                                                                    let f1 = face_gpu;
+                                                                    // Post-rollover barycentrics on f1 (wa1,wb1,wc1)
+                                                                    let w1 = aule_geo::barycentrics_plane(p, &faces[f1 as usize]);
+                                                                    let _ = writeln!(file2, "{},{},{},{},{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}", x, y, f0, kneg, nf, f1, face_gpu, tri_gpu, w0[0], w0[1], w0[2], w1[0], w1[1], w1[2]);
+                                                                } }
+                                                            }
+                                                            println!("[probe] wrote rollover_probe.csv ({}x{})", ov.raster_size.0, ov.raster_size.1);
                                                         }
                                                         ov.export_parity_csv_requested = false;
                                                     }
