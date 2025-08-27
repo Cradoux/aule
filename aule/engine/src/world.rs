@@ -308,18 +308,29 @@ impl World {
         let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2);
         self.sea_level_ref = Some(ref_sea);
 
-        // 3) Continents: build template
-        let cp = crate::continent::ContinentParams {
-            seed,
-            n_continents: preset.continents_n,
-            mean_radius_km: 2200.0,
-            falloff_km: 600.0,
-            plateau_uplift_m: 1.0,
-            target_land_fraction: None,
+        // 3) Continents: build template.
+        // If continents_n == 0, treat as a "supercontinent" preset and synthesize a single
+        // contiguous ribbon with several lobes for early Wilson-cycle scenarios.
+        let mut tpl: Vec<f32> = if preset.continents_n == 0 {
+            crate::continent::build_supercontinent_template(
+                &self.grid,
+                seed,
+                5,       // lobes
+                2200.0,  // lobe radius (km)
+                600.0,   // falloff (km)
+            )
+        } else {
+            let cp = crate::continent::ContinentParams {
+                seed,
+                n_continents: preset.continents_n,
+                mean_radius_km: 2200.0,
+                falloff_km: 600.0,
+                plateau_uplift_m: 1.0,
+                target_land_fraction: None,
+            };
+            crate::continent::build_continents(&self.grid, cp).uplift_template_m
         };
-        let cf = crate::continent::build_continents(&self.grid, cp);
         // Trim tiny template tails to avoid near-global uplift when solving amplitude
-        let mut tpl = cf.uplift_template_m.clone();
         let mut vmax = 0.0f32;
         for &v in &tpl {
             if v > vmax {
@@ -357,6 +368,18 @@ impl World {
                 0.0
             }
         };
+
+        // Optional inherited belts for supercontinent: shallow, wide bands
+        if preset.continents_n == 0 {
+            let belts = [
+                crate::continent::GreatCircleBelt { n_hat: [1.0, 0.0, 0.0], half_width_km: 300.0, uplift_m: 400.0 },
+                crate::continent::GreatCircleBelt { n_hat: [0.0, 1.0, 0.0], half_width_km: 200.0, uplift_m: 250.0 },
+            ];
+            let imprint = crate::continent::imprint_orogenic_belts(&self.grid, &belts);
+            for (d, di) in self.depth_m.iter_mut().zip(imprint.into_iter()) {
+                *d += di;
+            }
+        }
 
         // 5) Low-F path: use a moderate fixed amplitude for stability and determinism
         if self.grid.frequency <= 32 {

@@ -34,6 +34,19 @@ pub struct ContinentField {
     pub land_fraction: f64,
 }
 
+/// Simple description of a great-circle belt used for inherited orogeny imprints.
+/// The belt is centered on the great circle defined by the plane normal `n_hat`
+/// (unit), with a half-width specified in kilometers.
+#[derive(Clone, Copy, Debug)]
+pub struct GreatCircleBelt {
+    /// Unit plane normal describing the great circle (|n_hat| == 1)
+    pub n_hat: [f64; 3],
+    /// Half-width of the belt in kilometers
+    pub half_width_km: f64,
+    /// Peak uplift magnitude (negative makes land higher) in meters
+    pub uplift_m: f32,
+}
+
 /// Build continent template (unitless 0..1) from smooth union of caps.
 pub fn build_continents(grid: &Grid, p: ContinentParams) -> ContinentField {
     let mut template: Vec<f32> = vec![0.0; grid.cells];
@@ -82,6 +95,117 @@ pub fn build_continents(grid: &Grid, p: ContinentParams) -> ContinentField {
         mask_land: vec![false; grid.cells],
         land_fraction: 0.0,
     }
+}
+
+/// Build a supercontinent-like template by placing a ribbon of caps along an
+/// equatorial great circle with several lobes. This is deliberately simple but
+/// produces a contiguous landmass suitable as a starting point.
+pub fn build_supercontinent_template(
+    grid: &Grid,
+    seed: u64,
+    n_lobes: u32,
+    lobe_radius_km: f64,
+    falloff_km: f64,
+) -> Vec<f32> {
+    let mut template: Vec<f32> = vec![0.0; grid.cells];
+    // Deterministic RNG
+    let ns: u64 = 0x7375706572636e74; // "supercnt"
+    let mut rng = StdRng::seed_from_u64(seed ^ ns);
+    // Choose an equatorial great circle rotated by a random yaw about Z and random tilt
+    let yaw = rng.gen_range(0.0..(2.0 * std::f64::consts::PI));
+    let tilt = rng.gen_range(-0.6..0.6); // radians
+    let rot_yaw = rotation_z(yaw);
+    let rot_tilt = rotation_x(tilt);
+    let r_plate_m = 6_371_000.0f64;
+    let sigma_rad = (falloff_km * 1000.0) / r_plate_m;
+    let r0_rad = (lobe_radius_km * 1000.0) / r_plate_m;
+    let lobes = n_lobes.max(1) as usize;
+    // Evenly spaced lobes across +/- 120 degrees along the ribbon
+    let span = 2.0 * std::f64::consts::PI * (120.0 / 360.0);
+    let start = -0.5 * span;
+    let step = if lobes > 1 { span / ((lobes - 1) as f64) } else { 1.0 };
+    let mut centers: Vec<[f64; 3]> = Vec::with_capacity(lobes);
+    for i in 0..lobes {
+        let lon = start + (i as f64) * step;
+        let lat = 0.0f64;
+        let mut v = lon_lat_to_xyz(lon, lat);
+        v = mat3_mul(rot_tilt, v);
+        v = mat3_mul(rot_yaw, v);
+        centers.push(v);
+    }
+    for (i, r) in grid.pos_xyz.iter().enumerate() {
+        let rhat = [r[0] as f64, r[1] as f64, r[2] as f64];
+        let mut inv_prod = 1.0f64;
+        for c in &centers {
+            let dot = (rhat[0] * c[0] + rhat[1] * c[1] + rhat[2] * c[2]).clamp(-1.0, 1.0);
+            let theta = dot.acos();
+            let tk = if theta <= r0_rad { 1.0 } else { (-0.5 * (theta / sigma_rad).powi(2)).exp() };
+            inv_prod *= 1.0 - tk;
+        }
+        template[i] = (1.0 - inv_prod) as f32;
+    }
+    template
+}
+
+/// Imprint inherited mountain belts as shallow negative-depth bands along great circles.
+/// Returns a per-cell delta that can be added to `depth_m` (negative is uplift).
+pub fn imprint_orogenic_belts(grid: &Grid, belts: &[GreatCircleBelt]) -> Vec<f32> {
+    let mut delta = vec![0.0f32; grid.cells];
+    let r_m = 6_371_000.0f64;
+    for (i, r) in grid.pos_xyz.iter().enumerate() {
+        let rhat = [r[0] as f64, r[1] as f64, r[2] as f64];
+        for b in belts {
+            let n = normalize3(b.n_hat);
+            // Angular distance to great circle plane = |asin(n·r)|
+            let ang = (dot3(n, rhat)).abs().asin();
+            let hw_rad = (b.half_width_km * 1000.0) / r_m;
+            if ang <= hw_rad {
+                // Smooth taper to edges using cosine bell
+                let t = (ang / hw_rad).clamp(0.0, 1.0) as f32;
+                let w = 0.5 * (1.0 + (std::f32::consts::PI * (t - 1.0)).cos());
+                delta[i] += -b.uplift_m * w;
+            }
+        }
+    }
+    delta
+}
+
+// ----------------------- small 3D helpers (double precision) -----------------------
+#[inline]
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
+
+#[inline]
+fn normalize3(v: [f64; 3]) -> [f64; 3] {
+    let mut s = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if s <= 0.0 { s = 1.0; }
+    [v[0] / s, v[1] / s, v[2] / s]
+}
+
+#[inline]
+fn lon_lat_to_xyz(lon: f64, lat: f64) -> [f64; 3] {
+    let cl = lat.cos();
+    [cl * lon.cos(), lat.sin(), -cl * lon.sin()]
+}
+
+#[inline]
+fn rotation_z(theta: f64) -> [[f64; 3]; 3] {
+    let (c, s) = (theta.cos(), theta.sin());
+    [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+}
+
+#[inline]
+fn rotation_x(theta: f64) -> [[f64; 3]; 3] {
+    let (c, s) = (theta.cos(), theta.sin());
+    [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]]
+}
+
+#[inline]
+fn mat3_mul(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
 }
 
 /// Solve amplitude (meters, ≥0) to reach target land fraction via bisection.
