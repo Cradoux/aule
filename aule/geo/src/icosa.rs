@@ -19,6 +19,14 @@ pub struct GpuNeighbors {
     pub opp: [u32; 3], // [oppA, oppB, oppC]
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GpuCornerPerms {
+    /// For each opposite edge e∈{0(A),1(B),2(C)}, a permutation mapping local (A,B,C)
+    /// to neighbor (A',B',C') indices 0..2.
+    pub perm_opp: [[u8; 3]; 3],
+}
+
 /// Build canonical icosahedron faces with outward CCW and neighbor table.
 ///
 /// # Panics
@@ -132,4 +140,62 @@ pub fn to_gpu_faces(faces: &[FaceGeom]) -> (Vec<GpuFaceGeom>, Vec<GpuNeighbors>)
         .collect::<Vec<_>>();
     let neigh = faces.iter().map(|f| GpuNeighbors { opp: f.neighbor_opp }).collect::<Vec<_>>();
     (pod_faces, neigh)
+}
+
+/// Compute permutations across opposite edges.
+///
+/// # Panics
+/// Panics if an index does not fit into `u8` when packing permutations.
+#[must_use]
+pub fn corner_permutation_opp(faces: &[FaceGeom]) -> Vec<[[u8; 3]; 3]> {
+    // Build reverse map: vertex position → which letter in face (A/B/C)
+    // Since positions are unit floats, compare via index by reconstructing from canonical faces_idx.
+    // Here we derive permutations using exact vertex equality because FaceGeom is built from the same verts.
+    let mut perms = vec![[[0u8; 3]; 3]; faces.len()];
+    for (fi, f) in faces.iter().enumerate() {
+        let local = [f.a, f.b, f.c];
+        // For each edge opposite local corner k (0->oppA across BC, 1->oppB across CA, 2->oppC across AB)
+        for edge in 0..3 {
+            let nf = faces[faces[fi].neighbor_opp[edge] as usize];
+            let neigh = [nf.a, nf.b, nf.c];
+            // Map local vertices to neighbor letters by nearest-equal (within epsilon)
+            let mut map = [3u8; 3]; // default invalid
+            for (li, lv) in local.iter().copied().enumerate() {
+                for (nj, nv) in neigh.iter().copied().enumerate() {
+                    let dx = (lv.x - nv.x).abs();
+                    let dy = (lv.y - nv.y).abs();
+                    let dz = (lv.z - nv.z).abs();
+                    if dx < f32::EPSILON && dy < f32::EPSILON && dz < f32::EPSILON {
+                        map[li] = core::convert::TryFrom::try_from(nj).expect("perm fits in u8");
+                    }
+                }
+            }
+            // Any non-shared local vertex maps to the remaining neighbor letter
+            for li in 0..3 {
+                if map[li] > 2 {
+                    // pick the neighbor letter not used yet
+                    let mut used = [false; 3];
+                    for &m in &map {
+                        if m <= 2 {
+                            used[m as usize] = true;
+                        }
+                    }
+                    for (nj, flag) in used.iter().enumerate() {
+                        if !flag {
+                            map[li] =
+                                core::convert::TryFrom::try_from(nj).expect("perm fits in u8");
+                            break;
+                        }
+                    }
+                }
+            }
+            perms[fi][edge] = map;
+        }
+    }
+    perms
+}
+
+#[must_use]
+pub fn to_gpu_perms(perms: &[[[u8; 3]; 3]]) -> Vec<GpuCornerPerms> {
+    perms.iter().map(|p| GpuCornerPerms { perm_opp: *p }).collect()
 }

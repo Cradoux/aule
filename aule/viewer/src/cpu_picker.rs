@@ -2,9 +2,8 @@
 //! Used by parity and "Force CPU face pick (debug)".
 
 use aule_geo::{
-    barycentrics_plane, build_face_table, lattice_from_ab, one_hop_rollover, pick_face,
-    sph_to_unit as sph_to_unit_geo, FaceGeom, FaceId, TriIndex, Vec3 as GeoVec3, EPS_ROLLOVER,
-    EPS_UPPER,
+    build_face_table, lattice_from_ab, pick_face, sph_to_unit as sph_to_unit_geo, FaceGeom, FaceId,
+    TriIndex, Vec3 as GeoVec3, EPS_ROLLOVER, EPS_UPPER,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -61,21 +60,40 @@ impl GeoPicker {
     pub fn pick_from_unit(&self, p: Vec3, f_subdiv: u32) -> FaceTri {
         let p3 = GeoVec3 { x: p.x, y: p.y, z: p.z };
         let f0 = pick_face(p3, &self.faces);
-        let w0 = barycentrics_plane(p3, &self.faces[f0 as usize]);
+        // Use gnomonic barycentrics for robustness at edges
+        let w0 = self.faces[f0 as usize].barycentrics_gnomonic(p3);
 
-        // one-hop rollover (shared signature without p → recompute if hopped)
+        // one-hop rollover only when exactly one component is within EPS of 0 and is the minimum
         let (f1, w1, kneg) = {
-            let (next, _marker, k) = one_hop_rollover(&self.faces, f0, w0, EPS_ROLLOVER);
-            if next != f0 {
-                let w2 = barycentrics_plane(p3, &self.faces[next as usize]);
-                (next, w2, k)
+            let mut idx = 0usize;
+            let mut vmin = w0[0];
+            if w0[1] < vmin {
+                vmin = w0[1];
+                idx = 1;
+            }
+            if w0[2] < vmin {
+                idx = 2;
+            }
+            if vmin.abs() <= EPS_ROLLOVER
+                && (w0[(idx + 1) % 3] > EPS_ROLLOVER)
+                && (w0[(idx + 2) % 3] > EPS_ROLLOVER)
+            {
+                let next = self.faces[f0 as usize].neighbor_opp[idx] as u32;
+                let w2 = self.faces[next as usize].barycentrics_gnomonic(p3);
+                (next, w2, idx as u32)
             } else {
-                (f0, w0, k)
+                (f0, w0, idx as u32)
             }
         };
 
         let (u, v, upper) = lattice_from_ab(w1[0], w1[1], f_subdiv, EPS_UPPER);
         let tri = TriIndex::tri_index(f_subdiv, u, v, upper);
         FaceTri { face: f1, tri, u, v, upper, w: w1, kneg }
+    }
+}
+
+impl Default for GeoPicker {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -804,6 +804,8 @@ struct GpuState<'w> {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    depth_tex: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 }
 impl<'w> GpuState<'w> {
     #[allow(dead_code)]
@@ -858,7 +860,23 @@ impl<'w> GpuState<'w> {
         };
         surface.configure(&device, &config);
 
-        Self { _instance: instance, surface, device, queue, config }
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth tex"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self { _instance: instance, surface, device, queue, config, depth_tex, depth_view }
     }
 
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -866,6 +884,21 @@ impl<'w> GpuState<'w> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("depth tex"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.depth_view = self.depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
         }
     }
 
@@ -961,8 +994,8 @@ fn main() {
         let g_tmp = engine::grid::Grid::new(f);
         let _device_fields = engine::fields::DeviceFields::new(&gpu.device, g_tmp.cells);
     }
-    // Temporary: enable globe rendering path by default for this card
-    let globe_enabled: bool = true;
+    // Obsolete: replaced by ov.view_mode
+    let _globe_enabled: bool = true;
     // Build world state and initial overlay data
     let f: u32 = 64;
     let mut world = engine::world::World::new(f, 8, 12345);
@@ -1054,6 +1087,15 @@ fn main() {
                                     ui.label("Mode:");
                                     ui.selectable_value(&mut ov.mode_simple, true, "Simple");
                                     ui.selectable_value(&mut ov.mode_simple, false, "Advanced");
+                                    ui.separator();
+                                    ui.label("View:");
+                                    ui.selectable_value(&mut ov.view_mode, overlay::ViewMode::Map, "Map 2D");
+                                    ui.selectable_value(&mut ov.view_mode, overlay::ViewMode::Globe, "Globe 3D");
+                                    if ov.view_mode == overlay::ViewMode::Globe {
+                                        ui.add(egui::Slider::new(&mut ov.globe.exaggeration, 0.0..=5.0).text("Z exaggeration"));
+                                        ui.checkbox(&mut ov.globe.show_wireframe, "Wireframe");
+                                        ui.checkbox(&mut ov.globe.show_probe, "Hover probe");
+                                    }
                                     if ui.button(if ov.drawer_open { "⟨⟩" } else { "☰" }).clicked() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
@@ -1098,28 +1140,30 @@ fn main() {
                                         });
                                 });
                             }
-                            // Central canvas (draw only, no controls)
-                            egui::CentralPanel::default().show(ctx, |ui| {
+                            // Central canvas (draw only, no controls) — make transparent so 3D pass remains visible
+                            egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
                                 let rect = ui.max_rect();
                                 let painter = ui.painter_at(rect);
-                                if globe_enabled {
+                                if ov.view_mode == overlay::ViewMode::Globe {
                                     // Build globe once (or when F changes later)
                                     if pipes.globe_mesh.is_none() || pipes.globe.is_none() {
                                         let f_now = world.grid.freq();
                                         let mesh = globe::build_globe_mesh(&gpu.device, &world.grid);
                                         let gr = globe::GlobeRenderer::new(&gpu.device, gpu.config.format, mesh.vertex_count);
-                                        // Fill heights with zeros for now
-                                        let zeros = vec![0.0f32; mesh.vertex_count as usize];
-                                        gr.upload_heights(&gpu.queue, &zeros);
+                                        // Upload initial heights and LUT
+                                        gr.upload_heights(&gpu.queue, &world.depth_m);
+                                        gr.write_lut_from_overlay(&gpu.queue, &ov);
                                         pipes.globe_mesh = Some(mesh);
                                         pipes.globe = Some(gr);
                                         pipes.globe_cam = Some(globe::OrbitCamera::default());
                                         let _ = f_now; // silence if unused in some cfgs
                                     }
 
-                                    // Update camera aspect each frame; actual draw happens later after the frame is acquired
+                                    // Update camera from input
                                     if let Some(cam) = &mut pipes.globe_cam {
                                         cam.aspect = (gpu.config.width.max(1) as f32) / (gpu.config.height.max(1) as f32);
+                                        let ui_hijacked = ctx.is_using_pointer() || ctx.is_pointer_over_area();
+                                        cam.update_from_input(&egui_ctx, ui_hijacked);
                                     }
                                 } else if ov.mode_simple {
                                     // T-902A-GPU: compute raster path
@@ -1148,15 +1192,33 @@ fn main() {
                                                 let (face_ids_ref, face_offs_ref) = world.grid.face_vertex_table();
                                                 let face_ids: Vec<u32> = face_ids_ref.to_vec();
                                                 let face_offs: Vec<u32> = face_offs_ref.to_vec();
-                                                // Build canonical face geometry and neighbors from shared crate
+                                                // Build canonical face geometry, neighbors, and corner permutations from shared crate
                                                 let faces = aule_geo::build_face_table();
-                                                let (gpu_faces, gpu_neighbors) = aule_geo::icosa::to_gpu_faces(&faces);
+                                                let (gpu_faces, gpu_neighbors) = aule_geo::to_gpu_faces(&faces);
+                                                let perms = aule_geo::corner_permutation_opp(&faces);
+                                                let gpu_perms = aule_geo::to_gpu_perms(&perms);
                                                 let mut face_geom: Vec<[f32; 4]> = Vec::with_capacity(20 * 4);
                                                 for gf in &gpu_faces {
                                                     face_geom.push(gf.a);
                                                     face_geom.push(gf.b);
                                                     face_geom.push(gf.c);
                                                     face_geom.push(gf.n);
+                                                }
+                                                // Build neighbor mapping from shared crate (opp A,B,C). Shader uses neighbor ids and perms.
+                                                let mut face_edge_info: Vec<u32> = Vec::with_capacity(20 * 3 * 3);
+                                                for n in &gpu_neighbors {
+                                                    face_edge_info.push(n.opp[0]); face_edge_info.push(0); face_edge_info.push(0);
+                                                    face_edge_info.push(n.opp[1]); face_edge_info.push(0); face_edge_info.push(0);
+                                                    face_edge_info.push(n.opp[2]); face_edge_info.push(0); face_edge_info.push(0);
+                                                }
+                                                // Append perms as tightly packed u32 triplets (3 edges × 3 entries), each entry packs 3 u8: [permA,permB,permC]
+                                                let mut face_perm_info: Vec<u32> = Vec::with_capacity(20 * 3);
+                                                for gp in &gpu_perms {
+                                                    for e in 0..3 {
+                                                        let p = gp.perm_opp[e];
+                                                        let packed = (p[0] as u32) | ((p[1] as u32) << 8) | ((p[2] as u32) << 16);
+                                                        face_perm_info.push(packed);
+                                                    }
                                                 }
                                                 let dbg = (if ov.gpu_dbg_wire { 1u32 } else { 0 })
                                                     | (if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 })
@@ -1167,15 +1229,8 @@ fn main() {
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 })
                                                     | 0u32;
-                                                // Build neighbor mapping from shared crate (opp A,B,C). Shader only uses the first u32 per triplet.
-                                                let mut face_edge_info: Vec<u32> = Vec::with_capacity(20 * 3 * 3);
-                                                for n in &gpu_neighbors {
-                                                    face_edge_info.push(n.opp[0]); face_edge_info.push(0); face_edge_info.push(0);
-                                                    face_edge_info.push(n.opp[1]); face_edge_info.push(0); face_edge_info.push(0);
-                                                    face_edge_info.push(n.opp[2]); face_edge_info.push(0); face_edge_info.push(0);
-                                                }
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m, &face_edge_info);
+                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
                                                 if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
@@ -1290,7 +1345,7 @@ fn main() {
                                                                     let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                     let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                     let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
-                                                                    let cl = lat.cos(); let p = Vec3::new(cl*lon.cos(), lat.sin(), cl*lon.sin()).norm();
+                                                                    let cl = lat.cos(); let p = Vec3::new(cl*lon.cos(), lat.sin(), -cl*lon.sin()).norm();
                                                                     let cpu = picker.pick_from_unit(p, f);
                                                                     let tri_cpu_global = cpu.face * f * f + cpu.tri;
                                                                     if face_gpu != cpu.face { face_mismatches += 1; mismatches += 1; }
@@ -1326,7 +1381,7 @@ fn main() {
                                                                         let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                         let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                         let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
-                                                                        let cl = lat.cos(); let p = [cl*lon.cos(), lat.sin(), cl*lon.sin()];
+                                                                        let cl = lat.cos(); let p = [cl*lon.cos(), lat.sin(), -cl*lon.sin()];
                                                                         // Sim path using FACE_GEOM
                                                                         let mut best_f = 0usize; let mut bd = -1e9f32;
                                                                         for fidx in 0..20usize { let n = fc.face_geom[fidx*4+3]; let d = n[0]*p[0]+n[1]*p[1]+n[2]*p[2]; if d>bd { bd=d; best_f=fidx; } }
@@ -1371,7 +1426,7 @@ fn main() {
                                                                         let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                         let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                         let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
-                                                                        let cl = lat.cos(); let p = Vec3::new(cl*lon.cos(), lat.sin(), cl*lon.sin()).norm();
+                                                                        let cl = lat.cos(); let p = Vec3::new(cl*lon.cos(), lat.sin(), -cl*lon.sin()).norm();
                                                                         let cpu = picker.pick_from_unit(p, f);
                                                                         if face_gpu != cpu.face {
                                                                             let _ = writeln!(fmm, "{},{},{},{},{},{:.6},{:.6},{:.6}", x, y, face_gpu, cpu.face, cpu.kneg, cpu.w[0], cpu.w[1], cpu.w[2]);
@@ -1394,7 +1449,7 @@ fn main() {
                                                                 let (rw, rh) = ov.raster_size; let f = f_now; let picker = GeoPicker::new();
                                                                 for y in 0..rh { for x in 0..rw {
                                                                     let idx=((y*rw+x)*2) as usize; let face_gpu=buf[idx+0]; let tri_gpu_global=buf[idx+1];
-                                                                    let fx=x as f32+0.5; let fy=y as f32+0.5; let lon=(fx / rw as f32)*std::f32::consts::TAU - std::f32::consts::PI; let lat=std::f32::consts::FRAC_PI_2 - (fy / rh as f32)*std::f32::consts::PI; let cl=lat.cos(); let p=Vec3::new(cl*lon.cos(), lat.sin(), cl*lon.sin()).norm();
+                                                                    let fx=x as f32+0.5; let fy=y as f32+0.5; let lon=(fx / rw as f32)*std::f32::consts::TAU - std::f32::consts::PI; let lat=std::f32::consts::FRAC_PI_2 - (fy / rh as f32)*std::f32::consts::PI; let cl=lat.cos(); let p=Vec3::new(cl*lon.cos(), lat.sin(), -cl*lon.sin()).norm();
                                                                     let cpu = picker.pick_from_unit(p, f);
                                                                     let tri_cpu_global = cpu.face * f * f + cpu.tri; // unify to global scheme like WGSL
                                                                     let diff=(face_gpu!=cpu.face)||(tri_gpu_global!=tri_cpu_global);
@@ -1419,7 +1474,7 @@ fn main() {
                                                                     let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                     let lon = (fx / rw as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                     let lat = std::f32::consts::FRAC_PI_2 - (fy / rh as f32) * std::f32::consts::PI;
-                                                                    let cl = lat.cos(); let p = aule_geo::Vec3 { x: cl*lon.cos(), y: lat.sin(), z: cl*lon.sin() };
+                                                                    let cl = lat.cos(); let p = aule_geo::Vec3 { x: cl*lon.cos(), y: lat.sin(), z: -cl*lon.sin() };
                                                                     // f0: argmax before rollover
                                                                     let f0 = aule_geo::pick_face(p, faces);
                                                                     // Pre-rollover planar barycentrics on f0 (wa0,wb0,wc0)
@@ -1585,14 +1640,27 @@ fn main() {
                             .device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
                         // If globe path is enabled, render globe before egui
-                        if globe_enabled {
+                        if ov.view_mode == overlay::ViewMode::Globe {
                             if let (Some(gr), Some(mesh)) = (pipes.globe.as_ref(), pipes.globe_mesh.as_ref()) {
                                 // Update uniforms and draw
+                                // Apply UI exaggeration to uniforms
                                 let view_proj = pipes.globe_cam.as_ref().unwrap().view_proj();
                                 let radius = 1.0f32;
-                                let exagger = 0.0f32;
+                                let exagger = ov.globe.exaggeration;
                                 let dbg_flags = 0u32;
-                                gr.update_uniforms(&gpu.queue, view_proj, radius, exagger, dbg_flags);
+                                // Keep LUT in sync with overlay palette
+                                gr.write_lut_from_overlay(&gpu.queue, &ov);
+                                // If world changed, refresh vertex heights
+                                if ov.world_dirty { gr.upload_heights(&gpu.queue, &world.depth_m); }
+                                gr.update_uniforms(
+                                    &gpu.queue,
+                                    view_proj,
+                                    radius,
+                                    exagger,
+                                    dbg_flags,
+                                    ov.hypso_d_max,
+                                    ov.hypso_h_max,
+                                );
                                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                     label: Some("globe pass"),
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1600,11 +1668,16 @@ fn main() {
                                         resolve_target: None,
                                         ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }), store: wgpu::StoreOp::Store },
                                     })],
-                                    depth_stencil_attachment: None,
+                                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                        view: &gpu.depth_view,
+                                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                                        stencil_ops: None,
+                                    }),
                                     occlusion_query_set: None,
                                     timestamp_writes: None,
                                 });
                                 gr.draw(&mut rpass, mesh);
+                                if ov.globe.show_wireframe { gr.draw_lines(&mut rpass, mesh); }
                             }
                         }
 

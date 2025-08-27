@@ -1,6 +1,6 @@
 // Keep imports minimal to ease no-std migration if needed
 
-pub const EPS_ROLLOVER: f32 = 1.0e-6;
+pub const EPS_ROLLOVER: f32 = 1.0e-7;
 pub const EPS_UPPER: f32 = 1.0e-6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -12,21 +12,15 @@ pub struct Vec3 {
 
 impl Vec3 {
     pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+    #[must_use]
     pub fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
-    pub fn add(self, o: Self) -> Self {
-        Self::new(self.x + o.x, self.y + o.y, self.z + o.z)
-    }
-    pub fn sub(self, o: Self) -> Self {
-        Self::new(self.x - o.x, self.y - o.y, self.z - o.z)
-    }
-    pub fn mul(self, k: f32) -> Self {
-        Self::new(self.x * k, self.y * k, self.z * k)
-    }
+    #[must_use]
     pub fn dot(self, o: Self) -> f32 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
+    #[must_use]
     pub fn cross(self, o: Self) -> Self {
         Self::new(
             self.y * o.z - self.z * o.y,
@@ -34,16 +28,44 @@ impl Vec3 {
             self.x * o.y - self.y * o.x,
         )
     }
+    #[must_use]
     pub fn length(self) -> f32 {
         self.dot(self).sqrt()
     }
+    #[must_use]
     pub fn normalized(self) -> Self {
         let l = self.length();
         if l == 0.0 {
             self
         } else {
-            self.mul(1.0 / l)
+            Self::new(self.x / l, self.y / l, self.z / l)
         }
+    }
+}
+
+use core::ops::{Add, Mul, Sub};
+
+impl Add for Vec3 {
+    type Output = Self;
+    #[must_use]
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+}
+
+impl Sub for Vec3 {
+    type Output = Self;
+    #[must_use]
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+    }
+}
+
+impl Mul<f32> for Vec3 {
+    type Output = Self;
+    #[must_use]
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
     }
 }
 
@@ -68,36 +90,74 @@ impl FaceGeom {
     #[allow(clippy::similar_names)]
     pub fn ensure_outward_ccw(mut self) -> Self {
         // Outward iff dot(normal, centroid) > 0
-        let ab = self.b.sub(self.a);
-        let ac = self.c.sub(self.a);
+        let ab = self.b - self.a;
+        let ac = self.c - self.a;
         let mut n = ab.cross(ac).normalized();
-        let centroid = self.a.add(self.b).add(self.c);
+        let centroid = self.a + self.b + self.c;
         if n.dot(centroid) < 0.0 {
             // Flip winding B <-> C
             std::mem::swap(&mut self.b, &mut self.c);
-            let edge_ab = self.b.sub(self.a);
-            let edge_ac = self.c.sub(self.a);
+            let edge_ab = self.b - self.a;
+            let edge_ac = self.c - self.a;
             n = edge_ab.cross(edge_ac).normalized();
         }
         self.n = n;
         self
     }
+
+    /// Compute gnomonic barycentrics for point p on the unit sphere using tangent basis at face centroid.
+    /// Returns (α,β,γ). This reduces distortion near edges.
+    #[must_use]
+    pub fn barycentrics_gnomonic(&self, point: Vec3) -> [f32; 3] {
+        // Face centroid (approx) and orthonormal basis in tangent plane
+        let centroid_dir = (self.a + self.b + self.c).normalized();
+        let tangent_u = (self.a - centroid_dir * self.a.dot(centroid_dir)).normalized();
+        let tangent_v = centroid_dir.cross(tangent_u).normalized();
+        // Project triangle corners to tangent plane using gnomonic projection
+        let proj = |vertex: Vec3| -> (f32, f32) {
+            let denom = vertex.dot(centroid_dir).max(1e-9);
+            let inv_denom = 1.0 / denom;
+            let proj_x = vertex.dot(tangent_u) * inv_denom;
+            let proj_y = vertex.dot(tangent_v) * inv_denom;
+            (proj_x, proj_y)
+        };
+        let (ax, ay) = proj(self.a);
+        let (bx, by) = proj(self.b);
+        let (cx, cy) = proj(self.c);
+        let (px, py) = proj(point);
+        // Planar barycentrics in tangent plane
+        let edge0_x = bx - ax; let edge0_y = by - ay;
+        let edge1_x = cx - ax; let edge1_y = cy - ay;
+        let delta_x = px - ax; let delta_y = py - ay;
+        let m_e0e0 = edge0_x * edge0_x + edge0_y * edge0_y;
+        let m_e0e1 = edge0_x * edge1_x + edge0_y * edge1_y;
+        let m_e1e1 = edge1_x * edge1_x + edge1_y * edge1_y;
+        let m_pe0 = delta_x * edge0_x + delta_y * edge0_y;
+        let m_pe1 = delta_x * edge1_x + delta_y * edge1_y;
+        let denom = (m_e0e0 * m_e1e1 - m_e0e1 * m_e0e1).max(1e-12);
+        let beta = (m_e1e1 * m_pe0 - m_e0e1 * m_pe1) / denom;
+        let gamma = (m_e0e0 * m_pe1 - m_e0e1 * m_pe0) / denom;
+        let alpha = 1.0 - beta - gamma;
+        [alpha, beta, gamma]
+    }
 }
 
 /// Argmax `dot(N_f, p)`. Assumes all `FaceGeom` have outward n.
+/// # Panics
+/// Panics if the best face index does not fit into `u32` (should never happen).
 #[inline]
 #[must_use]
 pub fn pick_face(p: Vec3, faces: &[FaceGeom]) -> FaceId {
-    let mut best_i = 0u32;
+    let mut best_i: usize = 0;
     let mut best_d = f32::NEG_INFINITY;
     for (i, f) in faces.iter().enumerate() {
         let d = f.n.dot(p);
-        if d > best_d || (d == best_d && (i as u32) < best_i) {
+        if d > best_d || ((d - best_d).abs() <= f32::EPSILON && i < best_i) {
             best_d = d;
-            best_i = i as u32;
+            best_i = i;
         }
     }
-    best_i
+    core::convert::TryFrom::try_from(best_i).expect("face index fits in u32")
 }
 
 /// Project p onto face plane and compute planar barycentrics (α,β,γ) wrt (A,B,C).
@@ -105,13 +165,13 @@ pub fn pick_face(p: Vec3, faces: &[FaceGeom]) -> FaceId {
 #[must_use]
 pub fn barycentrics_plane(p: Vec3, f: &FaceGeom) -> [f32; 3] {
     // Plane projection
-    let to_plane = f.n.mul(f.n.dot(p)); // component along n
-    let p_proj = p.sub(to_plane);
+    let to_plane = f.n * f.n.dot(p); // component along n
+    let p_proj = p - to_plane;
 
     // Build local basis at A
-    let v0 = f.b.sub(f.a);
-    let v1 = f.c.sub(f.a);
-    let v2 = p_proj.sub(f.a);
+    let v0 = f.b - f.a;
+    let v1 = f.c - f.a;
+    let v2 = p_proj - f.a;
 
     let dot00 = v0.dot(v0);
     let dot01 = v0.dot(v1);
@@ -213,7 +273,8 @@ pub fn lattice_from_ab(alpha: f32, beta: f32, f: u32, eps_upper: f32) -> (u32, u
         rv = 1.0 - rv;
     }
 
-    let upper = (ru + rv) >= (1.0 - eps_upper);
+    // Strict '>' for upper; diagonal belongs to lower
+    let upper = (ru + rv) > (1.0 - eps_upper);
     (u, v, upper)
 }
 
@@ -239,5 +300,7 @@ impl TriIndex {
 pub fn sph_to_unit(lon: f32, lat: f32) -> Vec3 {
     let (slon, clon) = lon.sin_cos();
     let (slat, clat) = lat.sin_cos();
-    Vec3 { x: clon * clat, y: slat, z: slon * clat }
+    // Canonical mapping (note the minus on z):
+    // x = cos(lat) * cos(lon), y = sin(lat), z = -cos(lat) * sin(lon)
+    Vec3 { x: clon * clat, y: slat, z: -slon * clat }
 }

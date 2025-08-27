@@ -15,7 +15,7 @@ pub fn export_raster_debug_csv(
 
     let w = width as f32;
     let h = height as f32;
-    let F = world.grid.frequency;
+    let f = world.grid.frequency;
     let (face_ids_ref, face_offs_ref) = world.grid.face_vertex_table();
     let face_ids: &[u32] = face_ids_ref;
     let face_offs: &[u32] = face_offs_ref;
@@ -122,9 +122,9 @@ pub fn export_raster_debug_csv(
             }
             // Compute final barycentrics in confirmed face and clamp/renormalize
             let tri = corners[final_face as usize];
-            let A = world.grid.pos_xyz[tri[0] as usize];
-            let B = world.grid.pos_xyz[tri[1] as usize];
-            let C = world.grid.pos_xyz[tri[2] as usize];
+            let a = world.grid.pos_xyz[tri[0] as usize];
+            let b = world.grid.pos_xyz[tri[1] as usize];
+            let c = world.grid.pos_xyz[tri[2] as usize];
             let n = normalize(cross(sub(B, A), sub(C, A)));
             let t = dot(n, sub(p, A));
             let q = sub(p, scale(n, t));

@@ -4,6 +4,21 @@ use egui::{
 };
 use std::collections::HashMap;
 use std::time::Instant;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Map,
+    Globe,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlobeUi {
+    pub exaggeration: f32,
+    pub show_wireframe: bool,
+    pub show_probe: bool,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub radius: f32,
+}
 
 #[allow(dead_code)]
 const R_EARTH_M: f32 = 6_371_000.0;
@@ -274,6 +289,10 @@ pub struct OverlayState {
     pub cadence_sub_every: u32,
     pub cadence_flx_every: u32,
     pub cadence_sea_every: u32,
+
+    // View toggle and globe controls (T-701)
+    pub view_mode: ViewMode,
+    pub globe: GlobeUi,
 }
 
 impl Default for OverlayState {
@@ -475,7 +494,7 @@ impl Default for OverlayState {
 
             show_parity_heat: false,
             parity_points: None,
-            export_parity_csv_requested: true,
+            export_parity_csv_requested: false,
             force_cpu_face_pick: false,
 
             adv_open_kinematics: false,
@@ -499,6 +518,16 @@ impl Default for OverlayState {
             cadence_sub_every: 10,
             cadence_flx_every: 10,
             cadence_sea_every: 1,
+
+            view_mode: ViewMode::Globe,
+            globe: GlobeUi {
+                exaggeration: 1.5,
+                show_wireframe: false,
+                show_probe: true,
+                yaw: 0.6,
+                pitch: 0.3,
+                radius: 1.15,
+            },
         }
     }
 }

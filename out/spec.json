@@ -1,0 +1,1000 @@
+{
+  "icosa": {
+    "faces": [
+      {
+        "id": 0,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0,
+            0.525731,
+            0.850651
+          ],
+          [
+            -0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          -0.57735,
+          0.57735,
+          0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 1,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 4,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 6,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            0.525731,
+            0.850651
+          ],
+          [
+            0.525731,
+            0.850651,
+            0
+          ],
+          [
+            -0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0,
+          0.934172,
+          0.356822
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 2,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 0,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 5,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.525731,
+            0.850651,
+            0
+          ],
+          [
+            0,
+            0.525731,
+            -0.850651
+          ],
+          [
+            -0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0,
+          0.934172,
+          -0.356822
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 3,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 1,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 9,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            0.525731,
+            -0.850651
+          ],
+          [
+            -0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            -0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          -0.57735,
+          0.57735,
+          -0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 4,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 2,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 8,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            -0.850651,
+            0,
+            0.525731
+          ],
+          [
+            -0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          -0.934172,
+          0.356822,
+          0
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 0,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 3,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 7,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            0.525731,
+            0.850651
+          ],
+          [
+            0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0.525731,
+            0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0.57735,
+          0.57735,
+          0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 19,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 1,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 15,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0,
+            -0.525731,
+            0.850651
+          ],
+          [
+            0,
+            0.525731,
+            0.850651
+          ]
+        ],
+        "normal": [
+          -0.356822,
+          0,
+          0.934172
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 15,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 0,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 16,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            -0.525731,
+            -0.850651,
+            0
+          ],
+          [
+            -0.850651,
+            0,
+            0.525731
+          ]
+        ],
+        "normal": [
+          -0.934172,
+          -0.356822,
+          0
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 16,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 4,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 17,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            0.525731,
+            -0.850651
+          ],
+          [
+            0,
+            -0.525731,
+            -0.850651
+          ],
+          [
+            -0.850651,
+            0,
+            -0.525731
+          ]
+        ],
+        "normal": [
+          -0.356822,
+          0,
+          -0.934172
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 17,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 3,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 18,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.525731,
+            0.850651,
+            0
+          ],
+          [
+            0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            0,
+            0.525731,
+            -0.850651
+          ]
+        ],
+        "normal": [
+          0.57735,
+          0.57735,
+          -0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 18,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 2,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 19,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0,
+            -0.525731,
+            0.850651
+          ],
+          [
+            0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0.57735,
+          -0.57735,
+          0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 11,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 14,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 15,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            -0.525731,
+            0.850651
+          ],
+          [
+            -0.525731,
+            -0.850651,
+            0
+          ],
+          [
+            0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0,
+          -0.934172,
+          0.356822
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 12,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 10,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 16,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.525731,
+            -0.850651,
+            0
+          ],
+          [
+            0,
+            -0.525731,
+            -0.850651
+          ],
+          [
+            0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0,
+          -0.934172,
+          -0.356822
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 13,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 11,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 17,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            -0.525731,
+            -0.850651
+          ],
+          [
+            0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0.57735,
+          -0.57735,
+          -0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 14,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 12,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 18,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          0.934172,
+          -0.356822,
+          0
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 10,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 13,
+            "perm": "(A,B,C)->(B',A',C')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 19,
+            "perm": "(A,B,C)->(A',C',B')"
+          }
+        ]
+      },
+      {
+        "id": 15,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.850651,
+            0,
+            0.525731
+          ],
+          [
+            0,
+            0.525731,
+            0.850651
+          ],
+          [
+            0,
+            -0.525731,
+            0.850651
+          ]
+        ],
+        "normal": [
+          0.356822,
+          0,
+          0.934172
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 6,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 10,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 5,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 16,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            -0.525731,
+            0.850651
+          ],
+          [
+            -0.850651,
+            0,
+            0.525731
+          ],
+          [
+            -0.525731,
+            -0.850651,
+            0
+          ]
+        ],
+        "normal": [
+          -0.57735,
+          -0.57735,
+          0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 7,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 11,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 6,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 17,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            -0.525731,
+            -0.850651,
+            0
+          ],
+          [
+            -0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            0,
+            -0.525731,
+            -0.850651
+          ]
+        ],
+        "normal": [
+          -0.57735,
+          -0.57735,
+          -0.57735
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 8,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 12,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 7,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 18,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0,
+            -0.525731,
+            -0.850651
+          ],
+          [
+            0,
+            0.525731,
+            -0.850651
+          ],
+          [
+            0.850651,
+            0,
+            -0.525731
+          ]
+        ],
+        "normal": [
+          0.356822,
+          0,
+          -0.934172
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 9,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 13,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 8,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      },
+      {
+        "id": 19,
+        "corner_order": [
+          "A",
+          "B",
+          "C"
+        ],
+        "corners_xyz_ccw_outward": true,
+        "corners": [
+          [
+            0.850651,
+            0,
+            -0.525731
+          ],
+          [
+            0.525731,
+            0.850651,
+            0
+          ],
+          [
+            0.850651,
+            0,
+            0.525731
+          ]
+        ],
+        "normal": [
+          0.934172,
+          0.356822,
+          0
+        ],
+        "neighbors_opp": [
+          {
+            "edge": "BC (opp A)",
+            "face_id": 5,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "CA (opp B)",
+            "face_id": 14,
+            "perm": "(A,B,C)->(A',C',B')"
+          },
+          {
+            "edge": "AB (opp C)",
+            "face_id": 9,
+            "perm": "(A,B,C)->(B',A',C')"
+          }
+        ]
+      }
+    ],
+    "tie_breaks": {
+      "face_pick": "argmax dot(n, p) | tie→lowest face id",
+      "upper_tri_rule": "fu+fv>(1-eps) picks upper within cell; otherwise lower"
+    }
+  },
+  "mapping": {
+    "lonlat_to_xyz": "x=cos(lat)*cos(lon), y=sin(lat), z=-cos(lat)*sin(lon)",
+    "lon_range": "[-π, π]",
+    "lat_range": "[-π/2, π/2]",
+    "pixel_center": "u=(x+0.5)/W, v=(y+0.5)/H",
+    "projection": "equirectangular",
+    "face_pick_policy": "argmax dot(normal, p) with epsilon E=1e-12"
+  },
+  "lattice": {
+    "class": "Class-I triangular",
+    "indexing": {
+      "row_linearization": "row_base(i)=i*(F+1) - (i*(i-1))/2",
+      "idx": "Per-row packed; see triangles order in THREE.PolyhedronGeometry"
+    },
+    "bary_to_lattice": {
+      "alpha_beta": "u=α*F, v=β*F",
+      "reflect": "if floor(u)+floor(v) >= F then clamp into domain",
+      "which_upper": "isUpper when frac(u)+frac(v) > 1-eps",
+      "epsilons": {
+        "bary": "1e-12",
+        "reflect": "1e-12"
+      }
+    },
+    "triangles": {
+      "per_face": "F^2",
+      "lower_order": "[i,j]→[i+1,j]→[i,j+1]",
+      "upper_order": "[i+1,j]→[i+1,j+1]→[i,j+1]",
+      "winding_ccw_outward": true
+    }
+  }
+}

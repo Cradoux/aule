@@ -116,3 +116,9 @@ impl GeoPicker {
         self.pick_face_tri_from_p(p, f_subdiv)
     }
 }
+
+impl Default for GeoPicker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
