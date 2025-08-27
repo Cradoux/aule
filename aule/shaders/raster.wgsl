@@ -23,6 +23,8 @@ struct Uniforms {
 // bindings 8 and 9 were previously triangle tables; no longer used
 // binding(10): packed neighbor edge info: for each face (0..20), for edge idx 0..2 (opp A,B,C), store [neighbor_face, idx_shared0, idx_shared1]
 @group(0) @binding(10) var<storage, read> FACE_EDGE_INFO: array<u32>;
+// binding(13): packed corner permutations: for each face and edge, a u32 packs three u8 mapping (A,B,C)->(A',B',C') indices
+@group(0) @binding(13) var<storage, read> FACE_PERM_INFO: array<u32>;
 // binding(11): per-pixel debug output: [face, tri_idx] for each pixel (x,y)
 @group(0) @binding(11) var<storage, read_write> DEBUG_FACE_TRI: array<u32>;
 // binding(12): optional CPU-provided per-pixel face pick (row-major), enabled by debug bit 7
@@ -35,6 +37,11 @@ const EPS_UPPER: f32 = 1e-6;
 fn dot3(a: vec3<f32>, b: vec3<f32>) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z; }
 fn cross3(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return vec3<f32>(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
 fn norm3(a: vec3<f32>) -> vec3<f32> { let l = max(length(a), 1e-9); return a / l; }
+fn proj_gnomonic_vec(v: vec3<f32>, Cn: vec3<f32>, t0: vec3<f32>, t1: vec3<f32>) -> vec2<f32> {
+  let denom = max(dot3(v, Cn), 1e-9);
+  let k = 1.0 / denom;
+  return vec2<f32>(dot3(v, t0) * k, dot3(v, t1) * k);
+}
 fn sph_area(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> f32 {
   let num = abs(dot3(cross3(a, b), c));
   let den = 1.0 + dot3(a, b) + dot3(b, c) + dot3(c, a);
@@ -65,24 +72,26 @@ fn face_pick(p: vec3<f32>) -> u32 {
   return best_f;
 }
 
-fn barycentric_in_face_raw(p: vec3<f32>, A: vec3<f32>, B: vec3<f32>, C: vec3<f32>) -> vec3<f32> {
-  // Plane-projection barycentrics to match CPU exactly (raw, unclamped)
-  let n = norm3(cross3(B - A, C - A));
-  let t = dot3(n, p - A);
-  let q = p - n * t;
-  let v0 = B - A;
-  let v1 = C - A;
-  let v2 = q - A;
-  let d00 = dot3(v0, v0);
-  let d01 = dot3(v0, v1);
-  let d11 = dot3(v1, v1);
-  let d20 = dot3(v2, v0);
-  let d21 = dot3(v2, v1);
+fn barycentric_gnomonic(p: vec3<f32>, A: vec3<f32>, B: vec3<f32>, C: vec3<f32>) -> vec3<f32> {
+  // Gnomonic projection onto tangent plane at face centroid, then planar barycentrics
+  let Cn = norm3(A + B + C);
+  let t0 = norm3(A - Cn * dot3(A, Cn));
+  let t1 = norm3(cross3(Cn, t0));
+  let a2 = proj_gnomonic_vec(A, Cn, t0, t1);
+  let b2 = proj_gnomonic_vec(B, Cn, t0, t1);
+  let c2 = proj_gnomonic_vec(C, Cn, t0, t1);
+  let p2 = proj_gnomonic_vec(p, Cn, t0, t1);
+  let v0 = b2 - a2; let v1 = c2 - a2; let v2 = p2 - a2;
+  let d00 = dot(v0, v0);
+  let d01 = dot(v0, v1);
+  let d11 = dot(v1, v1);
+  let d20 = dot(v2, v0);
+  let d21 = dot(v2, v1);
   let denom = max(d00 * d11 - d01 * d01, 1e-12);
-  let w_b = (d11 * d20 - d01 * d21) / denom;
-  let w_c = (d00 * d21 - d01 * d20) / denom;
-  let w_a = 1.0 - w_b - w_c;
-  return vec3<f32>(w_a, w_b, w_c);
+  let wb = (d11 * d20 - d01 * d21) / denom;
+  let wc = (d00 * d21 - d01 * d20) / denom;
+  let wa = 1.0 - wb - wc;
+  return vec3<f32>(wa, wb, wc);
 }
 
 @compute @workgroup_size(8,8,1)
@@ -93,7 +102,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lon = (fx / f32(U.width)) * 6.2831853 - 3.14159265;
   let lat = 1.57079633 - (fy / f32(U.height)) * 3.14159265;
   let cl = cos(lat);
-  let p = vec3<f32>(cl * cos(lon), sin(lat), cl * sin(lon));
+  // Spec mapping: z has a minus sign
+  let p = vec3<f32>(cl * cos(lon), sin(lat), -cl * sin(lon));
 
   var f: u32 = face_pick(p);
   if ((U.debug_flags & (1u<<7)) != 0u) {
@@ -106,17 +116,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let f_cpu = CPU_FACE[lin];
     f = f_cpu;
   }
-  // One-step neighbor rollover if outside
+  // Neighbor rollover if outside (allow up to 2 hops to cover corners), with corner permutation mapping
   var A = FACE_GEOM[4u*f + 0u].xyz;
   var B = FACE_GEOM[4u*f + 1u].xyz;
   var C = FACE_GEOM[4u*f + 2u].xyz;
   // Raw barycentrics for rollover decision
-  var bc = barycentric_in_face_raw(p, A, B, C);
+  var bc = barycentric_gnomonic(p, A, B, C);
   let f0 = f;
   let bc0 = bc;
   let eps_roll = EPS_ROLLOVER;
-  // One-hop neighbor rollover per spec
-  for (var s: u32 = 0u; s < 1u; s = s + 1u) {
+  // Allow up to 2 hops
+  for (var s: u32 = 0u; s < 2u; s = s + 1u) {
     if (bc.x >= -eps_roll && bc.y >= -eps_roll && bc.z >= -eps_roll) { break; }
     // pick edge: 0->opp A, 1->opp B, 2->opp C
     var edge: u32 = 0u;
@@ -124,41 +134,66 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     else if (bc.y < bc.z) { edge = 1u; } else { edge = 2u; }
     let off = (f * 3u + edge) * 3u;
     let nf = FACE_EDGE_INFO[off + 0u];
+    // Apply corner permutation to barycentrics before recomputing on neighbor
+    // Packed u32 at FACE_PERM_INFO[f*3 + edge]: bytes [pA, pB, pC]
+    let packed = FACE_PERM_INFO[f * 3u + edge];
+    let pA = u32(packed & 0xFFu);
+    let pB = u32((packed >> 8) & 0xFFu);
+    let pC = u32((packed >> 16) & 0xFFu);
+    var next_bc = vec3<f32>(0.0, 0.0, 0.0);
+    // Map (A,B,C) weights into neighbor ordering
+    // If pA==0 → A' gets bc.x; if 1 → B' gets bc.x; if 2 → C' gets bc.x
+    if (pA == 0u) { next_bc.x += bc.x; }
+    if (pA == 1u) { next_bc.y += bc.x; }
+    if (pA == 2u) { next_bc.z += bc.x; }
+    if (pB == 0u) { next_bc.x += bc.y; }
+    if (pB == 1u) { next_bc.y += bc.y; }
+    if (pB == 2u) { next_bc.z += bc.y; }
+    if (pC == 0u) { next_bc.x += bc.z; }
+    if (pC == 1u) { next_bc.y += bc.z; }
+    if (pC == 2u) { next_bc.z += bc.z; }
     f = nf;
     A = FACE_GEOM[4u*f + 0u].xyz;
     B = FACE_GEOM[4u*f + 1u].xyz;
     C = FACE_GEOM[4u*f + 2u].xyz;
-    // Recompute barycentrics in the neighbor face's basis (destination perspective)
-    bc = barycentric_in_face_raw(p, A, B, C);
+    // Use permuted weights as starting point, then re-evaluate for robustness
+    // Gate rollover strictly to near-edge cases only
+    let eps = EPS_ROLLOVER;
+    let minv = min(bc.x, min(bc.y, bc.z));
+    let near_edge = abs(minv) <= eps;
+    if (!near_edge) { break; }
+    bc = barycentric_gnomonic(p, A, B, C);
   }
   // Seam probe write: [f0, kneg (from bc0), nf (neighbor if hop else f0), f1] - REMOVED
-  // Clamp tiny negatives and renormalize to keep inside
-  let uu = max(bc.x, 0.0);
-  let vv = max(bc.y, 0.0);
-  let ww = max(bc.z, 0.0);
-  let s_bc = max(uu + vv + ww, 1e-9);
-  bc = vec3<f32>(uu/s_bc, vv/s_bc, ww/s_bc);
+  // Clamp tiny negatives only for display but preserve sums for lattice mapping above
+  var bc_for_weights = bc;
+  bc_for_weights = max(bc_for_weights, vec3<f32>(0.0, 0.0, 0.0));
+  let s_bc = max(bc_for_weights.x + bc_for_weights.y + bc_for_weights.z, 1e-9);
+  bc_for_weights = bc_for_weights / s_bc;
   // Write raw (alpha,beta) for CPU lattice when debug bit 11 is set - REMOVED
   // Align with CPU lattice and face vertex table:
   // i (rows) follows α toward A (C→A), j (cols) follows β along AB.
   // Therefore u <- α*F (bc.x), v <- β*F (bc.y).
   let F = U.F;
-  var u = clamp(bc.x * f32(F), 0.0, f32(F));
-  var v = clamp(bc.y * f32(F), 0.0, f32(F));
+  // Quantize α→u and β→v; clamp to just below F to avoid iu==F at corners
+  var u = min(bc.x * f32(F), f32(F) - 1e-6);
+  var v = min(bc.y * f32(F), f32(F) - 1e-6);
   var iu: u32 = u32(floor(u));
   var iv: u32 = u32(floor(v));
-  var fu = clamp(u - f32(iu), 1e-4, 1.0 - 1e-4);
-  var fv = clamp(v - f32(iv), 1e-4, 1.0 - 1e-4);
+  var fu = u - f32(iu);
+  var fv = v - f32(iv);
+  // Reflect into principal triangle exactly as CPU does
   if (iu + iv > F - 1u) {
-    let s = iu + iv - (F - 1u);
-    if (fu > fv) { iu = iu - s; }
-    else { iv = iv - s; }
-    // Recompute fractional parts after reflection so weights are consistent
-    fu = clamp(u - f32(iu), 1e-4, 1.0 - 1e-4);
-    fv = clamp(v - f32(iv), 1e-4, 1.0 - 1e-4);
+    iu = (F - 1u) - iu;
+    iv = (F - 1u) - iv;
+    fu = 1.0 - fu;
+    fv = 1.0 - fv;
   }
-  // Authoritative upper rule: diagonal belongs to lower; strict EPS (use raw residuals, not clamped)
-  let upper = ((u - f32(iu)) + (v - f32(iv))) >= (1.0 - EPS_UPPER);
+  // Guard tiny FP noise only after reflection
+  fu = clamp(fu, 0.0, 1.0);
+  fv = clamp(fv, 0.0, 1.0);
+  // Strict '>' for upper
+  let upper = (fu + fv) > (1.0 - EPS_UPPER);
   // Analytic tri index per senior dev: tri_idx = face*F*F + v*(2F - v) + 2*u + (upper?1:0)
   let tri_local = u32(iv) * (2u * F - u32(iv)) + 2u * u32(iu) + select(0u, 1u, upper);
   let tri_idx   = f * F*F + tri_local;

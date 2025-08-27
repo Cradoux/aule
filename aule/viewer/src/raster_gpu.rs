@@ -25,6 +25,7 @@ pub struct RasterGpu {
     pub face_tri_offsets: wgpu::Buffer,
     pub face_tri_indices: wgpu::Buffer,
     pub face_edge_info: wgpu::Buffer,
+    pub face_perm_info: wgpu::Buffer,
     pub debug_face_tri: wgpu::Buffer,
     pub cpu_face_pick: wgpu::Buffer,
     // Removed raw_ab and probe_u32 to stay under storage buffer limits
@@ -157,7 +158,16 @@ impl RasterGpu {
                     },
                     count: None,
                 },
-                // Removed bindings 13 and 14 to stay under storage buffer limits
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -258,7 +268,7 @@ impl RasterGpu {
                 wgpu::BindGroupEntry { binding: 10, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 11, resource: empty.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: empty.as_entire_binding() },
-                // Removed bindings 13 and 14 to stay under storage buffer limits
+                wgpu::BindGroupEntry { binding: 13, resource: empty.as_entire_binding() },
             ],
         });
 
@@ -306,6 +316,12 @@ impl RasterGpu {
             face_edge_info: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("empty_face_edge"),
                 size: 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            face_perm_info: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster face_perm_info"),
+                size: 1,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -366,6 +382,7 @@ impl RasterGpu {
         face_geom: &[[f32; 4]],
         vertex_values: &[f32],
         face_edge_info: &[u32],
+        face_perm_info: &[u32],
     ) {
         // Recreate buffers and upload via write_buffer (no extra deps)
         let u_bytes = Self::pack_uniforms(u);
@@ -497,6 +514,19 @@ impl RasterGpu {
         });
         queue.write_buffer(&self.face_edge_info, 0, &e_bytes);
 
+        // Upload corner permutations (20 faces x 3 edges x packed u32)
+        let mut p_bytes: Vec<u8> = Vec::with_capacity(face_perm_info.len() * 4);
+        for v in face_perm_info {
+            p_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        self.face_perm_info = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster face_perm_info"),
+            size: p_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&self.face_perm_info, 0, &p_bytes);
+
         // Allocate debug face/tri buffer: 2 u32 per pixel
         let dbg_len = (self.width as usize) * (self.height as usize) * 2 * 4;
         self.debug_face_tri = device.create_buffer(&wgpu::BufferDescriptor {
@@ -555,6 +585,10 @@ impl RasterGpu {
                 wgpu::BindGroupEntry {
                     binding: 11,
                     resource: self.debug_face_tri.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.face_perm_info.as_entire_binding(),
                 },
                 // binding 12 only when using CPU face pick; otherwise bind a small dummy to keep layout consistent
                 wgpu::BindGroupEntry {
