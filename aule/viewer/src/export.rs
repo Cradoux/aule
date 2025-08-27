@@ -10,8 +10,8 @@ pub fn export_raster_debug_csv(
     height: u32,
     path: &str,
 ) -> std::io::Result<()> {
-    let mut f = File::create(path)?;
-    writeln!(f, "x,y,lon,lat,face,F,iu,iv,fu,fv,upper,upper_rule,agree,iu_plus_iv,domain_violation,tri_idx,id0,id1,id2,w0,w1,w2,depth_interp,elev_interp,elev_cpu_ref,diff")?;
+    let mut file = File::create(path)?;
+    writeln!(file, "x,y,lon,lat,face,F,iu,iv,fu,fv,upper,upper_rule,agree,iu_plus_iv,domain_violation,tri_idx,id0,id1,id2,w0,w1,w2,depth_interp,elev_interp,elev_cpu_ref,diff")?;
 
     let w = width as f32;
     let h = height as f32;
@@ -43,7 +43,7 @@ pub fn export_raster_debug_csv(
     // Helper: row_base as in shader
     let row_base = |ii: u32| -> u32 {
         let prev = ii.saturating_sub(1);
-        ii * (F + 1) - (ii * prev) / 2
+        ii * (f + 1) - (ii * prev) / 2
     };
 
     for y in 0..height {
@@ -125,12 +125,12 @@ pub fn export_raster_debug_csv(
             let a = world.grid.pos_xyz[tri[0] as usize];
             let b = world.grid.pos_xyz[tri[1] as usize];
             let c = world.grid.pos_xyz[tri[2] as usize];
-            let n = normalize(cross(sub(B, A), sub(C, A)));
-            let t = dot(n, sub(p, A));
+            let n = normalize(cross(sub(b, a), sub(c, a)));
+            let t = dot(n, sub(p, a));
             let q = sub(p, scale(n, t));
-            let v0 = sub(B, A);
-            let v1 = sub(C, A);
-            let v2 = sub(q, A);
+            let v0 = sub(b, a);
+            let v1 = sub(c, a);
+            let v2 = sub(q, a);
             let d00 = dot(v0, v0);
             let d01 = dot(v0, v1);
             let d11 = dot(v1, v1);
@@ -141,21 +141,21 @@ pub fn export_raster_debug_csv(
             let wc = (d00 * d21 - d01 * d20) / denom;
             let mut wa = (1.0 - wb - wc).max(0.0);
             let mut wb = wb.max(0.0);
-            let mut wc = wc.max(0.0);
+            let wc = wc.max(0.0);
             let s = (wa + wb + wc).max(1e-9);
             wa /= s;
             wb /= s;
             let _ = wc / s;
 
             // Lattice mapping consistent with WGSL: u <- w_a*F (α), v <- w_b*F (β)
-            let u = (wa * F as f32).clamp(0.0, F as f32);
-            let v = (wb * F as f32).clamp(0.0, F as f32);
+            let u = (wa * f as f32).clamp(0.0, f as f32);
+            let v = (wb * f as f32).clamp(0.0, f as f32);
             let mut iu = u.floor() as u32;
             let mut iv = v.floor() as u32;
             let mut fu = (u - iu as f32).clamp(1e-4, 1.0 - 1e-4);
             let mut fv = (v - iv as f32).clamp(1e-4, 1.0 - 1e-4);
-            if iu + iv > F - 1 {
-                let s = iu + iv - (F - 1);
+            if iu + iv > f - 1 {
+                let s = iu + iv - (f - 1);
                 if fu > fv {
                     iu -= s;
                 } else {
@@ -164,7 +164,7 @@ pub fn export_raster_debug_csv(
                 fu = (u - iu as f32).clamp(1e-4, 1.0 - 1e-4);
                 fv = (v - iv as f32).clamp(1e-4, 1.0 - 1e-4);
             }
-            let _max_u_row = (F - 1) - iv;
+            let _max_u_row = (f - 1) - iv;
             let eps = 1e-6f32;
             let upper_rule = (fu + fv) >= (1.0 - eps);
             let upper = upper_rule; // authoritative
@@ -172,8 +172,8 @@ pub fn export_raster_debug_csv(
                                     // Canonical tri index per senior dev: tri_idx = face*F*F + v*(2F - v) + 2*u + (upper?1:0)
             let v = iv as u32;
             let u = iu as u32;
-            let tri_local = v * (2 * F - v) + 2 * u + if upper { 1 } else { 0 };
-            let tri_idx = f_id * F * F + tri_local;
+            let tri_local = v * (2 * f - v) + 2 * u + if upper { 1 } else { 0 };
+            let tri_idx = f_id * f * f + tri_local;
             // Vertex ids for current cell
             let base = face_offs[f_id as usize];
             let id_v0 = face_ids[(base + row_base(iu) + iv) as usize];
@@ -203,12 +203,12 @@ pub fn export_raster_debug_csv(
             let diff = elev - elev_cpu;
 
             let iu_plus_iv = (iu + iv) as u32;
-            let domain_violation = if iu_plus_iv > (F - 1) { 1 } else { 0 };
+            let domain_violation = if iu_plus_iv > (f - 1) { 1 } else { 0 };
             let agree = if upper == upper_rule { 1 } else { 0 };
             writeln!(
-                f,
+                file,
                 "{},{},{:.6},{:.6},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
-                x, y, lon, lat, f_id, F, iu, iv, fu, fv, upper as u32, upper_rule as u32, agree, iu_plus_iv, domain_violation, tri_idx, id0, id1, id2, ww0, ww1, ww2, depth, elev, elev_cpu, diff
+                x, y, lon, lat, f_id, f, iu, iv, fu, fv, upper as u32, upper_rule as u32, agree, iu_plus_iv, domain_violation, tri_idx, id0, id1, id2, ww0, ww1, ww2, depth, elev, elev_cpu, diff
             )?;
         }
     }

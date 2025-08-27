@@ -60,8 +60,12 @@ pub mod surface;
 /// High-F tiling plan (T-455)
 pub mod tileplan;
 pub use world::{SimplePreset, SimpleReport};
+/// Centralized physics pipeline for Simple/Advanced.
+pub mod pipeline;
 /// Transform pull-apart/restraining bands (CPU pass).
 pub mod transforms;
+/// Small utilities.
+pub mod util;
 /// World state.
 pub mod world;
 

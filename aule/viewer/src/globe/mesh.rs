@@ -27,7 +27,7 @@ pub fn build_globe_mesh(device: &wgpu::Device, grid: &engine::grid::Grid) -> Glo
     // Indices: use per-face triangulation with shared vertex ids, exactly as Grid::new built tris
     let f = grid.freq();
     let fz = f as usize;
-    let mut indices: Vec<u32> = Vec::with_capacity((20 * fz * fz * 3) as usize);
+    let mut indices: Vec<u32> = Vec::with_capacity(20 * fz * fz * 3);
     let (face_vert_ids, face_offsets) = grid.face_vertex_table();
     let row_base = |ii: u32| -> u32 { ii * (f + 1) - (ii * ii.saturating_sub(1)) / 2 };
     let idx_at = |face: usize, i: u32, j: u32| -> u32 {

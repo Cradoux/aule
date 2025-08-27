@@ -1,4 +1,12 @@
 //! Continental rifting and passive margins (MVP, deterministic).
+//!
+//! Science caveats:
+//! - Thinning rate scales with mean opening speed and is distributed symmetrically from dual
+//!   distance fields. This ignores along-strike segmentation and 3D necking effects.
+//! - Subsidence is Airy-like (local) and applied directly to `depth_m`; without flexural coupling
+//!   the resulting profiles lack forebulge/trough. Treat outputs as qualitative.
+//! - Oceanization reduces C inside core bands toward an `ocean_thresh`; this is a crude proxy for
+//!   continental breakup and does not conserve crustal mass.
 
 use crate::{
     boundaries::{Boundaries, EdgeClass},

@@ -60,7 +60,42 @@ pub fn advect_plate_id(
         let r = grid.pos_xyz[i];
         let v = vel_m_per_yr[i];
         let r_src = backtrace_r(r, v, dt_myr);
-        let j = nearest_idx_local(grid, i, r_src);
+        // 1) Fast local guess using start cell's 1-2 ring
+        let mut j = nearest_idx_local(grid, i, r_src);
+        // 2) Robustify via bounded hill-climb over neighbour rings to reduce missed matches
+        let mut best_d2 = {
+            let dx = grid.pos_xyz[j][0] - r_src[0];
+            let dy = grid.pos_xyz[j][1] - r_src[1];
+            let dz = grid.pos_xyz[j][2] - r_src[2];
+            dx * dx + dy * dy + dz * dz
+        };
+        // Up to 12 iterations of greedy improvement
+        for _ in 0..24 {
+            let mut improved = false;
+            // Check 1-ring and 2-ring around current best
+            let try_idx =
+                |k: usize, j_cur: &mut usize, d2_best: &mut f32, improved_flag: &mut bool| {
+                    let p = grid.pos_xyz[k];
+                    let dx = p[0] - r_src[0];
+                    let dy = p[1] - r_src[1];
+                    let dz = p[2] - r_src[2];
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 < *d2_best || ((d2 - *d2_best).abs() <= f32::EPSILON && k < *j_cur) {
+                        *d2_best = d2;
+                        *j_cur = k;
+                        *improved_flag = true;
+                    }
+                };
+            for &k in &grid.n1[j] {
+                try_idx(k as usize, &mut j, &mut best_d2, &mut improved);
+            }
+            for &k in &grid.n2[j] {
+                try_idx(k as usize, &mut j, &mut best_d2, &mut improved);
+            }
+            if !improved {
+                break;
+            }
+        }
         plate_id_out[i] = plate_id_in[j];
     }
 }

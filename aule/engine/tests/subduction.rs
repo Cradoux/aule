@@ -35,7 +35,9 @@ fn determinism_and_idempotence() {
         rollback_rate_km_per_myr: 0.0,
         backarc_extension_mode: false,
         backarc_extension_deepen_m: 600.0,
+        continent_c_min: 0.6,
     };
+    let zero_c: Vec<f32> = vec![0.0; g.cells];
     let r1 = subduction::apply_subduction(
         &g,
         &b,
@@ -44,6 +46,7 @@ fn determinism_and_idempotence() {
         &plates.vel_en,
         &mut depth,
         p,
+        Some(&zero_c),
     );
     let depth_after_once = depth.clone();
     let r2 = subduction::apply_subduction(
@@ -54,6 +57,7 @@ fn determinism_and_idempotence() {
         &plates.vel_en,
         &mut depth,
         p,
+        Some(&zero_c),
     );
     assert_eq!(r1.stats.trench_cells, r2.stats.trench_cells);
     assert_eq!(r1.stats.arc_cells, r2.stats.arc_cells);
@@ -88,7 +92,9 @@ fn bathy_signs() {
         rollback_rate_km_per_myr: 0.0,
         backarc_extension_mode: false,
         backarc_extension_deepen_m: 600.0,
+        continent_c_min: 0.6,
     };
+    let zero_c: Vec<f32> = vec![0.0; g.cells];
     let base = depth.clone();
     let r = subduction::apply_subduction(
         &g,
@@ -98,6 +104,7 @@ fn bathy_signs() {
         &plates.vel_en,
         &mut depth,
         p,
+        Some(&zero_c),
     );
     if r.stats.trench_cells > 0 {
         let mut trench_vals: Vec<f32> = Vec::new();

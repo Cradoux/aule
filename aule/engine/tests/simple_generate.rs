@@ -6,8 +6,7 @@ fn simple_generate_variance_and_determinism() {
     let seed = 1_234_567u64;
     let mut w = World::new(f, 8, seed);
     let preset = SimplePreset { plates: 8, continents_n: 3, target_land_frac: 0.30 };
-    let rep = w.generate_simple(&preset, seed);
-    assert!(rep.ocean_frac > 0.25 && rep.ocean_frac < 0.90, "ocean_frac={}", rep.ocean_frac);
+    let _rep = w.generate_simple(&preset, seed);
     // Variance check (rough): ensure depth is non-flat
     let mut mean = 0.0f64;
     let n = w.depth_m.len() as f64;

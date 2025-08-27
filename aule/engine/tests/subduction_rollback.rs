@@ -37,7 +37,9 @@ fn rollback_shifts_bands_and_extension_deepens_backarc() {
         rollback_rate_km_per_myr: 0.0,
         backarc_extension_mode: false,
         backarc_extension_deepen_m: 600.0,
+        continent_c_min: 0.6,
     };
+    let zero_c: Vec<f32> = vec![0.0; g.cells];
     let r0 = subduction::apply_subduction(
         &g,
         &b,
@@ -46,6 +48,7 @@ fn rollback_shifts_bands_and_extension_deepens_backarc() {
         &plates.vel_en,
         &mut depth0,
         p0,
+        Some(&zero_c),
     );
 
     // Apply 100 km rollback offset
@@ -59,6 +62,7 @@ fn rollback_shifts_bands_and_extension_deepens_backarc() {
         &plates.vel_en,
         &mut depth1,
         p1,
+        Some(&zero_c),
     );
 
     // Arc/back-arc may be zero in tiny synthetic cases; require at least trench or arc presence
@@ -77,6 +81,7 @@ fn rollback_shifts_bands_and_extension_deepens_backarc() {
         &plates.vel_en,
         &mut depth_ext,
         p_ext,
+        Some(&zero_c),
     );
     if r_ext.stats.backarc_cells > 0 {
         let mut d_uplift: Vec<f32> = Vec::new();
@@ -106,6 +111,7 @@ fn rollback_shifts_bands_and_extension_deepens_backarc() {
         &plates.vel_en,
         &mut depth2,
         p1,
+        Some(&zero_c),
     );
     assert_eq!(depth1, depth2);
 }

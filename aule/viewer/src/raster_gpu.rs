@@ -372,6 +372,7 @@ impl RasterGpu {
         bytes
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upload_inputs(
         &mut self,
         device: &wgpu::Device,
@@ -651,7 +652,7 @@ impl RasterGpu {
             px.push(col.b());
             px.push(255);
         }
-        // NonZeroU32::new returns Some for non-zero; since our inputs are compile-time non-zero, bypass fallbacks
+        // Known non-zero constants
         let bpr = std::num::NonZeroU32::new(512 * 4).map(|nz| nz.into()).unwrap_or(512 * 4);
         let rpi = std::num::NonZeroU32::new(1).map(|nz| nz.into()).unwrap_or(1);
         let layout = wgpu::ImageDataLayout {
@@ -716,10 +717,8 @@ impl RasterGpu {
         let data = slice.get_mapped_range();
         let mut out: Vec<u32> = vec![0; bytes_len / 4];
         // Copy bytes into u32 vec (little endian)
-        let mut i = 0usize;
-        for chunk in data.chunks_exact(4) {
+        for (i, chunk) in data.chunks_exact(4).enumerate() {
             out[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            i += 1;
         }
         drop(data);
         staging.unmap();

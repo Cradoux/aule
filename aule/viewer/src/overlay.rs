@@ -15,8 +15,11 @@ pub struct GlobeUi {
     pub exaggeration: f32,
     pub show_wireframe: bool,
     pub show_probe: bool,
+    #[allow(dead_code)]
     pub yaw: f32,
+    #[allow(dead_code)]
     pub pitch: f32,
+    #[allow(dead_code)]
     pub radius: f32,
 }
 
@@ -260,6 +263,12 @@ pub struct OverlayState {
     pub dbg_gpu_face_cpu_lattice: bool,
     pub dbg_rollover_probe: bool,
 
+    // Simple-mode debug toggles (T-646)
+    pub freeze_eta: bool,
+    pub disable_erosion: bool,
+    pub disable_flexure: bool,
+    pub disable_subduction: bool,
+
     // Parity heat overlay (CPU vs GPU)
     pub show_parity_heat: bool,
     pub parity_points: Option<Vec<[u32; 2]>>, // pixel coords in raster space
@@ -496,6 +505,11 @@ impl Default for OverlayState {
             parity_points: None,
             export_parity_csv_requested: false,
             force_cpu_face_pick: false,
+
+            freeze_eta: false,
+            disable_erosion: false,
+            disable_flexure: false,
+            disable_subduction: false,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,

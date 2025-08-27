@@ -4,6 +4,6 @@ pub mod mesh;
 pub mod orbit_cam;
 pub mod pipeline;
 
-pub use mesh::{build_globe_mesh, GlobeMesh, GlobeVertex};
+pub use mesh::{build_globe_mesh, GlobeMesh};
 pub use orbit_cam::OrbitCamera;
 pub use pipeline::GlobeRenderer;

@@ -231,7 +231,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     w0 = ww0 / s; w1 = ww1 / s; w2 = ww2 / s;
   }
   let depth = w0 * VERT_VALUE[id0] + w1 * VERT_VALUE[id1] + w2 * VERT_VALUE[id2];
-  let elev = U.eta_m - depth;
+  var elev = U.eta_m - depth;
+  // Coastline stabilization: snap tiny |elev| band to 0 to avoid checker speckle
+  let coast_eps_m: f32 = 2.0; // safe visual band, does not affect physics
+  if (abs(elev) < coast_eps_m) { elev = 0.0; }
   var c = palette_color_from_lut(elev);
   // Debug wireframe: thin line where any bary weight near edge
   if ((U.debug_flags & 1u) != 0u) {

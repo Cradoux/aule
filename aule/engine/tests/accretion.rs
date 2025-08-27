@@ -29,7 +29,9 @@ fn oc_no_change_when_no_convergence_or_both_oceanic() {
             rollback_rate_km_per_myr: 0.0,
             backarc_extension_mode: false,
             backarc_extension_deepen_m: 0.0,
+            continent_c_min: 0.6,
         },
+        Some(&world.c),
     );
     let c0 = world.c.clone();
     let th0 = world.th_c_m.clone();
