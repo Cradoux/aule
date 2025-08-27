@@ -75,7 +75,9 @@ pub fn step(world: &mut World, p: &StepParams) -> StepStats {
             rollback_rate_km_per_myr: 0.0,
             backarc_extension_mode: false,
             backarc_extension_deepen_m: 600.0,
+            continent_c_min: 0.6,
         },
+        Some(&world.c),
     );
 
     // 6) depth from age mapping (overwrites)

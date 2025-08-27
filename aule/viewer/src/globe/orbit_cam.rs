@@ -63,7 +63,7 @@ impl OrbitCamera {
             glam::Mat4::perspective_rh(self.fov_y, self.aspect.max(1e-3), self.z_near, self.z_far);
         (proj * view).to_cols_array_2d()
     }
-
+    #[allow(dead_code)]
     pub fn eye(&self) -> glam::Vec3 {
         glam::Vec3::new(
             self.distance * self.yaw.cos() * self.pitch.cos(),

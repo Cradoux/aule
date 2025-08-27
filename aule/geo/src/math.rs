@@ -126,9 +126,12 @@ impl FaceGeom {
         let (cx, cy) = proj(self.c);
         let (px, py) = proj(point);
         // Planar barycentrics in tangent plane
-        let edge0_x = bx - ax; let edge0_y = by - ay;
-        let edge1_x = cx - ax; let edge1_y = cy - ay;
-        let delta_x = px - ax; let delta_y = py - ay;
+        let edge0_x = bx - ax;
+        let edge0_y = by - ay;
+        let edge1_x = cx - ax;
+        let edge1_y = cy - ay;
+        let delta_x = px - ax;
+        let delta_y = py - ay;
         let m_e0e0 = edge0_x * edge0_x + edge0_y * edge0_y;
         let m_e0e1 = edge0_x * edge1_x + edge0_y * edge1_y;
         let m_e1e1 = edge1_x * edge1_x + edge1_y * edge1_y;

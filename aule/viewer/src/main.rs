@@ -23,6 +23,7 @@ use winit::{
 };
 
 // T-505 drawer render — Simple/Advanced
+#[allow(dead_code)]
 fn run_to_t_realtime(
     ctx: &egui::Context,
     world: &mut engine::world::World,
@@ -37,7 +38,26 @@ fn run_to_t_realtime(
             if world.clock.t_myr >= t_end_myr {
                 break;
             }
-            let _ = engine::world::step_once(world, sp);
+            // Centralized pipeline step: solves eta to target land fraction
+            let cfg = engine::pipeline::PipelineCfg {
+                dt_myr: sp.dt_myr as f32,
+                steps_per_frame: 1,
+                enable_flexure: sp.do_flexure,
+                enable_erosion: sp.do_surface,
+                target_land_frac: ov.simple_target_land,
+                freeze_eta: ov.freeze_eta,
+                log_mass_budget: false,
+                enable_subduction: sp.do_subduction,
+                enable_rigid_motion: sp.do_rigid_motion,
+            };
+            let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
+            let mut eta = world.sea.eta_m;
+            engine::pipeline::step_full(
+                world,
+                engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                cfg,
+            );
+            world.sea.eta_m = eta;
             ov.world_dirty = true;
             ov.color_dirty = true;
             ov.bathy_cache = None;
@@ -192,6 +212,28 @@ fn render_simple_panels(
             world.c.clone_from(&continent_tpl);
             world.th_c_m.fill(amp_used_m);
             world.epoch_continents = world.epoch_continents.wrapping_add(1);
+            // Run one unified pipeline step so Generate World matches Play codepath
+            {
+                let cfg = engine::pipeline::PipelineCfg {
+                    dt_myr: 0.0, // settle using current fields without advancing time
+                    steps_per_frame: 1,
+                    enable_flexure: !ov.disable_flexure,
+                    enable_erosion: !ov.disable_erosion,
+                    target_land_frac: ov.simple_target_land,
+                    freeze_eta: ov.freeze_eta,
+                    log_mass_budget: true,
+                    enable_subduction: !ov.disable_subduction,
+                    enable_rigid_motion: true,
+                };
+                let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
+                let mut eta = world.sea.eta_m;
+                engine::pipeline::step_full(
+                    world,
+                    engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                    cfg,
+                );
+                world.sea.eta_m = eta;
+            }
             // Diagnostics and UI updates using elev = η − depth
             let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
             let mut land_area = 0.0f64;
@@ -203,7 +245,7 @@ fn render_simple_panels(
             let mut land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
             // If we saturated amplitude and still miss target significantly, boost once and resolve again
             if (land_frac - ov.simple_target_land as f64).abs() > 0.05 {
-                let amp_boost = amp_used_m * 1.5;
+                let amp_boost = (amp_used_m * 1.25).min(6000.0);
                 println!("[simple] land target not reachable with current amplitude; boosting A → {:.0} m", amp_boost);
                 world.depth_m.clone_from(&base_depth);
                 for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_boost * *t; }
@@ -261,51 +303,11 @@ fn render_simple_panels(
             ov.raster_dirty = true;
             ov.bathy_cache = None;
             ctx.request_repaint();
-            // e) Run to t_end (safe dt) with realtime redraw
-            let burst = ov.debug_burst_steps > 0;
-            let _enable_all = ov.debug_enable_all || burst;
-            // Full-physics defaults in Simple mode
-            let sp = engine::world::StepParams {
-                dt_myr: 1.0,
-                do_flexure: true,
-                do_isostasy: true,
-                do_transforms: true,
-                do_subduction: true,
-                do_continents: true,
-                do_ridge_birth: true,
-                auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                do_rigid_motion: true,
-                do_orogeny: false,
-                do_accretion: false,
-                do_rifting: false,
-                do_surface: false,
-                surface_params: engine::surface::SurfaceParams {
-                    k_stream: ov.surf_k_stream,
-                    m_exp: ov.surf_m_exp,
-                    n_exp: ov.surf_n_exp,
-                    k_diff: ov.surf_k_diff,
-                    k_tr: ov.surf_k_tr,
-                    p_exp: ov.surf_p_exp,
-                    q_exp: ov.surf_q_exp,
-                    rho_sed: ov.surf_rho_sed,
-                    min_slope: ov.surf_min_slope,
-                    subcycles: ov.surf_subcycles.max(1),
-                    couple_flexure: ov.surf_couple_flexure,
-                },
-                advection_every: 1,
-                transforms_every: 1,
-                subduction_every: 1,
-                flexure_every: 1,
-                sea_every: 1,
-                do_advection: true,
-                do_sea: true,
-            };
-            run_to_t_realtime(ctx, world, ov, &sp, ov.simple_t_end_myr, 4);
-            // f) Start realtime run; per-frame updater handles drawing
-            ov.stepper.playing = false; // remain paused after generate
+            // Ready: let the user hit Play to evolve in real-time (non-blocking)
+            ov.stepper.playing = false;
             ov.run_active = false;
-            ov.run_target_myr = ov.simple_t_end_myr; // retain for legacy
-            ov.raster_dirty = true; // immediate redraw
+            ov.run_target_myr = ov.simple_t_end_myr;
+            ov.raster_dirty = true;
             ctx.request_repaint();
         }
     });
@@ -343,6 +345,15 @@ fn render_simple_panels(
         changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
         changed |= ui.checkbox(&mut ov.gpu_dbg_tri_index, "Tri index").changed();
+        // Simple-mode physics isolation toggles (T-646)
+        ui.separator();
+        ui.checkbox(&mut ov.freeze_eta, "Freeze sea level");
+        ui.checkbox(&mut ov.disable_erosion, "Disable erosion");
+        ui.checkbox(&mut ov.disable_flexure, "Disable flexure");
+        ui.checkbox(&mut ov.disable_subduction, "Disable subduction");
+        if changed {
+            apply_simple_palette(ov, world, ctx);
+        }
         changed |=
             ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
         changed |=
@@ -1227,8 +1238,7 @@ fn main() {
                                                     | (if ov.gpu_dbg_tri_index { 1u32<<5 } else { 0 })
                                                     | (if ov.show_parity_heat || ov.export_parity_csv_requested { 1u32<<6 } else { 0 })
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
-                                                    | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 })
-                                                    | 0u32;
+                                                    | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &world.depth_m, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
@@ -1268,7 +1278,41 @@ fn main() {
                                                         let _flx_every = ov.cadence_flx_every.max(1);
                                                         let _sea_every = ov.cadence_sea_every.max(1);
                                                         // Full-physics defaults in Simple mode per step
-                                                        let sp = engine::world::StepParams { dt_myr: 1.0, do_flexure: true, do_isostasy: true, do_transforms: true, do_subduction: true, do_continents: true, do_ridge_birth: true, auto_rebaseline_after_continents: ov.auto_rebaseline_l, do_rigid_motion: true, do_orogeny: false, do_accretion: false, do_rifting: false, do_surface: false, surface_params: engine::surface::SurfaceParams { k_stream: ov.surf_k_stream, m_exp: ov.surf_m_exp, n_exp: ov.surf_n_exp, k_diff: ov.surf_k_diff, k_tr: ov.surf_k_tr, p_exp: ov.surf_p_exp, q_exp: ov.surf_q_exp, rho_sed: ov.surf_rho_sed, min_slope: ov.surf_min_slope, subcycles: ov.surf_subcycles.max(1), couple_flexure: ov.surf_couple_flexure }, advection_every: 1, transforms_every: 1, subduction_every: 1, flexure_every: 1, sea_every: 1, do_advection: true, do_sea: true };
+                                                        let sp = engine::world::StepParams {
+                                                            dt_myr: 1.0,
+                                                            do_flexure: true,
+                                                            do_isostasy: true,
+                                                            do_transforms: true,
+                                                            do_subduction: true,
+                                                            do_continents: true,
+                                                            do_ridge_birth: true,
+                                                            auto_rebaseline_after_continents: ov.auto_rebaseline_l,
+                                                            do_rigid_motion: true,
+                                                            do_orogeny: false,
+                                                            do_accretion: false,
+                                                            do_rifting: false,
+                                                            do_surface: false,
+                                                            surface_params: engine::surface::SurfaceParams {
+                                                                k_stream: ov.surf_k_stream,
+                                                                m_exp: ov.surf_m_exp,
+                                                                n_exp: ov.surf_n_exp,
+                                                                k_diff: ov.surf_k_diff,
+                                                                k_tr: ov.surf_k_tr,
+                                                                p_exp: ov.surf_p_exp,
+                                                                q_exp: ov.surf_q_exp,
+                                                                rho_sed: ov.surf_rho_sed,
+                                                                min_slope: ov.surf_min_slope,
+                                                                subcycles: ov.surf_subcycles.max(1),
+                                                                couple_flexure: ov.surf_couple_flexure,
+                                                            },
+                                                            advection_every: 1,
+                                                            transforms_every: 1,
+                                                            subduction_every: 1,
+                                                            flexure_every: 1,
+                                                            sea_every: 1,
+                                                            do_advection: true,
+                                                            do_sea: true,
+                                                        };
                                                         let t0 = world.clock.t_myr;
                                                         let _ = engine::world::step_once(&mut world, &sp);
                                                         // Per-step land fraction (area-weighted) using elev = η − depth
@@ -1298,15 +1342,14 @@ fn main() {
                                                 }
                                                 // Dispatch only when flagged dirty
                                                 if ov.raster_dirty {
-                                                    let dbg = (if ov.gpu_dbg_wire { 1u32 } else { 0 })
-                                                        | (if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 })
-                                                        | (if ov.gpu_dbg_grid { 1u32<<2 } else { 0 })
-                                                        | (if ov.gpu_dbg_tri_parity { 1u32<<3 } else { 0 })
-                                                        | (if ov.gpu_dbg_tri_index { 1u32<<5 } else { 0 })
-                                                        | (if ov.show_parity_heat || ov.export_parity_csv_requested { 1u32<<6 } else { 0 })
-                                                        | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
-                                                        | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 })
-                                                        | 0u32;
+                                                    let mut dbg = if ov.gpu_dbg_wire { 1u32 } else { 0 };
+                                                    dbg |= if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 };
+                                                    dbg |= if ov.gpu_dbg_grid { 1u32<<2 } else { 0 };
+                                                    dbg |= if ov.gpu_dbg_tri_parity { 1u32<<3 } else { 0 };
+                                                    dbg |= if ov.gpu_dbg_tri_index { 1u32<<5 } else { 0 };
+                                                    dbg |= if ov.show_parity_heat || ov.export_parity_csv_requested { 1u32<<6 } else { 0 };
+                                                    dbg |= if ov.force_cpu_face_pick { 1u32<<7 } else { 0 };
+                                                    dbg |= if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 };
                                                     let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                     // If forcing CPU face pick, generate per-pixel face ids using FACE_GEOM (A,B,C,N)
                                                     if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
@@ -1340,8 +1383,8 @@ fn main() {
                                                             for y in (0..h).step_by(stride as usize) {
                                                                 for x in (0..w).step_by(stride as usize) {
                                                                     let idx = ((y * w + x) * 2) as usize;
-                                                                    let face_gpu = dbg_buf[idx + 0] as u32;
-                                                                    let tri_gpu_global = dbg_buf[idx + 1] as u32;
+                                                                    let face_gpu = dbg_buf[idx];
+                                                                    let tri_gpu_global = dbg_buf[idx + 1];
                                                                     let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                     let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                     let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
@@ -1368,7 +1411,21 @@ fn main() {
                                                                     let corners = world.grid.face_corners();
                                                                     for fid in 0..20usize {
                                                                         let tri = corners[fid];
-                                                                        let mk = |va:u32, vb:u32| -> u32 { let mut nf=u32::MAX; 's: for (j,t) in corners.iter().enumerate(){ if j==fid {continue;} let arr=*t; let mut a0=None; let mut a1=None; for k in 0..3u32 { if arr[k as usize]==va { a0=Some(k);} if arr[k as usize]==vb { a1=Some(k);} } if a0.is_some()&&a1.is_some(){ nf=j as u32; break 's;} } nf };
+                                                                        let mk = |va:u32, vb:u32| -> u32 {
+                                                                            let mut nf=u32::MAX;
+                                                                            's: for (j,t) in corners.iter().enumerate(){
+                                                                                if j==fid {continue;}
+                                                                                let arr=*t;
+                                                                                let mut a0=None;
+                                                                                let mut a1=None;
+                                                                                for k in 0..3u32 {
+                                                                                    if arr[k as usize]==va { a0=Some(k); }
+                                                                                    if arr[k as usize]==vb { a1=Some(k); }
+                                                                                }
+                                                                                if a0.is_some() && a1.is_some(){ nf=j as u32; break 's; }
+                                                                            }
+                                                                            nf
+                                                                        };
                                                                         neighbors[fid][0] = mk(tri[1], tri[2]);
                                                                         neighbors[fid][1] = mk(tri[2], tri[0]);
                                                                         neighbors[fid][2] = mk(tri[0], tri[1]);
@@ -1377,7 +1434,7 @@ fn main() {
                                                                     let hroi = 64u32.min(h); let wroi = 128u32.min(w);
                                                                     for dy in 0..hroi { for dx in 0..wroi {
                                                                         let x = x0 + dx; let y = y0 + dy; let idx = ((y * w + x) * 2) as usize;
-                                                                        let face_gpu = dbg_buf[idx + 0] as u32;
+                                                                        let face_gpu = dbg_buf[idx];
                                                                         let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                         let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                         let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
@@ -1386,14 +1443,16 @@ fn main() {
                                                                         let mut best_f = 0usize; let mut bd = -1e9f32;
                                                                         for fidx in 0..20usize { let n = fc.face_geom[fidx*4+3]; let d = n[0]*p[0]+n[1]*p[1]+n[2]*p[2]; if d>bd { bd=d; best_f=fidx; } }
                                                                         let mut f_sim = best_f as u32; let geom = &fc.face_geom[(f_sim as usize)*4 .. (f_sim as usize)*4 + 4];
-                                                                        let A = geom[0]; let B = geom[1]; let C = geom[2]; let n = geom[3];
-                                                                        let t = n[0]*(p[0]-A[0]) + n[1]*(p[1]-A[1]) + n[2]*(p[2]-A[2]);
+                                                                        let a = geom[0]; let b = geom[1]; let c = geom[2]; let n = geom[3];
+                                                                        let t = n[0]*(p[0]-a[0]) + n[1]*(p[1]-a[1]) + n[2]*(p[2]-a[2]);
                                                                         let q = [p[0]-n[0]*t, p[1]-n[1]*t, p[2]-n[2]*t];
-                                                                        let v0 = [B[0]-A[0], B[1]-A[1], B[2]-A[2]]; let v1 = [C[0]-A[0], C[1]-A[1], C[2]-A[2]]; let v2 = [q[0]-A[0], q[1]-A[1], q[2]-A[2]];
+                                                                        let v0 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]; let v1 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]]; let v2 = [q[0]-a[0], q[1]-a[1], q[2]-a[2]];
                                                                         let d00 = v0[0]*v0[0]+v0[1]*v0[1]+v0[2]*v0[2]; let d01 = v0[0]*v1[0]+v0[1]*v1[1]+v0[2]*v1[2]; let d11 = v1[0]*v1[0]+v1[1]*v1[1]+v1[2]*v1[2]; let d20 = v2[0]*v0[0]+v2[1]*v0[1]+v2[2]*v0[2]; let d21 = v2[0]*v1[0]+v2[1]*v1[1]+v2[2]*v1[2];
                                                                         let denom = (d00*d11 - d01*d01).max(1e-12);
                                                                         let wb = (d11*d20 - d01*d21)/denom; let wc = (d00*d21 - d01*d20)/denom; let wa = 1.0 - wb - wc;
-                                                                        let mut kneg_s = 0usize; let mut vmin = wa; if wb < vmin { vmin = wb; kneg_s = 1; } if wc < vmin { kneg_s = 2; }
+                                                                        let mut kneg_s = 0usize; let mut vmin = wa;
+                                                                        if wb < vmin { vmin = wb; kneg_s = 1; }
+                                                                        if wc < vmin { kneg_s = 2; }
                                                                         if wa < -1e-6 || wb < -1e-6 || wc < -1e-6 { let nf = neighbors[f_sim as usize][kneg_s]; if nf!=u32::MAX { f_sim = nf; } }
                                                                         // CPU-grid path
                                                                         let mut best_fg = 0usize; let mut bdg = -1e9f32;
@@ -1403,14 +1462,16 @@ fn main() {
                                                                             let d = n[0]*p[0] + n[1]*p[1] + n[2]*p[2]; if d>bdg { bdg=d; best_fg=fi; }
                                                                         }
                                                                         let mut f_cpu = best_fg as u32; let tri = corners[f_cpu as usize];
-                                                                        let A2 = world.grid.pos_xyz[tri[0] as usize]; let B2 = world.grid.pos_xyz[tri[1] as usize]; let C2 = world.grid.pos_xyz[tri[2] as usize];
-                                                                        let ab = [B2[0]-A2[0],B2[1]-A2[1],B2[2]-A2[2]]; let ac = [C2[0]-A2[0],C2[1]-A2[1],C2[2]-A2[2]];
+                                                                        let a2 = world.grid.pos_xyz[tri[0] as usize]; let b2 = world.grid.pos_xyz[tri[1] as usize]; let c2 = world.grid.pos_xyz[tri[2] as usize];
+                                                                        let ab = [b2[0]-a2[0],b2[1]-a2[1],b2[2]-a2[2]]; let ac = [c2[0]-a2[0],c2[1]-a2[1],c2[2]-a2[2]];
                                                                         let nx = ab[1]*ac[2]-ab[2]*ac[1]; let ny = ab[2]*ac[0]-ab[0]*ac[2]; let nz = ab[0]*ac[1]-ab[1]*ac[0]; let inv = 1.0f32/(nx*nx+ny*ny+nz*nz).sqrt().max(1e-8); let n2 = [nx*inv, ny*inv, nz*inv];
-                                                                        let t2 = n2[0]*(p[0]-A2[0])+n2[1]*(p[1]-A2[1])+n2[2]*(p[2]-A2[2]); let q2 = [p[0]-n2[0]*t2,p[1]-n2[1]*t2,p[2]-n2[2]*t2];
-                                                                        let v0b = [B2[0]-A2[0],B2[1]-A2[1],B2[2]-A2[2]]; let v1b = [C2[0]-A2[0],C2[1]-A2[1],C2[2]-A2[2]]; let v2b = [q2[0]-A2[0],q2[1]-A2[1],q2[2]-A2[2]];
+                                                                        let t2 = n2[0]*(p[0]-a2[0])+n2[1]*(p[1]-a2[1])+n2[2]*(p[2]-a2[2]); let q2 = [p[0]-n2[0]*t2,p[1]-n2[1]*t2,p[2]-n2[2]*t2];
+                                                                        let v0b = [b2[0]-a2[0],b2[1]-a2[1],b2[2]-a2[2]]; let v1b = [c2[0]-a2[0],c2[1]-a2[1],c2[2]-a2[2]]; let v2b = [q2[0]-a2[0],q2[1]-a2[1],q2[2]-a2[2]];
                                                                         let d00b=v0b[0]*v0b[0]+v0b[1]*v0b[1]+v0b[2]*v0b[2]; let d01b=v0b[0]*v1b[0]+v0b[1]*v1b[1]+v0b[2]*v1b[2]; let d11b=v1b[0]*v1b[0]+v1b[1]*v1b[1]+v1b[2]*v1b[2]; let d20b=v2b[0]*v0b[0]+v2b[1]*v0b[1]+v2b[2]*v0b[2]; let d21b=v2b[0]*v1b[0]+v2b[1]*v1b[1]+v2b[2]*v1b[2];
                                                                         let denb=(d00b*d11b-d01b*d01b).max(1e-12); let wbb=(d11b*d20b-d01b*d21b)/denb; let wcc=(d00b*d21b-d01b*d20b)/denb; let waa=1.0-wbb-wcc;
-                                                                        let mut kneg_c = 0usize; let mut vminc = waa; if wbb < vminc { vminc = wbb; kneg_c = 1; } if wcc < vminc { kneg_c = 2; }
+                                                                        let mut kneg_c = 0usize; let mut vminc = waa;
+                                                                        if wbb < vminc { vminc = wbb; kneg_c = 1; }
+                                                                        if wcc < vminc { kneg_c = 2; }
                                                                         if waa < -1e-6 || wbb < -1e-6 || wcc < -1e-6 { let nf = neighbors[f_cpu as usize][kneg_c]; if nf!=u32::MAX { f_cpu = nf; } }
                                                                         let _ = writeln!(fcsv, "{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}", x, y, face_gpu, f_sim, f_cpu, kneg_s, kneg_c, wa, wb, wc, waa, wbb, wcc);
                                                                     }}
@@ -1422,7 +1483,7 @@ fn main() {
                                                                     let mut count: usize = 0;
                                                                     let picker = GeoPicker::new();
                                                                     'outer: for y in 0..h { for x in 0..w {
-                                                                        let idx = ((y * w + x) * 2) as usize; let face_gpu = dbg_buf[idx + 0] as u32;
+                                                                        let idx = ((y * w + x) * 2) as usize; let face_gpu = dbg_buf[idx];
                                                                         let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
                                                                         let lon = (fx / w as f32) * std::f32::consts::TAU - std::f32::consts::PI;
                                                                         let lat = std::f32::consts::FRAC_PI_2 - (fy / h as f32) * std::f32::consts::PI;
@@ -1448,7 +1509,7 @@ fn main() {
                                                                 let _ = writeln!(file, "x,y,lon,lat,face_gpu,tri_gpu_global,face_cpu,tri_cpu_global,diff");
                                                                 let (rw, rh) = ov.raster_size; let f = f_now; let picker = GeoPicker::new();
                                                                 for y in 0..rh { for x in 0..rw {
-                                                                    let idx=((y*rw+x)*2) as usize; let face_gpu=buf[idx+0]; let tri_gpu_global=buf[idx+1];
+                                                                    let idx=((y*rw+x)*2) as usize; let face_gpu=buf[idx]; let tri_gpu_global=buf[idx+1];
                                                                     let fx=x as f32+0.5; let fy=y as f32+0.5; let lon=(fx / rw as f32)*std::f32::consts::TAU - std::f32::consts::PI; let lat=std::f32::consts::FRAC_PI_2 - (fy / rh as f32)*std::f32::consts::PI; let cl=lat.cos(); let p=Vec3::new(cl*lon.cos(), lat.sin(), -cl*lon.sin()).norm();
                                                                     let cpu = picker.pick_from_unit(p, f);
                                                                     let tri_cpu_global = cpu.face * f * f + cpu.tri; // unify to global scheme like WGSL
@@ -1468,7 +1529,7 @@ fn main() {
                                                                 let faces = picker.faces();
                                                                 for y in 0..rh { for x in 0..rw {
                                                                     let idx = ((y*rw + x) * 2) as usize;
-                                                                    let face_gpu = buf[idx + 0];
+                                                                    let face_gpu = buf[idx];
                                                                     let tri_gpu  = buf[idx + 1];
                                                                     // Pixel center mapping must match WGSL exactly
                                                                     let fx = x as f32 + 0.5; let fy = y as f32 + 0.5;
@@ -1541,56 +1602,53 @@ fn main() {
                                             );
                                         }
                                     }
-                                    // Simple per-frame stepping
+                                    // Simple per-frame stepping using centralized pipeline (T-632)
                                     if ov.run_active && world.clock.t_myr < ov.run_target_myr {
                                         let n = ov.steps_per_frame.max(1);
                                         let mut steps_done = 0u32;
                                         for _ in 0..n {
                                             if world.clock.t_myr >= ov.run_target_myr { break; }
-                                            let _burst = ov.debug_burst_steps > 0;
-                                            let _enable_all = ov.debug_enable_all || _burst;
-                                            let _adv_every = ov.cadence_adv_every.max(1);
-                                            let _trf_every = ov.cadence_trf_every.max(1);
-                                            let _sub_every = ov.cadence_sub_every.max(1);
-                                            let _flx_every = ov.cadence_flx_every.max(1);
-                                            let _sea_every = ov.cadence_sea_every.max(1);
-                                            let sp = engine::world::StepParams {
+                                            let cfg = engine::pipeline::PipelineCfg {
                                                 dt_myr: 1.0,
-                                                do_flexure: true,
-                                                do_isostasy: true,
-                                                do_transforms: true,
-                                                do_subduction: true,
-                                                do_continents: true,
-                                                do_ridge_birth: true,
-                                                auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                                                do_rigid_motion: true,
-                                                do_orogeny: false,
-                                                do_accretion: false,
-                                                do_rifting: false,
-                                                do_surface: false,
-                                                surface_params: engine::surface::SurfaceParams {
-                                                    k_stream: ov.surf_k_stream,
-                                                    m_exp: ov.surf_m_exp,
-                                                    n_exp: ov.surf_n_exp,
-                                                    k_diff: ov.surf_k_diff,
-                                                    k_tr: ov.surf_k_tr,
-                                                    p_exp: ov.surf_p_exp,
-                                                    q_exp: ov.surf_q_exp,
-                                                    rho_sed: ov.surf_rho_sed,
-                                                    min_slope: ov.surf_min_slope,
-                                                    subcycles: ov.surf_subcycles.max(1),
-                                                    couple_flexure: ov.surf_couple_flexure,
-                                                },
-                                                advection_every: 1,
-                                                transforms_every: 1,
-                                                subduction_every: 1,
-                                                flexure_every: 1,
-                                                sea_every: 1,
-                                                do_advection: true,
-                                                do_sea: true,
+                                                steps_per_frame: 1,
+                                                enable_flexure: !ov.disable_flexure,
+                                                enable_erosion: !ov.disable_erosion,
+                                                target_land_frac: ov.simple_target_land,
+                                                freeze_eta: ov.freeze_eta,
+                                                log_mass_budget: true,
+                                                enable_subduction: !ov.disable_subduction,
+                                                enable_rigid_motion: true,
                                             };
-                                            let t0 = world.clock.t_myr;
-                                            let _ = engine::world::step_once(&mut world, &sp);
+                                            // Use world.depth_m order as backing for elevation upload later
+                                            let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
+                                            let mut eta = world.sea.eta_m;
+                                            engine::pipeline::step_full(
+                                                &mut world,
+                                                engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                                                cfg,
+                                            );
+                                            world.sea.eta_m = eta;
+                                            // Elevation stats and logging: use z = elev_tmp[i] - eta (which equals -depth - eta + eta = -depth)
+                                            // Invalidate plate/boundary caches so overlays reflect updated plate_id and edges
+                                            ov.plates_cache = None;
+                                            ov.bounds_cache = None;
+                                            let mut zmin = f32::INFINITY;
+                                            let mut zmax = f32::NEG_INFINITY;
+                                            let mut zsum = 0.0f64;
+                                            let mut land_area = 0.0f64;
+                                            let mut total_area = 0.0f64;
+                                            for (&z, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
+                                                 if z.is_finite() {
+                                                     zmin = zmin.min(z);
+                                                     zmax = zmax.max(z);
+                                                     zsum += z as f64;
+                                                     total_area += a as f64;
+                                                     if z > 0.0 { land_area += a as f64; }
+                                                 }
+                                             }
+                                            let zmean = if total_area > 0.0 { zsum / (elev_tmp.len().max(1) as f64) } else { 0.0 };
+                                            println!("[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%", zmin, zmean, zmax, 100.0 * land_area / total_area.max(1.0));
+                                            // Bookkeeping
                                             steps_done += 1;
                                             ov.color_dirty = true;
                                             ov.world_dirty = true;
@@ -1603,11 +1661,10 @@ fn main() {
                                             }
                                             let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                             println!(
-                                                "[step/ui] t={:.1}→{:.1} Myr (+{} steps) | land={:.1}%",
-                                                t0,
-                                                world.clock.t_myr,
-                                                steps_done,
-                                                land_frac * 100.0
+                                                "[step/ui] Simple: land={:.1}% | eta={:+.0} m | steps/frame={}",
+                                                land_frac * 100.0,
+                                                world.sea.eta_m,
+                                                n
                                             );
                                         }
                                         if steps_done > 0 && ov.debug_burst_steps > 0 { ov.debug_burst_steps = ov.debug_burst_steps.saturating_sub(steps_done); if ov.debug_burst_steps == 0 { println!("[debug] profiling burst complete."); } }
@@ -1644,7 +1701,7 @@ fn main() {
                             if let (Some(gr), Some(mesh)) = (pipes.globe.as_ref(), pipes.globe_mesh.as_ref()) {
                                 // Update uniforms and draw
                                 // Apply UI exaggeration to uniforms
-                                let view_proj = pipes.globe_cam.as_ref().unwrap().view_proj();
+                                let view_proj = if let Some(cam) = pipes.globe_cam.as_ref() { cam.view_proj() } else { glam::Mat4::IDENTITY.to_cols_array_2d() };
                                 let radius = 1.0f32;
                                 let exagger = ov.globe.exaggeration;
                                 let dbg_flags = 0u32;

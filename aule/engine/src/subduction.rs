@@ -1,4 +1,12 @@
 //! Subduction bands from convergent boundaries and bathymetry adjustments (CPU).
+//!
+//! Modeling notes:
+//! - Seeds are picked from convergent boundary edges and split into subducting vs overriding sides
+//!   by age (older plate subducts; tie-break by plate id). This is a heuristic; real polarity may
+//!   depend on buoyancy (age), trench rollback, and slab geometry.
+//! - Band geometries are distance-thresholded within plate domains to avoid crossing plate labels.
+//! - Bathymetry edits are idempotent per call: we recompute the Parsons–Sclater baseline from age
+//!   then add band deltas. Callers should ensure they apply this after baseline age→depth mapping.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -48,6 +56,8 @@ pub struct SubductionParams {
     pub backarc_extension_mode: bool,
     /// Depth added inside back-arc band in extension mode (positive down).
     pub backarc_extension_deepen_m: f32,
+    /// Continental fraction threshold to treat a cell as continental (0..1).
+    pub continent_c_min: f32,
 }
 
 /// Counts for each band.
@@ -105,6 +115,7 @@ pub fn apply_subduction(
     v_en: &[[f32; 2]],
     depth_m: &mut [f32],
     params: SubductionParams,
+    c_opt: Option<&[f32]>,
 ) -> SubductionResult {
     assert_eq!(plate_id.len(), grid.cells);
     assert_eq!(age_myr.len(), grid.cells);
@@ -238,7 +249,12 @@ pub fn apply_subduction(
     for i in 0..grid.cells {
         let mut delta: f32 = 0.0;
         if masks.trench[i] {
-            delta += params.trench_deepen_m;
+            // Gate trench deepening by continental fraction if provided
+            let is_cont =
+                c_opt.and_then(|c| c.get(i)).map(|&v| v >= params.continent_c_min).unwrap_or(false);
+            if !is_cont {
+                delta += params.trench_deepen_m;
+            }
         }
         if masks.arc[i] {
             delta += params.arc_uplift_m;
@@ -257,6 +273,9 @@ pub fn apply_subduction(
             }
             base = base.clamp(0.0, 6000.0);
             depth_m[i] = base + delta;
+            // NOTE: This overwrites any prior tectonic edit at `i` in the same step. If multiple
+            // processes should superpose (e.g., transforms), apply them consistently after all
+            // baselines or accumulate deltas before a single write.
         }
     }
 

@@ -23,7 +23,9 @@ pub struct GlobeRenderer {
     pub uniform_buf: wgpu::Buffer,
     pub height_buf: wgpu::Buffer,
     pub lut_tex: wgpu::Texture,
+    #[allow(dead_code)]
     pub lut_view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub lut_sampler: wgpu::Sampler,
 }
 
@@ -348,12 +350,12 @@ struct VSOut { @builtin(position) pos_clip : vec4<f32> };
                 crate::overlay::land_color32(elev, ov.hypso_h_max.max(1.0), ov.hypso_snowline);
             px.extend_from_slice(&[col.r(), col.g(), col.b(), 255]);
         }
-        let bpr = std::num::NonZeroU32::new(512 * 4).unwrap();
-        let rpi = std::num::NonZeroU32::new(1).unwrap();
+        let bpr = std::num::NonZeroU32::new(512 * 4).map(|nz| nz.into()).unwrap_or(512 * 4);
+        let rpi = std::num::NonZeroU32::new(1).map(|nz| nz.into()).unwrap_or(1);
         let layout = wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(bpr.into()),
-            rows_per_image: Some(rpi.into()),
+            bytes_per_row: Some(bpr),
+            rows_per_image: Some(rpi),
         };
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -378,14 +380,13 @@ struct VSOut { @builtin(position) pos_clip : vec4<f32> };
     }
 
     pub fn draw_lines<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>, mesh: &'a GlobeMesh) {
-        if let Some(_lb) = &mesh.line_buf {
+        if mesh.line_buf.is_some() {
             rpass.set_pipeline(&self.pipeline_lines);
             rpass.set_bind_group(0, &self.bind_group0, &[]);
             rpass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
-            rpass.set_index_buffer(
-                mesh.line_buf.as_ref().unwrap().slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
+            if let Some(lb) = mesh.line_buf.as_ref() {
+                rpass.set_index_buffer(lb.slice(..), wgpu::IndexFormat::Uint32);
+            }
             rpass.draw_indexed(0..mesh.line_count, 0, 0..1);
         }
     }

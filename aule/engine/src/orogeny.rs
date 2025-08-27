@@ -1,4 +1,10 @@
 //! Collision orogeny (C–C sutures) MVP.
+//!
+//! Modeling notes:
+//! - Thickening rate derives from normal convergence magnitude with an obliquity damping factor.
+//! - Uplift is proportional to added thickness and applied as a negative `depth` delta (shallower).
+//! - No explicit mass conservation between eroded material and thickening; surface processes run
+//!   separately and may not balance orogenic addition. Consider coupling or running at cadence.
 
 use crate::{
     boundaries::{Boundaries, EdgeClass},

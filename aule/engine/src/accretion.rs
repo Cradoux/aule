@@ -1,4 +1,9 @@
 //! Arc/terrane accretion at O–C convergent margins (MVP, deterministic).
+//!
+//! Notes:
+//! - Uses boolean arc/trench masks (no continuous distances) so growth is uniform within bands.
+//! - `beta_arc` applies uplift proportional to thickness change directly onto `depth_m`.
+//! - Terrane docking transfers `C` locally and is highly schematic; no momentum/force coupling.
 
 use crate::{
     boundaries::{Boundaries, EdgeClass},

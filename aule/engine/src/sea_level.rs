@@ -125,7 +125,7 @@ pub fn solve_offset_for_ocean_area_fraction(
     }
     let mut lo = -12_000.0_f64;
     let mut hi = 12_000.0_f64;
-    let area = |off: f64| -> f64 {
+    let area_frac = |off: f64| -> f64 {
         let mut acc = 0.0;
         for (d, a) in depth_m.iter().zip(area_m2.iter()) {
             if (*d as f64 + off) > 0.0 {
@@ -134,17 +134,91 @@ pub fn solve_offset_for_ocean_area_fraction(
         }
         acc / total
     };
-    for _ in 0..60 {
+    let target = (target_ocean_frac as f64).clamp(0.0, 1.0);
+    let mut a_lo = area_frac(lo) - target;
+    let mut a_hi = area_frac(hi) - target;
+    // Expand bracket adaptively if needed
+    let mut step = 12_000.0_f64;
+    let mut it = 0;
+    while !(a_lo <= 0.0 && a_hi >= 0.0) && it < 32 {
+        if a_lo > 0.0 {
+            lo -= step;
+            a_lo = area_frac(lo) - target;
+        }
+        if a_hi < 0.0 {
+            hi += step;
+            a_hi = area_frac(hi) - target;
+        }
+        step *= 2.0;
+        it += 1;
+    }
+    if !(a_lo <= 0.0 && a_hi >= 0.0) {
+        return if a_lo.abs() < a_hi.abs() { lo } else { hi };
+    }
+    for _ in 0..64 {
         let mid = 0.5 * (lo + hi);
-        let f = area(mid) - (target_ocean_frac as f64);
-        if f.abs() < 1e-6 {
+        let f = area_frac(mid) - target;
+        if f.abs() < 1e-6 || (hi - lo).abs() < 1e-6 {
             return mid;
         }
-        if f > 0.0 {
-            hi = mid;
-        } else {
+        if (f > 0.0) == (a_lo > 0.0) {
             lo = mid;
+            a_lo = f;
+        } else {
+            hi = mid;
         }
     }
     0.5 * (lo + hi)
+}
+
+/// Solve sea level (eta) by bisection on surface elevation to hit a target land fraction.
+pub fn solve_eta_on_elevation(
+    surface_elev_m: &[f32],
+    area_m2: &[f32],
+    target_land_frac: f32,
+) -> f32 {
+    let mut lo = -11_000.0f32;
+    let mut hi = 9_000.0f32;
+    let target = target_land_frac.clamp(0.0, 1.0);
+    let land_frac = |eta: f32| -> f32 {
+        let mut land = 0.0f64;
+        let mut tot = 0.0f64;
+        for (z, a) in surface_elev_m.iter().zip(area_m2.iter()) {
+            if (*z as f64 - eta as f64) > 0.0 {
+                land += *a as f64;
+            }
+            tot += *a as f64;
+        }
+        if tot > 0.0 {
+            (land / tot) as f32
+        } else {
+            0.0
+        }
+    };
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        let lf = land_frac(mid);
+        let diff = (lf - target).abs();
+        if diff < 0.002 {
+            return mid;
+        }
+        if lf > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Solve sea level to achieve a target land fraction (0..1) using world's depth/area.
+pub fn solve_to_target_land(
+    world: &crate::world::World,
+    _elev_m: &[f32],
+    target_land_frac: f32,
+    eta_m: &mut f32,
+) {
+    let target_ocean = (1.0 - target_land_frac).clamp(0.0, 1.0);
+    let off = solve_offset_for_ocean_area_fraction(&world.depth_m, &world.area_m2, target_ocean);
+    *eta_m = off as f32;
 }

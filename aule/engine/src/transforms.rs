@@ -1,4 +1,10 @@
 //! Transform pull-apart vs restraining bands and bathymetry edits (CPU, deterministic).
+//!
+//! Notes:
+//! - Transform seeds derive from edges with |tangential| above a threshold. We do not explicitly
+//!   zero small normal components; thus mixed obliquity segments may leak into transforms if |t|> |n|.
+//! - Dijkstra distances are constrained to plate domains to avoid crossing labels.
+//! - Edits are additive on `depth_m` and should be applied after rebuilding the age baseline.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
