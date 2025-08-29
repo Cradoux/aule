@@ -1,5 +1,6 @@
 //! Minimal GPU device/queue helper for tests (T-020).
 
+use std::sync::OnceLock;
 use wgpu::{Device, Instance, Queue};
 
 /// Minimal GPU context for tests and utilities.
@@ -39,4 +40,12 @@ impl GpuContext {
             .unwrap_or_else(|e| panic!("request device: {e}"));
         Self { instance, device, queue }
     }
+}
+
+/// Global persistent GPU context to avoid per-step device creation overhead.
+static GPU_CTX: OnceLock<GpuContext> = OnceLock::new();
+
+/// Get a reference to a persistent `GpuContext`, creating it on first use.
+pub fn persistent() -> &'static GpuContext {
+    GPU_CTX.get_or_init(|| pollster::block_on(GpuContext::new()))
 }

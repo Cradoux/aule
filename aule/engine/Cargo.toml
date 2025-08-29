@@ -15,9 +15,9 @@ wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 rand.workspace = true
 aule-geo = { path = "../geo" }
+pollster.workspace = true
 
 [dev-dependencies]
-pollster.workspace = true
 
 
 

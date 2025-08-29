@@ -313,11 +313,9 @@ impl World {
         // contiguous ribbon with several lobes for early Wilson-cycle scenarios.
         let mut tpl: Vec<f32> = if preset.continents_n == 0 {
             crate::continent::build_supercontinent_template(
-                &self.grid,
-                seed,
-                5,       // lobes
-                2200.0,  // lobe radius (km)
-                600.0,   // falloff (km)
+                &self.grid, seed, 5,      // lobes
+                2200.0, // lobe radius (km)
+                600.0,  // falloff (km)
             )
         } else {
             let cp = crate::continent::ContinentParams {
@@ -371,10 +369,14 @@ impl World {
 
         // Optional inherited belts for supercontinent: shallow, wide bands
         if preset.continents_n == 0 {
-            let belts = [
-                crate::continent::GreatCircleBelt { n_hat: [1.0, 0.0, 0.0], half_width_km: 300.0, uplift_m: 400.0 },
-                crate::continent::GreatCircleBelt { n_hat: [0.0, 1.0, 0.0], half_width_km: 200.0, uplift_m: 250.0 },
-            ];
+            // Derive a deterministic seed for belts from stable world properties
+            let seed_belts = (self.grid.frequency as u64)
+                ^ ((self.plates.pole_axis.len() as u64) << 16)
+                ^ (self.clock.step_idx);
+            let belts = crate::continent::build_supercontinent_belts(
+                seed_belts,
+                crate::continent::BeltParams::default(),
+            );
             let imprint = crate::continent::imprint_orogenic_belts(&self.grid, &belts);
             for (d, di) in self.depth_m.iter_mut().zip(imprint.into_iter()) {
                 *d += di;

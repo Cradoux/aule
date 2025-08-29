@@ -248,22 +248,35 @@ pub fn apply_subduction(
     const B_COEF: f64 = 0.0;
     for i in 0..grid.cells {
         let mut delta: f32 = 0.0;
+        // Smooth weights (cosine bell) within each band
         if masks.trench[i] {
             // Gate trench deepening by continental fraction if provided
-            let is_cont =
-                c_opt.and_then(|c| c.get(i)).map(|&v| v >= params.continent_c_min).unwrap_or(false);
+            let is_cont = c_opt
+                .and_then(|c| c.get(i))
+                .map(|&v| v >= params.continent_c_min)
+                .unwrap_or(false);
             if !is_cont {
-                delta += params.trench_deepen_m;
+                let d = dist_sub[i].clamp(0.0, trench_hw_m);
+                let t = (d / trench_hw_m) as f32; // 0 at hinge → 1 at edge
+                let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
+                delta += params.trench_deepen_m * w;
             }
         }
         if masks.arc[i] {
-            delta += params.arc_uplift_m;
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            let t = ((d_eff - arc_off_m).abs() / arc_hw_m).clamp(0.0, 1.0) as f32;
+            let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
+            delta += params.arc_uplift_m * w;
         }
         if masks.backarc[i] {
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            let start = arc_off_m + arc_hw_m;
+            let t = ((d_eff - start) / backarc_w_m).clamp(0.0, 1.0) as f32; // 0 at arc edge → 1 at far edge
+            let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
             if params.backarc_extension_mode {
-                delta += params.backarc_extension_deepen_m;
+                delta += params.backarc_extension_deepen_m * w;
             } else {
-                delta += params.backarc_uplift_m;
+                delta += params.backarc_uplift_m * w;
             }
         }
         if delta != 0.0 {

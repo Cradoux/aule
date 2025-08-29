@@ -170,14 +170,77 @@ pub fn imprint_orogenic_belts(grid: &Grid, belts: &[GreatCircleBelt]) -> Vec<f32
     delta
 }
 
+/// Parameters for supercontinent inherited belts.
+#[derive(Clone, Copy, Debug)]
+pub struct BeltParams {
+    /// Half-width of the primary belt (km)
+    pub half_width_km_primary: f64,
+    /// Half-width of the secondary belt (km)
+    pub half_width_km_secondary: f64,
+    /// Peak uplift magnitude of primary belt (m; negative used when applied to depth)
+    pub uplift_primary_m: f32,
+    /// Peak uplift magnitude of secondary belt (m; negative used when applied to depth)
+    pub uplift_secondary_m: f32,
+    /// Diagonal angle in degrees between primary and secondary belts in the continent frame
+    pub diag_angle_deg: f64,
+}
+
+impl Default for BeltParams {
+    fn default() -> Self {
+        Self {
+            half_width_km_primary: 350.0,
+            half_width_km_secondary: 220.0,
+            uplift_primary_m: 500.0,
+            uplift_secondary_m: 300.0,
+            diag_angle_deg: 35.0,
+        }
+    }
+}
+
+/// Build great-circle belts aligned to the supercontinent ribbon orientation used in
+/// `build_supercontinent_template`, derived deterministically from `seed`.
+pub fn build_supercontinent_belts(seed: u64, p: BeltParams) -> Vec<GreatCircleBelt> {
+    // Recreate the same orientation RNG draws as the template to align belts
+    let ns: u64 = 0x7375706572636e74; // "supercnt"
+    let mut rng = StdRng::seed_from_u64(seed ^ ns);
+    let yaw = rng.gen_range(0.0..(2.0 * std::f64::consts::PI));
+    let tilt = rng.gen_range(-0.6..0.6); // radians
+    let rot_yaw = rotation_z(yaw);
+    let rot_tilt = rotation_x(tilt);
+    // Transform basis axes into continent frame
+    let ex = [1.0, 0.0, 0.0];
+    let ey = [0.0, 1.0, 0.0];
+    let mut exp = mat3_mul(rot_tilt, ex);
+    exp = mat3_mul(rot_yaw, exp);
+    let mut eyp = mat3_mul(rot_tilt, ey);
+    eyp = mat3_mul(rot_yaw, eyp);
+    let n1 = normalize3(exp);
+    // Secondary belt is a diagonal combination within the continent frame
+    let phi = (p.diag_angle_deg.to_radians()).clamp(-std::f64::consts::PI, std::f64::consts::PI);
+    let n2u = [
+        phi.cos() * n1[0] + phi.sin() * eyp[0],
+        phi.cos() * n1[1] + phi.sin() * eyp[1],
+        phi.cos() * n1[2] + phi.sin() * eyp[2],
+    ];
+    let n2 = normalize3(n2u);
+    vec![
+        GreatCircleBelt { n_hat: n1, half_width_km: p.half_width_km_primary, uplift_m: p.uplift_primary_m },
+        GreatCircleBelt { n_hat: n2, half_width_km: p.half_width_km_secondary, uplift_m: p.uplift_secondary_m },
+    ]
+}
+
 // ----------------------- small 3D helpers (double precision) -----------------------
 #[inline]
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
 
 #[inline]
 fn normalize3(v: [f64; 3]) -> [f64; 3] {
     let mut s = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if s <= 0.0 { s = 1.0; }
+    if s <= 0.0 {
+        s = 1.0;
+    }
     [v[0] / s, v[1] / s, v[2] / s]
 }
 
@@ -365,4 +428,59 @@ pub fn apply_uplift_from_c_thc(depth_m: &mut [f32], c: &[f32], th_c_m: &[f32]) {
     for i in 0..n {
         depth_m[i] += -(c[i] * th_c_m[i]);
     }
+}
+
+/// Build a cratonic thickness field (meters) from a continent template with tapered core and mild spatial noise.
+///
+/// Deterministic given `seed`. Thickness = base_km + extra_km * t^p + noise_km * t * n_smooth,
+/// where t ∈ [0,1] is the template value and n_smooth is a single-ring averaged hash noise in [-1,1].
+pub fn build_craton_thickness(
+    grid: &Grid,
+    template: &[f32],
+    base_km: f32,
+    extra_km: f32,
+    noise_km: f32,
+    seed: u64,
+    power: f32,
+) -> Vec<f32> {
+    let n = grid.cells.min(template.len());
+    // Hash-based per-cell noise in [-1,1]
+    fn hash32(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846ca68b);
+        x ^= x >> 16;
+        x
+    }
+    let seed_lo = (seed as u32) ^ 0xC0A71C0E;
+    let mut noise_raw: Vec<f32> = vec![0.0; n];
+    for (i, nr) in noise_raw.iter_mut().enumerate().take(n) {
+        let h = hash32(i as u32 ^ seed_lo);
+        let u = (h as f32) * (1.0 / 4294967295.0); // [0,1]
+        *nr = 2.0 * u - 1.0; // [-1,1]
+    }
+    // Single-ring smoothing to reduce speckle while keeping determinism and low cost
+    let mut noise_s: Vec<f32> = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = noise_raw[i];
+        let mut cnt = 1.0f32;
+        for &nj in &grid.n1[i] {
+            let j = nj as usize;
+            if j < n {
+                sum += noise_raw[j];
+                cnt += 1.0;
+            }
+        }
+        noise_s[i] = sum / cnt;
+    }
+    // Map template to thickness (km), then to meters
+    let mut th_m: Vec<f32> = vec![0.0; n];
+    for i in 0..n {
+        let t = template[i].clamp(0.0, 1.0);
+        let core = t.powf(power.max(1.0));
+        let th_km = base_km + extra_km * core + noise_km * t * noise_s[i];
+        th_m[i] = (th_km.max(0.0)) * 1000.0;
+    }
+    th_m
 }

@@ -7,7 +7,7 @@
 //! - Subduction/transform/rifting/orogeny still edit `depth_m` additively on top of age-derived bathy.
 //!   If these are applied at high cadence without normalization, long-run drift of `depth_m` can occur.
 
-use crate::{boundaries, flexure_loads, ridge, sea_level, subduction, world::World};
+use crate::{boundaries, flexure_loads, ridge, sea_level, subduction, transforms, world::World};
 
 /// Pipeline configuration used by Simple and Advanced modes.
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +30,78 @@ pub struct PipelineCfg {
     pub enable_subduction: bool,
     /// Enable rigid plate motion (advect `plate_id`, refresh velocities)
     pub enable_rigid_motion: bool,
+    /// Cadence controls (>=1); a stage runs when `(step_idx+1) % cadence == 0`.
+    /// Transformer bands cadence in steps.
+    pub cadence_trf_every: u32,
+    /// Subduction bands cadence in steps.
+    pub cadence_sub_every: u32,
+    /// Flexure cadence in steps.
+    pub cadence_flx_every: u32,
+    /// Sea-level (eta) solve cadence in steps.
+    pub cadence_sea_every: u32,
+    /// Surface processes cadence in steps.
+    pub cadence_surf_every: u32,
+    /// If true, attempt GPU flexure (experimental). Fallback to Winkler if unavailable.
+    pub use_gpu_flexure: bool,
+    /// GPU flexure: number of multigrid levels.
+    pub gpu_flex_levels: u32,
+    /// GPU flexure: V-cycles per cadence.
+    pub gpu_flex_cycles: u32,
+    /// GPU flexure: weighted-Jacobi omega.
+    pub gpu_wj_omega: f32,
+    /// Subtract mean load before solving (stability, removes rigid-body mode).
+    pub subtract_mean_load: bool,
+    // Subduction tunables (viewer-controlled)
+    /// Convergence threshold in m/yr used for band detection.
+    pub sub_tau_conv_m_per_yr: f32,
+    /// Trench band half-width in km on subducting side.
+    pub sub_trench_half_width_km: f32,
+    /// Arc band peak offset from trench hinge in km (overriding side).
+    pub sub_arc_offset_km: f32,
+    /// Arc band half-width in km.
+    pub sub_arc_half_width_km: f32,
+    /// Back-arc band width in km (behind arc).
+    pub sub_backarc_width_km: f32,
+    /// Trench deepening magnitude in meters (positive deepens).
+    pub sub_trench_deepen_m: f32,
+    /// Arc uplift magnitude in meters (negative uplifts/shallows).
+    pub sub_arc_uplift_m: f32,
+    /// Back-arc uplift magnitude in meters (negative uplifts/shallows).
+    pub sub_backarc_uplift_m: f32,
+    /// Absolute rollback offset applied to overriding distances in meters.
+    pub sub_rollback_offset_m: f32,
+    /// Rollback rate in km/Myr for time-progression (applied by viewer logic).
+    pub sub_rollback_rate_km_per_myr: f32,
+    /// If true, back-arc is deepened (extension mode) instead of uplifted.
+    pub sub_backarc_extension_mode: bool,
+    /// Back-arc deepening magnitude in meters when in extension mode.
+    pub sub_backarc_extension_deepen_m: f32,
+    /// Continental fraction threshold [0,1] for gating trench deepening.
+    pub sub_continent_c_min: f32,
+
+    // Surface processes parameters (viewer-controlled)
+    /// Stream-power coefficient for fluvial incision (yr⁻¹ m^(1-m) s^m units folded)
+    pub surf_k_stream: f32,
+    /// Stream-power m exponent
+    pub surf_m_exp: f32,
+    /// Stream-power n exponent
+    pub surf_n_exp: f32,
+    /// Hillslope diffusion coefficient κ (m²/yr)
+    pub surf_k_diff: f32,
+    /// Sediment transport coefficient (nondimensional scaling)
+    pub surf_k_tr: f32,
+    /// Transport-limited p exponent
+    pub surf_p_exp: f32,
+    /// Transport-limited q exponent
+    pub surf_q_exp: f32,
+    /// Sediment density (kg/m³)
+    pub surf_rho_sed: f32,
+    /// Minimum slope threshold
+    pub surf_min_slope: f32,
+    /// Subcycles per step for numerical stability (>=1)
+    pub surf_subcycles: u32,
+    /// If true, couple surface mass change back into flexure load (placeholder)
+    pub surf_couple_flexure: bool,
 }
 
 /// Borrowed views of surface fields required by the pipeline.
@@ -53,6 +125,11 @@ pub struct SurfaceFields<'a> {
 /// 8) sanitize elevation
 pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     let dt = cfg.dt_myr;
+    let k = world.clock.step_idx.saturating_add(1);
+    let do_trf = k % (cfg.cadence_trf_every.max(1) as u64) == 0;
+    let do_sub = k % (cfg.cadence_sub_every.max(1) as u64) == 0;
+    let do_flx = k % (cfg.cadence_flx_every.max(1) as u64) == 0;
+    let do_sea = k % (cfg.cadence_sea_every.max(1) as u64) == 0;
 
     // Kinematics:
     // - Refresh per-cell velocities from plates
@@ -154,68 +231,168 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         ) as f32;
         world.depth_m[i] = d0.clamp(0.0, 6000.0);
     }
-    // NOTE: The baseline above overwrites previous `depth_m` fully. Any persistent tectonic edits
-    // must be applied after this line each frame, or tracked in separate fields and composed.
-    // Apply subduction band edits in-place on top of baseline
-    if cfg.enable_subduction {
+    // Compose tectonic edits as a single delta added to baseline
+    let n = world.grid.cells;
+    let base_depth = world.depth_m.clone();
+    let mut delta_tect: Vec<f32> = vec![0.0; n];
+    if cfg.enable_subduction && do_sub {
+        let mut sub_tmp = vec![0.0f32; n];
         let _sub_stats = subduction::apply_subduction(
             &world.grid,
             &world.boundaries,
             &world.plates.plate_id,
             &world.age_myr,
             &world.v_en,
-            &mut world.depth_m,
+            &mut sub_tmp,
             subduction::SubductionParams {
-                tau_conv_m_per_yr: 0.005,
-                trench_half_width_km: 40.0,
-                arc_offset_km: 140.0,
-                arc_half_width_km: 25.0,
-                backarc_width_km: 120.0,
-                trench_deepen_m: 1800.0,
-                arc_uplift_m: -300.0,
-                backarc_uplift_m: -120.0,
-                rollback_offset_m: 0.0,
-                rollback_rate_km_per_myr: 0.0,
-                backarc_extension_mode: false,
-                backarc_extension_deepen_m: 400.0,
-                continent_c_min: 0.6,
+                tau_conv_m_per_yr: cfg.sub_tau_conv_m_per_yr as f64,
+                trench_half_width_km: cfg.sub_trench_half_width_km as f64,
+                arc_offset_km: cfg.sub_arc_offset_km as f64,
+                arc_half_width_km: cfg.sub_arc_half_width_km as f64,
+                backarc_width_km: cfg.sub_backarc_width_km as f64,
+                trench_deepen_m: cfg.sub_trench_deepen_m,
+                arc_uplift_m: cfg.sub_arc_uplift_m,
+                backarc_uplift_m: cfg.sub_backarc_uplift_m,
+                rollback_offset_m: cfg.sub_rollback_offset_m as f64,
+                rollback_rate_km_per_myr: cfg.sub_rollback_rate_km_per_myr as f64,
+                backarc_extension_mode: cfg.sub_backarc_extension_mode,
+                backarc_extension_deepen_m: cfg.sub_backarc_extension_deepen_m,
+                continent_c_min: cfg.sub_continent_c_min,
             },
             Some(&world.c),
         );
+        for i in 0..n {
+            delta_tect[i] += sub_tmp[i] - base_depth[i];
+        }
+    }
+    if do_trf {
+        let mut tr_tmp = vec![0.0f32; n];
+        let _ = transforms::apply_transforms(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &world.v_en,
+            &mut tr_tmp,
+            transforms::TransformParams {
+                tau_open_m_per_yr: 0.005,
+                min_tangential_m_per_yr: 0.003,
+                basin_half_width_km: 50.0,
+                ridge_like_uplift_m: -200.0,
+                basin_deepen_m: 300.0,
+            },
+        );
+        for i in 0..n {
+            delta_tect[i] += tr_tmp[i];
+        }
+    }
+    for i in 0..n {
+        world.depth_m[i] = (base_depth[i] + delta_tect[i]).clamp(-8000.0, 8000.0);
     }
 
-    // Flexure: respond to loads (simple Winkler-like response for MVP)
-    if cfg.enable_flexure {
+    // Flexure: experimental GPU V-cycle or Winkler fallback
+    if cfg.enable_flexure && do_flx {
         let lp = flexure_loads::LoadParams {
             rho_w: 1030.0,
             rho_c: 2900.0,
             g: 9.81,
             sea_level_m: *surf.eta_m,
         };
-        let f_load = flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
-        let k = 3.0e8f32; // foundation stiffness (N/m^3)
-        for (d, &q) in world.depth_m.iter_mut().zip(f_load.iter()) {
-            let w = q / k;
-            *d = (*d + w).clamp(-8000.0, 8000.0);
+        let mut f_load = flexure_loads::assemble_load_from_depth(&world.grid, &world.depth_m, &lp);
+        if cfg.subtract_mean_load {
+            let mut sum: f64 = 0.0;
+            for &q in &f_load {
+                sum += q as f64;
+            }
+            let mean = (sum / (f_load.len().max(1) as f64)) as f32;
+            for q in &mut f_load {
+                *q -= mean;
+            }
+        }
+        let n = world.grid.cells;
+        if cfg.use_gpu_flexure {
+            // Best-effort GPU path: use engine::gpu context and flexure_gpu V-cycle
+            // Note: This creates a transient context per call; future work should reuse.
+            let fut = async {
+                let ctx = crate::gpu::persistent();
+                let mut flex = crate::flexure_gpu::FlexGpu::new(ctx);
+                // One-tile approximation over full grid (no halos), dx ≈ mean cell scale
+                let mut area_mean: f64 = 0.0;
+                for a in &world.area_m2 {
+                    area_mean += *a as f64;
+                }
+                let cell_scale_m = (area_mean.max(1.0) / (n as f64)).sqrt() as f32;
+                // Map sphere to a strip tile (approx); future: atlas tiling
+                let dims = crate::flexure_gpu::TileDims {
+                    width: n as u32,
+                    height: 1,
+                    halo: 2,
+                    dx: cell_scale_m,
+                };
+                let w_tot = dims.width_total() as usize;
+                let h_tot = dims.height_total() as usize;
+                let n_tot = w_tot * h_tot;
+                let mut w_tex = crate::flexure_gpu::GpuTex::new_storage(ctx, n_tot, "flex.w");
+                let f_tex = crate::flexure_gpu::GpuTex::new_storage(ctx, n_tot, "flex.f");
+                // Stage f into interior row with halos
+                let mut f_stage = vec![0.0f32; n_tot];
+                let row = dims.halo as usize;
+                let start = row * w_tot + (dims.halo as usize);
+                f_stage[start..start + n].copy_from_slice(&f_load[..n]);
+                ctx.queue.write_buffer(&f_tex.buf, 0, bytemuck::cast_slice(&f_stage));
+                let mut scratch = crate::flexure_gpu::FlexScratch::new(ctx, n_tot);
+                let e_pa = 70.0e9f32;
+                let nu = 0.25f32;
+                let te_m = 25_000.0f32;
+                let d = e_pa * te_m.powi(3) / (12.0 * (1.0 - nu * nu));
+                let p = crate::flexure_gpu::FlexParams {
+                    d,
+                    k: 0.0,
+                    wj_omega: cfg.gpu_wj_omega.clamp(0.4, 0.95),
+                    nu1: 1,
+                    nu2: 1,
+                    levels: cfg.gpu_flex_levels.max(1),
+                };
+                // Run requested number of V-cycles
+                for _ in 0..cfg.gpu_flex_cycles.max(1) {
+                    let _stats = flex.v_cycle(ctx, dims, &mut w_tex, &f_tex, &mut scratch, &p);
+                }
+                // Read back w and extract interior row
+                let w_all =
+                    crate::flexure_gpu::blocking_read(&ctx.device, &ctx.queue, &w_tex.buf, n_tot);
+                let mut w_out = vec![0.0f32; n];
+                w_out[..n].copy_from_slice(&w_all[start..start + n]);
+                w_out
+            };
+            let w_host: Vec<f32> = pollster::block_on(fut);
+            for (d, wi) in world.depth_m.iter_mut().zip(w_host.iter()) {
+                *d = (*d + *wi).clamp(-8000.0, 8000.0);
+            }
+        } else {
+            let k = 3.0e8f32; // Winkler fallback
+            for (d, &q) in world.depth_m.iter_mut().zip(f_load.iter()) {
+                let w = q / k;
+                *d = (*d + w).clamp(-8000.0, 8000.0);
+            }
         }
     }
     // NOTE(Science): Winkler foundation ignores lithospheric flexural coupling length scales.
     // It is useful as a placeholder but cannot reproduce forebulge/trough patterns.
 
     // Erosion/diffusion
-    if cfg.enable_erosion {
+    let do_surf = k % (cfg.cadence_surf_every.max(1) as u64) == 0;
+    if cfg.enable_erosion && do_surf {
         let sp = crate::surface::SurfaceParams {
-            k_stream: 1.0e-6,
-            m_exp: 0.5,
-            n_exp: 1.0,
-            k_diff: 1.0e-2,
-            k_tr: 0.0,
-            p_exp: 1.0,
-            q_exp: 1.0,
-            rho_sed: 2500.0,
-            min_slope: 1.0e-4,
-            subcycles: 1,
-            couple_flexure: false,
+            k_stream: cfg.surf_k_stream,
+            m_exp: cfg.surf_m_exp,
+            n_exp: cfg.surf_n_exp,
+            k_diff: cfg.surf_k_diff,
+            k_tr: cfg.surf_k_tr,
+            p_exp: cfg.surf_p_exp,
+            q_exp: cfg.surf_q_exp,
+            rho_sed: cfg.surf_rho_sed,
+            min_slope: cfg.surf_min_slope,
+            subcycles: cfg.surf_subcycles.max(1),
+            couple_flexure: cfg.surf_couple_flexure,
         };
         let _stats = crate::surface::apply_surface_processes(
             &world.grid,
@@ -237,7 +414,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         *e = if z.is_finite() { z } else { 0.0 };
     }
 
-    if !cfg.freeze_eta {
+    if !cfg.freeze_eta && do_sea {
         let eta_m =
             sea_level::solve_eta_on_elevation(surf.elev_m, &world.area_m2, cfg.target_land_frac);
         *surf.eta_m = eta_m;
@@ -266,4 +443,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         let land_frac = if tot_area > 0.0 { land_area / tot_area } else { 0.0 };
         println!("[budget] land={:.1}% cont={:.3e} sed={:.3e}", 100.0 * land_frac, m_cont, m_sed);
     }
+    // Advance clock for viewer pipeline path
+    world.clock.t_myr += dt as f64;
+    world.clock.step_idx = world.clock.step_idx.saturating_add(1);
 }
