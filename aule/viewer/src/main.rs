@@ -49,6 +49,40 @@ fn run_to_t_realtime(
                 log_mass_budget: false,
                 enable_subduction: sp.do_subduction,
                 enable_rigid_motion: sp.do_rigid_motion,
+                cadence_trf_every: ov.cadence_trf_every.max(1),
+                cadence_sub_every: ov.cadence_sub_every.max(1),
+                cadence_flx_every: ov.cadence_flx_every.max(1),
+                cadence_sea_every: ov.cadence_sea_every.max(1),
+                cadence_surf_every: ov.cadence_sea_every.max(1),
+                use_gpu_flexure: true,
+                gpu_flex_levels: ov.levels.max(1),
+                gpu_flex_cycles: ov.flex_cycles.max(1),
+                gpu_wj_omega: ov.wj_omega,
+                subtract_mean_load: ov.subtract_mean_load,
+                surf_k_stream: ov.surf_k_stream,
+                surf_m_exp: ov.surf_m_exp,
+                surf_n_exp: ov.surf_n_exp,
+                surf_k_diff: ov.surf_k_diff,
+                surf_k_tr: ov.surf_k_tr,
+                surf_p_exp: ov.surf_p_exp,
+                surf_q_exp: ov.surf_q_exp,
+                surf_rho_sed: ov.surf_rho_sed,
+                surf_min_slope: ov.surf_min_slope,
+                surf_subcycles: ov.surf_subcycles,
+                surf_couple_flexure: ov.surf_couple_flexure,
+                sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
+                sub_trench_half_width_km: ov.sub_trench_half_width_km,
+                sub_arc_offset_km: ov.sub_arc_offset_km,
+                sub_arc_half_width_km: ov.sub_arc_half_width_km,
+                sub_backarc_width_km: ov.sub_backarc_width_km,
+                sub_trench_deepen_m: ov.sub_trench_deepen_m,
+                sub_arc_uplift_m: ov.sub_arc_uplift_m,
+                sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
+                sub_rollback_offset_m: ov.sub_rollback_offset_m,
+                sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
+                sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
+                sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
+                sub_continent_c_min: ov.sub_continent_c_min,
             };
             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
             let mut eta = world.sea.eta_m;
@@ -127,11 +161,13 @@ fn render_simple_panels(
             let plates = match ov.simple_preset {
                 1 => 10,
                 2 => 6,
+                3 => 8, // Supercontinent
                 _ => 8,
             };
             let continents_n = match ov.simple_preset {
                 1 => 4,
                 2 => 2,
+                3 => 0, // Supercontinent preset triggers specialized generator
                 _ => 3,
             };
             // Reset/normalize world state for current F & plates
@@ -163,24 +199,55 @@ fn render_simple_panels(
             }
             let n_cells = world.grid.cells;
             for i in 0..n_cells {
-                let mut d =
-                    engine::age::depth_from_age(world.age_myr[i] as f64, 2600.0, 350.0, 0.0) as f32;
+                let mut d = engine::age::depth_from_age_plate(
+                    world.age_myr[i] as f64,
+                    2600.0,
+                    world.clock.t_myr,
+                    6000.0,
+                    1.0e-6,
+                ) as f32;
                 if !d.is_finite() {
                     d = 6000.0;
                 }
                 world.depth_m[i] = d.clamp(0.0, 6000.0);
             }
             // Build continent template (unitless 0..1)
-            let cp = engine::continent::ContinentParams {
-                seed: ov.simple_seed,
-                n_continents: continents_n,
-                mean_radius_km: 2200.0,
-                falloff_km: 600.0,
-                plateau_uplift_m: 1.0,
-                target_land_fraction: None,
+            let continent_tpl: Vec<f32> = if continents_n == 0 {
+                // Supercontinent: contiguous ribbon of lobes
+                engine::continent::build_supercontinent_template(
+                    &world.grid,
+                    ov.simple_seed,
+                    5,
+                    2200.0,
+                    600.0,
+                )
+            } else {
+                let cp = engine::continent::ContinentParams {
+                    seed: ov.simple_seed,
+                    n_continents: continents_n,
+                    mean_radius_km: 2200.0,
+                    falloff_km: 600.0,
+                    plateau_uplift_m: 1.0,
+                    target_land_fraction: None,
+                };
+                let cf = engine::continent::build_continents(&world.grid, cp);
+                cf.uplift_template_m
             };
-            let cf = engine::continent::build_continents(&world.grid, cp);
-            let continent_tpl: Vec<f32> = cf.uplift_template_m;
+            // If Supercontinent, imprint broad inherited belts before amplitude solve
+            if continents_n == 0 {
+                let belts = engine::continent::build_supercontinent_belts(
+                    ov.simple_seed,
+                    engine::continent::BeltParams {
+                        half_width_km_primary: ov.belt_hw_primary_km,
+                        half_width_km_secondary: ov.belt_hw_secondary_km,
+                        uplift_primary_m: ov.belt_uplift_primary_m,
+                        uplift_secondary_m: ov.belt_uplift_secondary_m,
+                        diag_angle_deg: ov.belt_diag_deg,
+                    },
+                );
+                let imprint = engine::continent::imprint_orogenic_belts(&world.grid, &belts);
+                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) { *d += *di; }
+            }
             // Solve amplitude for target land fraction (area-based). We'll apply uplift only; sea offset handled via world.sea.eta_m
             let target_land = ov.simple_target_land.clamp(0.0, 0.5);
             let (amp_m, _off_m_unused) = engine::isostasy::solve_amplitude_for_land_fraction(
@@ -210,7 +277,21 @@ fn render_simple_panels(
             world.sea.eta_m = -(eta_off as f32);
             // Seed continents fields so subsequent steps preserve uplift
             world.c.clone_from(&continent_tpl);
-            world.th_c_m.fill(amp_used_m);
+            if continents_n == 0 {
+                // Cratonic thickness: tapered core with mild spatial noise, deterministic
+                let th = engine::continent::build_craton_thickness(
+                    &world.grid,
+                    &continent_tpl,
+                    22.0,  // base km
+                    16.0,  // extra km in core
+                    2.0,   // noise km scaled by template
+                    ov.simple_seed,
+                    1.5,   // taper exponent
+                );
+                world.th_c_m.clone_from_slice(&th);
+            } else {
+                world.th_c_m.fill(amp_used_m);
+            }
             world.epoch_continents = world.epoch_continents.wrapping_add(1);
             // Run one unified pipeline step so Generate World matches Play codepath
             {
@@ -221,9 +302,43 @@ fn render_simple_panels(
                     enable_erosion: !ov.disable_erosion,
                     target_land_frac: ov.simple_target_land,
                     freeze_eta: ov.freeze_eta,
-                    log_mass_budget: true,
+                    log_mass_budget: false,
                     enable_subduction: !ov.disable_subduction,
                     enable_rigid_motion: true,
+                    cadence_trf_every: ov.cadence_trf_every.max(1),
+                    cadence_sub_every: ov.cadence_sub_every.max(1),
+                    cadence_flx_every: ov.cadence_flx_every.max(1),
+                    cadence_sea_every: ov.cadence_sea_every.max(1),
+                    cadence_surf_every: ov.cadence_sea_every.max(1),
+                    use_gpu_flexure: true,
+                    gpu_flex_levels: ov.levels.max(1),
+                    gpu_flex_cycles: ov.flex_cycles.max(1),
+                    gpu_wj_omega: ov.wj_omega,
+                    subtract_mean_load: ov.subtract_mean_load,
+                    surf_k_stream: ov.surf_k_stream,
+                    surf_m_exp: ov.surf_m_exp,
+                    surf_n_exp: ov.surf_n_exp,
+                    surf_k_diff: ov.surf_k_diff,
+                    surf_k_tr: ov.surf_k_tr,
+                    surf_p_exp: ov.surf_p_exp,
+                    surf_q_exp: ov.surf_q_exp,
+                    surf_rho_sed: ov.surf_rho_sed,
+                    surf_min_slope: ov.surf_min_slope,
+                    surf_subcycles: ov.surf_subcycles,
+                    surf_couple_flexure: ov.surf_couple_flexure,
+                    sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
+                    sub_trench_half_width_km: ov.sub_trench_half_width_km,
+                    sub_arc_offset_km: ov.sub_arc_offset_km,
+                    sub_arc_half_width_km: ov.sub_arc_half_width_km,
+                    sub_backarc_width_km: ov.sub_backarc_width_km,
+                    sub_trench_deepen_m: ov.sub_trench_deepen_m,
+                    sub_arc_uplift_m: ov.sub_arc_uplift_m,
+                    sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
+                    sub_rollback_offset_m: ov.sub_rollback_offset_m,
+                    sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
+                    sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
+                    sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
+                    sub_continent_c_min: ov.sub_continent_c_min,
                 };
                 let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
                 let mut eta = world.sea.eta_m;
@@ -293,9 +408,17 @@ fn render_simple_panels(
                 zmax,
                 land_frac * 100.0
             );
-            // Guards (non-panicking in release; keep as debug only)
-            debug_assert!(world.depth_m.iter().any(|d| *d < 0.0), "no land after solve");
-            debug_assert!(world.depth_m.iter().any(|d| *d > 0.0), "no ocean after solve");
+            // Guards (use eta-adjusted elevation for land/ocean checks)
+            let has_land = world
+                .depth_m
+                .iter()
+                .any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
+            let has_ocean = world
+                .depth_m
+                .iter()
+                .any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
+            debug_assert!(has_land, "no land after solve");
+            debug_assert!(has_ocean, "no ocean after solve");
             // Apply palette then mark dirty
             apply_simple_palette(ov, world, ctx);
             ov.world_dirty = true;
@@ -315,7 +438,26 @@ fn render_simple_panels(
     egui::CollapsingHeader::new("Continents & Seeds").default_open(true).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("Preset:");
-            // dropdown for ov.simple_preset (WorldPreset)
+            egui::ComboBox::from_id_source("simple_preset_combo")
+                .selected_text(match ov.simple_preset {
+                    1 => "Many small",
+                    2 => "Few large",
+                    3 => "Supercontinent",
+                    _ => "Default",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut ov.simple_preset, 0, "Default");
+                    ui.selectable_value(&mut ov.simple_preset, 1, "Many small");
+                    ui.selectable_value(&mut ov.simple_preset, 2, "Few large");
+                    ui.selectable_value(&mut ov.simple_preset, 3, "Supercontinent");
+                });
+            if ui.button("Pangea").on_hover_text("Set Supercontinent preset and regenerate").clicked() {
+                ov.simple_preset = 3;
+                // Force a fresh world regenerate next frame via existing Generate button path
+                // by toggling world_dirty and raster_dirty; user clicks Generate World to apply.
+                ov.world_dirty = true;
+                ov.raster_dirty = true;
+            }
         });
         ui.add(egui::DragValue::new(&mut ov.simple_seed).speed(1));
         ui.add(
@@ -470,47 +612,31 @@ fn render_advanced_panels(
         ui.label(format!("residual ratio = {:.3}", ov.last_residual));
     });
 
-    egui::CollapsingHeader::new("Surface").default_open(ov.adv_open_surface).show(ui, |ui| {
-        ui.checkbox(&mut ov.surface_enable, "Enable surface processes");
-        ui.checkbox(&mut ov.surf_couple_flexure, "Couple to flexure");
-        ui.add(
-            egui::Slider::new(&mut ov.surf_k_stream, 1.0e-6..=1.0e-4)
-                .logarithmic(true)
-                .text("K_stream"),
-        );
+    egui::CollapsingHeader::new("Surface Processes").default_open(ov.adv_open_surface).show(ui, |ui| {
+        ui.checkbox(&mut ov.surface_enable, "Enable erosion & diffusion");
+        ui.add(egui::Slider::new(&mut ov.surf_k_stream, 1.0e-7..=1.0e-5).logarithmic(true).text("k_stream"));
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut ov.surf_m_exp, 0.3..=0.6).text("m"));
-            ui.add(egui::Slider::new(&mut ov.surf_n_exp, 0.8..=1.5).text("n"));
+            ui.add(egui::Slider::new(&mut ov.surf_m_exp, 0.3..=0.8).text("m"));
+            ui.add(egui::Slider::new(&mut ov.surf_n_exp, 0.7..=1.5).text("n"));
         });
-        ui.add(
-            egui::Slider::new(&mut ov.surf_k_diff, 0.05..=0.5)
-                .logarithmic(true)
-                .text("κ_diff (m²/yr)"),
-        );
-        ui.add(
-            egui::Slider::new(&mut ov.surf_k_tr, 0.01..=0.3).logarithmic(true).text("K_transport"),
-        );
+        ui.add(egui::Slider::new(&mut ov.surf_k_diff, 0.01..=0.5).logarithmic(true).text("κ_diff (m²/yr)"));
+        ui.add(egui::Slider::new(&mut ov.surf_k_tr, 0.0..=0.3).logarithmic(true).text("K_transport"));
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut ov.surf_p_exp, 1.0..=2.0).text("p"));
+            ui.add(egui::Slider::new(&mut ov.surf_p_exp, 0.8..=1.6).text("p"));
             ui.add(egui::Slider::new(&mut ov.surf_q_exp, 0.5..=1.5).text("q"));
         });
-        ui.add(egui::Slider::new(&mut ov.surf_rho_sed, 1000.0..=2500.0).text("ρ_sed (kg/m³)"));
-        ui.add(
-            egui::Slider::new(&mut ov.surf_min_slope, 1.0e-5..=1.0e-3)
-                .logarithmic(true)
-                .text("min slope"),
-        );
+        ui.add(egui::Slider::new(&mut ov.surf_rho_sed, 1200.0..=2600.0).text("ρ_sed (kg/m³)"));
+        ui.add(egui::Slider::new(&mut ov.surf_min_slope, 1.0e-5..=1.0e-3).logarithmic(true).text("min slope"));
         let mut sc = ov.surf_subcycles;
-        let changed_sc = ui.add(egui::Slider::new(&mut sc, 1..=10).text("Subcycles")).changed();
-        if changed_sc {
-            ov.surf_subcycles = sc;
-        }
+        let changed_sc = ui.add(egui::Slider::new(&mut sc, 1..=8).text("Subcycles")).changed();
+        if changed_sc { ov.surf_subcycles = sc; }
+        ui.add(egui::Slider::new(&mut ov.cadence_surf_every, 1..=20).text("Cadence (steps)"));
         if let Some(stats) = world.last_surface_stats {
             let pct = if stats.eroded_m3 > 0.0 { stats.residual_m3 / stats.eroded_m3 } else { 0.0 };
             ui.label(format!(
-					"Erosion={:.2e} m³  Deposition={:.2e} m³  Residual={:+.2}%  max_ero={:.2} m  max_dep={:.2} m",
-					stats.eroded_m3, stats.deposited_m3, pct * 100.0, stats.max_erosion_m, stats.max_deposition_m
-				));
+                "Erosion={:.2e} m³  Deposition={:.2e} m³  Residual={:+.2}%  max_ero={:.2} m  max_dep={:.2} m",
+                stats.eroded_m3, stats.deposited_m3, pct * 100.0, stats.max_erosion_m, stats.max_deposition_m
+            ));
         }
     });
 
@@ -524,6 +650,23 @@ fn render_advanced_panels(
             .changed();
         changed |= ui
             .add(egui::Slider::new(&mut ov.cont_falloff_km, 200.0..=1200.0).text("Falloff σ (km)"))
+            .changed();
+        ui.separator();
+        ui.label("Supercontinent belts (if n=0)");
+        changed |= ui
+            .add(egui::Slider::new(&mut ov.belt_hw_primary_km, 100.0..=800.0).text("Primary half-width (km)"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut ov.belt_hw_secondary_km, 80.0..=600.0).text("Secondary half-width (km)"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut ov.belt_uplift_primary_m, 0.0..=1500.0).text("Primary uplift (m)"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut ov.belt_uplift_secondary_m, 0.0..=1000.0).text("Secondary uplift (m)"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut ov.belt_diag_deg, 0.0..=60.0).text("Diagonal angle (deg)"))
             .changed();
         changed |= ui.checkbox(&mut ov.cont_auto_amp, "Auto amplitude to target land %").changed();
         if ov.cont_auto_amp {
@@ -557,6 +700,54 @@ fn render_advanced_panels(
             ov.mesh_coastline = None;
             ov.bathy_cache = None;
             ov.world_dirty = true;
+        }
+    });
+
+    egui::CollapsingHeader::new("Subduction (bands & magnitudes)").default_open(true).show(ui, |ui| {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Preset:");
+            egui::ComboBox::from_id_source("subduction_preset_combo")
+                .selected_text(match ov.sub_preset { 1 => "Strong rollback", 2 => "Back-arc extension", 3 => "Weak arcs", _ => "Reference" })
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(ov.sub_preset == 0, "Reference").clicked() { ov.sub_preset = 0; apply_sub_preset(ov); changed = true; }
+                    if ui.selectable_label(ov.sub_preset == 1, "Strong rollback").clicked() { ov.sub_preset = 1; apply_sub_preset(ov); changed = true; }
+                    if ui.selectable_label(ov.sub_preset == 2, "Back-arc extension").clicked() { ov.sub_preset = 2; apply_sub_preset(ov); changed = true; }
+                    if ui.selectable_label(ov.sub_preset == 3, "Weak arcs").clicked() { ov.sub_preset = 3; apply_sub_preset(ov); changed = true; }
+                });
+        });
+        ui.label("Convergence threshold and band geometry");
+        changed |= ui.add(egui::Slider::new(&mut ov.sub_tau_conv_m_per_yr, 0.001..=0.02).text("τ_conv (m/yr)")).changed();
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_trench_half_width_km, 10.0..=120.0).text("Trench half-width (km)")).changed();
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_offset_km, 60.0..=300.0).text("Arc offset (km)")).changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_half_width_km, 10.0..=80.0).text("Arc half-width (km)")).changed();
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_width_km, 60.0..=300.0).text("Back-arc width (km)")).changed();
+        });
+        ui.separator();
+        ui.label("Magnitudes (m; positive deepens, negative uplifts)");
+        changed |= ui.add(egui::Slider::new(&mut ov.sub_trench_deepen_m, 500.0..=4000.0).text("Trench deepen (m)")).changed();
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_uplift_m, -1000.0..=0.0).text("Arc uplift (m)")).changed();
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_uplift_m, -1000.0..=0.0).text("Back-arc uplift (m)")).changed();
+        });
+        ui.separator();
+        ui.label("Rollback and extension mode");
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_rollback_offset_m, 0.0..=200_000.0).text("Rollback offset (m)")).changed();
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_rollback_rate_km_per_myr, 0.0..=40.0).text("Rollback rate (km/Myr)")).changed();
+        });
+        changed |= ui.checkbox(&mut ov.sub_backarc_extension_mode, "Back-arc extension mode").changed();
+        if ov.sub_backarc_extension_mode {
+            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_extension_deepen_m, 0.0..=1000.0).text("Back-arc deepen (m)")).changed();
+        }
+        ui.separator();
+        changed |= ui.add(egui::Slider::new(&mut ov.sub_continent_c_min, 0.4..=0.9).text("Continental C threshold")).changed();
+        if changed {
+            ov.world_dirty = true;
+            ov.bathy_cache = None;
         }
     });
 
@@ -1615,9 +1806,43 @@ fn main() {
                                                 enable_erosion: !ov.disable_erosion,
                                                 target_land_frac: ov.simple_target_land,
                                                 freeze_eta: ov.freeze_eta,
-                                                log_mass_budget: true,
+                                                log_mass_budget: false,
                                                 enable_subduction: !ov.disable_subduction,
                                                 enable_rigid_motion: true,
+                                                cadence_trf_every: ov.cadence_trf_every.max(1),
+                                                cadence_sub_every: ov.cadence_sub_every.max(1),
+                                                cadence_flx_every: ov.cadence_flx_every.max(1),
+                                                cadence_sea_every: ov.cadence_sea_every.max(1),
+                                                cadence_surf_every: ov.cadence_surf_every.max(1),
+                                                use_gpu_flexure: true,
+                                                gpu_flex_levels: ov.levels.max(1),
+                                                gpu_flex_cycles: ov.flex_cycles.max(1),
+                                                gpu_wj_omega: ov.wj_omega,
+                                                subtract_mean_load: ov.subtract_mean_load,
+                                                surf_k_stream: ov.surf_k_stream,
+                                                surf_m_exp: ov.surf_m_exp,
+                                                surf_n_exp: ov.surf_n_exp,
+                                                surf_k_diff: ov.surf_k_diff,
+                                                surf_k_tr: ov.surf_k_tr,
+                                                surf_p_exp: ov.surf_p_exp,
+                                                surf_q_exp: ov.surf_q_exp,
+                                                surf_rho_sed: ov.surf_rho_sed,
+                                                surf_min_slope: ov.surf_min_slope,
+                                                surf_subcycles: ov.surf_subcycles,
+                                                surf_couple_flexure: ov.surf_couple_flexure,
+                                                sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
+                                                sub_trench_half_width_km: ov.sub_trench_half_width_km,
+                                                sub_arc_offset_km: ov.sub_arc_offset_km,
+                                                sub_arc_half_width_km: ov.sub_arc_half_width_km,
+                                                sub_backarc_width_km: ov.sub_backarc_width_km,
+                                                sub_trench_deepen_m: ov.sub_trench_deepen_m,
+                                                sub_arc_uplift_m: ov.sub_arc_uplift_m,
+                                                sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
+                                                sub_rollback_offset_m: ov.sub_rollback_offset_m,
+                                                sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
+                                                sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
+                                                sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
+                                                sub_continent_c_min: ov.sub_continent_c_min,
                                             };
                                             // Use world.depth_m order as backing for elevation upload later
                                             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
@@ -1871,4 +2096,50 @@ fn main() {
         }
     })
     .unwrap_or_else(|e| panic!("run app: {e}"));
+}
+
+// Helper to apply preset values to subduction controls
+fn apply_sub_preset(ov: &mut overlay::OverlayState) {
+    match ov.sub_preset {
+        1 => { // Strong rollback
+            ov.sub_rollback_offset_m = 80_000.0;
+            ov.sub_rollback_rate_km_per_myr = 20.0;
+            ov.sub_trench_deepen_m = 2200.0;
+            ov.sub_arc_uplift_m = -400.0;
+            ov.sub_backarc_uplift_m = -150.0;
+            ov.sub_backarc_extension_mode = false;
+        }
+        2 => { // Back-arc extension
+            ov.sub_backarc_extension_mode = true;
+            ov.sub_backarc_extension_deepen_m = 600.0;
+            ov.sub_trench_deepen_m = 2000.0;
+            ov.sub_arc_uplift_m = -250.0;
+            ov.sub_backarc_uplift_m = 0.0;
+            ov.sub_rollback_offset_m = 40_000.0;
+            ov.sub_rollback_rate_km_per_myr = 10.0;
+        }
+        3 => { // Weak arcs
+            ov.sub_trench_deepen_m = 1500.0;
+            ov.sub_arc_uplift_m = -120.0;
+            ov.sub_backarc_uplift_m = -60.0;
+            ov.sub_backarc_extension_mode = false;
+            ov.sub_rollback_offset_m = 0.0;
+            ov.sub_rollback_rate_km_per_myr = 0.0;
+        }
+        _ => { // Reference
+            ov.sub_tau_conv_m_per_yr = 0.005;
+            ov.sub_trench_half_width_km = 40.0;
+            ov.sub_arc_offset_km = 140.0;
+            ov.sub_arc_half_width_km = 25.0;
+            ov.sub_backarc_width_km = 120.0;
+            ov.sub_trench_deepen_m = 1800.0;
+            ov.sub_arc_uplift_m = -300.0;
+            ov.sub_backarc_uplift_m = -120.0;
+            ov.sub_rollback_offset_m = 0.0;
+            ov.sub_rollback_rate_km_per_myr = 0.0;
+            ov.sub_backarc_extension_mode = false;
+            ov.sub_backarc_extension_deepen_m = 400.0;
+            ov.sub_continent_c_min = 0.6;
+        }
+    }
 }

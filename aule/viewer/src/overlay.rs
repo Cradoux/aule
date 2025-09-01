@@ -144,6 +144,29 @@ pub struct OverlayState {
     /// Reusable `C` color overlay cache
     pub cont_c_cache: Option<Vec<Shape>>,
 
+    // Supercontinent belt params
+    pub belt_hw_primary_km: f64,
+    pub belt_hw_secondary_km: f64,
+    pub belt_uplift_primary_m: f32,
+    pub belt_uplift_secondary_m: f32,
+    pub belt_diag_deg: f64,
+
+    // Subduction UI params
+    pub sub_tau_conv_m_per_yr: f32,
+    pub sub_trench_half_width_km: f32,
+    pub sub_arc_offset_km: f32,
+    pub sub_arc_half_width_km: f32,
+    pub sub_backarc_width_km: f32,
+    pub sub_trench_deepen_m: f32,
+    pub sub_arc_uplift_m: f32,
+    pub sub_backarc_uplift_m: f32,
+    pub sub_rollback_offset_m: f32,
+    pub sub_rollback_rate_km_per_myr: f32,
+    pub sub_backarc_extension_mode: bool,
+    pub sub_backarc_extension_deepen_m: f32,
+    pub sub_continent_c_min: f32,
+    pub sub_preset: u8, // 0=Reference,1=Strong rollback,2=Back-arc extension,3=Weak arcs
+
     // Flexure overlay/state
     pub show_flexure: bool,   // draw w overlay
     pub enable_flexure: bool, // apply w to depth
@@ -179,6 +202,7 @@ pub struct OverlayState {
     pub surf_min_slope: f32,
     pub surf_subcycles: u32,
     pub surf_couple_flexure: bool,
+    pub cadence_surf_every: u32,
 
     // Viewport tracking and debounce
     pub last_map_rect_px: [i32; 4], // x,y,w,h rounded
@@ -389,6 +413,27 @@ impl Default for OverlayState {
             cont_template: None,
             cont_c_cache: None,
 
+            belt_hw_primary_km: 350.0,
+            belt_hw_secondary_km: 220.0,
+            belt_uplift_primary_m: 500.0,
+            belt_uplift_secondary_m: 300.0,
+            belt_diag_deg: 35.0,
+
+            sub_tau_conv_m_per_yr: 0.005,
+            sub_trench_half_width_km: 40.0,
+            sub_arc_offset_km: 140.0,
+            sub_arc_half_width_km: 25.0,
+            sub_backarc_width_km: 120.0,
+            sub_trench_deepen_m: 1800.0,
+            sub_arc_uplift_m: -300.0,
+            sub_backarc_uplift_m: -120.0,
+            sub_rollback_offset_m: 0.0,
+            sub_rollback_rate_km_per_myr: 0.0,
+            sub_backarc_extension_mode: false,
+            sub_backarc_extension_deepen_m: 400.0,
+            sub_continent_c_min: 0.6,
+            sub_preset: 0,
+
             show_flexure: false,
             enable_flexure: true,
             e_gpa: 70.0,
@@ -410,17 +455,18 @@ impl Default for OverlayState {
             flex_overlay_count: 0,
             show_surface_panel: true,
             surface_enable: false,
-            surf_k_stream: 3.0e-6,
+            surf_k_stream: 2.0e-6,
             surf_m_exp: 0.5,
-            surf_n_exp: 1.0,
-            surf_k_diff: 0.1,
-            surf_k_tr: 0.1,
-            surf_p_exp: 1.3,
+            surf_n_exp: 1.1,
+            surf_k_diff: 0.05,
+            surf_k_tr: 0.05,
+            surf_p_exp: 1.1,
             surf_q_exp: 1.0,
-            surf_rho_sed: 1800.0,
+            surf_rho_sed: 2000.0,
             surf_min_slope: 1.0e-4,
-            surf_subcycles: 4,
+            surf_subcycles: 2,
             surf_couple_flexure: false,
+            cadence_surf_every: 5,
 
             last_map_rect_px: [0, 0, 0, 0],
             viewport_epoch: 0,
@@ -938,7 +984,13 @@ impl OverlayState {
     }
 
     #[allow(dead_code)]
-    pub fn rebuild_bathy_shapes(&mut self, rect: Rect, grid: &engine::grid::Grid, depth_m: &[f32]) {
+    pub fn rebuild_bathy_shapes(
+        &mut self,
+        rect: Rect,
+        grid: &engine::grid::Grid,
+        depth_m: &[f32],
+        eta_m: f32,
+    ) {
         let mut shapes = Vec::with_capacity(grid.latlon.len());
         // Optional hillshade
         let mut shade: Vec<f32> = vec![1.0; grid.cells];
@@ -949,12 +1001,14 @@ impl OverlayState {
         let mut max_ocean = 0.0f32;
         let mut max_land = 0.0f32;
         for &d in depth_m {
-            if d > 0.0 {
-                if d > max_ocean {
-                    max_ocean = d;
+            let elev = eta_m - d;
+            if elev <= 0.0 {
+                let wd = (-elev).max(0.0);
+                if wd > max_ocean {
+                    max_ocean = wd;
                 }
-            } else if -d > max_land {
-                max_land = -d;
+            } else if elev > max_land {
+                max_land = elev;
             }
         }
         self.hypso_d_max = max_ocean.max(4000.0);
@@ -963,18 +1017,19 @@ impl OverlayState {
         for (i, &ll) in grid.latlon.iter().enumerate() {
             let p = project_equirect(ll[0], ll[1], rect);
             let d = depth_m[i];
+            let elev = eta_m - d;
             let mut col = if self.color_mode == 0 {
-                if d >= 0.0 {
-                    ocean_color32(d, self.hypso_d_max)
+                if elev <= 0.0 {
+                    ocean_color32((-elev).max(0.0), self.hypso_d_max)
                 } else {
-                    land_color32(-d, self.hypso_h_max, snow)
+                    land_color32(elev.max(0.0), self.hypso_h_max, snow)
                 }
             } else {
                 // Biomes over land only; oceans use ocean ramp
-                if d >= 0.0 {
-                    ocean_color32(d, self.hypso_d_max)
+                if elev <= 0.0 {
+                    ocean_color32((-elev).max(0.0), self.hypso_d_max)
                 } else {
-                    let rgb = crate::colormap::pick_biome_color(ll[0], -d);
+                    let rgb = crate::colormap::pick_biome_color(ll[0], elev.max(0.0));
                     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
                 }
             };
@@ -990,14 +1045,14 @@ impl OverlayState {
             }
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }
-        // Draw 0 m coastline as thin black segments where any neighbor crosses zero
+        // Draw 0 m coastline as thin black segments where any neighbor crosses zero (eta-aware)
         let mut coast = Vec::new();
         for i in 0..grid.latlon.len() {
-            let di = depth_m[i];
+            let elev_i = eta_m - depth_m[i];
             for &n in &grid.n1[i] {
                 let j = n as usize;
-                let dj = depth_m[j];
-                if (di > 0.0 && dj <= 0.0) || (di <= 0.0 && dj > 0.0) {
+                let elev_j = eta_m - depth_m[j];
+                if (elev_i <= 0.0 && elev_j > 0.0) || (elev_i > 0.0 && elev_j <= 0.0) {
                     let pu = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
                     let pv = project_equirect(grid.latlon[j][0], grid.latlon[j][1], rect);
                     let center = wrap_midpoint_equirect(pu, pv, rect);
@@ -1386,7 +1441,7 @@ pub fn draw_color_layer(
     ov: &mut OverlayState,
 ) {
     if ov.bathy_cache.is_none() || ov.color_dirty || ov.world_dirty {
-        ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
+        ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m, world.sea.eta_m);
         ov.color_dirty = false;
     }
     let mut n_pts = 0usize;
@@ -1436,7 +1491,7 @@ pub fn draw_advanced_layers(
 ) {
     if ov.show_bathy {
         if ov.bathy_cache.is_none() || ov.color_dirty || ov.world_dirty {
-            ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m);
+            ov.rebuild_bathy_shapes(rect, &world.grid, &world.depth_m, world.sea.eta_m);
         }
         if let Some(shapes) = ov.bathy_cache.as_ref() {
             for s in shapes {

@@ -270,7 +270,7 @@ fn l2_residual(f: &[f32], aw: &[f32]) -> f64 {
     sum.sqrt()
 }
 
-fn blocking_read(
+pub fn blocking_read(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buf: &wgpu::Buffer,
