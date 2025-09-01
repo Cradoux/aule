@@ -224,8 +224,16 @@ pub fn build_supercontinent_belts(seed: u64, p: BeltParams) -> Vec<GreatCircleBe
     ];
     let n2 = normalize3(n2u);
     vec![
-        GreatCircleBelt { n_hat: n1, half_width_km: p.half_width_km_primary, uplift_m: p.uplift_primary_m },
-        GreatCircleBelt { n_hat: n2, half_width_km: p.half_width_km_secondary, uplift_m: p.uplift_secondary_m },
+        GreatCircleBelt {
+            n_hat: n1,
+            half_width_km: p.half_width_km_primary,
+            uplift_m: p.uplift_primary_m,
+        },
+        GreatCircleBelt {
+            n_hat: n2,
+            half_width_km: p.half_width_km_secondary,
+            uplift_m: p.uplift_secondary_m,
+        },
     ]
 }
 

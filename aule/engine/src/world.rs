@@ -304,8 +304,8 @@ impl World {
             }
             self.depth_m[i] = d.clamp(0.0, 6000.0);
         }
-        // Capture reference ocean volume for constant-volume isostasy
-        let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2);
+        // Capture reference ocean volume for constant-volume isostasy using elevation definition
+        let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2, self.sea.eta_m);
         self.sea_level_ref = Some(ref_sea);
 
         // 3) Continents: build template.
@@ -933,10 +933,12 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             transforms::TransformParams {
                 tau_open_m_per_yr: TAU_OPEN_M_PER_YR,
                 min_tangential_m_per_yr: 0.003,
+                max_normal_m_per_yr: 0.010,
                 basin_half_width_km: 50.0,
                 ridge_like_uplift_m: -200.0,
                 basin_deepen_m: 300.0,
             },
+            sp.dt_myr,
         );
         for i in 0..n {
             delta_tect[i] += tr_tmp[i];
@@ -1091,7 +1093,8 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     if sp.do_isostasy && do_sea_step {
         let ts0 = Instant::now();
         if world.sea_level_ref.is_none() {
-            world.sea_level_ref = Some(isostasy::compute_ref(&world.depth_m, &world.area_m2));
+            world.sea_level_ref =
+                Some(isostasy::compute_ref(&world.depth_m, &world.area_m2, world.sea.eta_m));
         }
         if sp.auto_rebaseline_after_continents
             && world.epoch_continents != world.last_rebaseline_epoch

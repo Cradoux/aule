@@ -19,13 +19,24 @@ pub fn ocean_volume_from_depth(depth_m: &[f32], area_m2: &[f32]) -> (f64, f64) {
     (vol, area)
 }
 
-/// Compute the reference ocean area and volume from the current depths.
+/// Compute the reference ocean area and volume using elevation definition.
 ///
-/// Ocean cells are those with depth > 0 (positive down). Returns a [`SeaLevelRef`]
-/// capturing the ocean area (m^2) and volume (m^3).
-pub fn compute_ref(depth_m: &[f32], area_m2: &[f32]) -> SeaLevelRef {
-    let (v, a) = ocean_volume_from_depth(depth_m, area_m2);
-    SeaLevelRef { volume_m3: v, ocean_area_m2: a }
+/// Ocean cells are those with (depth + eta_ref) > 0 (positive down). Returns a [`SeaLevelRef`]
+/// capturing the ocean area (m^2) and volume (m^3) consistent with rendering and the solver.
+pub fn compute_ref(depth_m: &[f32], area_m2: &[f32], eta_ref_m: f32) -> SeaLevelRef {
+    assert_eq!(depth_m.len(), area_m2.len());
+    let mut vol = 0.0f64;
+    let mut area = 0.0f64;
+    let eta = eta_ref_m as f64;
+    for i in 0..depth_m.len() {
+        let d = depth_m[i] as f64 + eta;
+        let a = area_m2[i] as f64;
+        if d > 0.0 && a > 0.0 {
+            vol += d * a;
+            area += a;
+        }
+    }
+    SeaLevelRef { volume_m3: vol, ocean_area_m2: area }
 }
 
 /// Set the world's sea-level reference to the current ocean state and return it.
@@ -34,7 +45,7 @@ pub fn compute_ref(depth_m: &[f32], area_m2: &[f32]) -> SeaLevelRef {
 /// to topography (e.g., adding continents). If there are no ocean cells, sets both
 /// fields to 0 and logs a note.
 pub fn rebaseline(world: &mut World, area_m2: &[f32]) -> SeaLevelRef {
-    let r = compute_ref(&world.depth_m, area_m2);
+    let r = compute_ref(&world.depth_m, area_m2, world.sea.eta_m);
     world.sea_level_ref = Some(r);
     let area_sum: f64 = area_m2.iter().map(|&a| a as f64).sum();
     let frac = if area_sum > 0.0 { r.ocean_area_m2 / area_sum } else { 0.0 };

@@ -30,6 +30,8 @@ pub struct TransformParams {
     pub tau_open_m_per_yr: f64,
     /// Minimum tangential speed (m/yr) to deem transform active.
     pub min_tangential_m_per_yr: f64,
+    /// Maximum normal component magnitude (m/yr) to count as near-pure transform.
+    pub max_normal_m_per_yr: f64,
     /// Half-width of transform band (km) measured from the fault trace.
     pub basin_half_width_km: f64,
     /// Uplift (negative, shallower) applied in restraining zones (m).
@@ -54,6 +56,7 @@ pub fn apply_transforms(
     v_en: &[[f32; 2]],
     depth_m: &mut [f32],
     params: TransformParams,
+    dt_myr: f64,
 ) -> (TransformMasks, TransformStats) {
     assert_eq!(v_en.len(), grid.cells);
     assert_eq!(depth_m.len(), grid.cells);
@@ -94,8 +97,8 @@ pub fn apply_transforms(
         n_min = n_min.min(n_abs);
         n_max = n_max.max(n_abs);
         n_sum += n_abs;
-        // Only gate by tangential magnitude to drop numerically dead edges.
-        if t_abs >= params.min_tangential_m_per_yr {
+        // Gate by high tangential magnitude AND low normal component.
+        if t_abs >= params.min_tangential_m_per_yr && n_abs <= params.max_normal_m_per_yr {
             passing += 1;
             // Shear sense from stored signed t_m_per_yr (aligned with stored t_hat)
             if ek.t_m_per_yr >= 0.0 {
@@ -215,11 +218,19 @@ pub fn apply_transforms(
     }
 
     // Edits are additive; caller is expected to recompute baseline depth from age first
+    // Scale magnitudes by dt (rates → meters); cap to avoid unphysical jumps per step
+    let dt_s = (dt_myr.max(0.0)) * 1.0e6;
+    // Typical transform relief O(1e2 m) over O(10–50) Myr → rates O(2–10 mm/yr)
+    let cap_m_per_step = 100.0f32; // conservative per-step cap
+    let uplift_step = (params.ridge_like_uplift_m * (dt_s as f32) * 1.0e-3)
+        .clamp(-cap_m_per_step, cap_m_per_step);
+    let deepen_step =
+        (params.basin_deepen_m * (dt_s as f32) * 1.0e-3).clamp(-cap_m_per_step, cap_m_per_step);
     for (i, d) in depth_m.iter_mut().enumerate() {
         if masks.pull_apart[i] {
-            *d += params.basin_deepen_m;
+            *d += deepen_step;
         } else if masks.restraining[i] {
-            *d += params.ridge_like_uplift_m;
+            *d += uplift_step;
         }
     }
 

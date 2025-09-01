@@ -1454,29 +1454,29 @@ pub fn draw_color_layer(
     if ov.legend_on {
         ov.draw_legend(painter, rect);
     }
-    // Elevation stats (m)
+    // Elevation stats relative to sea level: z = η − depth = (-depth) + η
     let mut zmin = f32::INFINITY;
     let mut zmax = f32::NEG_INFINITY;
     let mut zsum = 0.0f64;
-    let mut n = 0usize;
-    let mut land = 0usize;
-    for &d in &world.depth_m {
+    let mut area_sum = 0.0f64;
+    let mut land_area = 0.0f64;
+    for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
         if d.is_finite() {
-            let z = -d;
+            let z = -d + world.sea.eta_m;
             zmin = zmin.min(z);
             zmax = zmax.max(z);
-            zsum += z as f64;
-            n += 1;
-            if d <= 0.0 {
-                land += 1;
+            zsum += (z as f64) * (a as f64);
+            area_sum += a as f64;
+            if z > 0.0 {
+                land_area += a as f64;
             }
         }
     }
-    let zmean = if n > 0 { zsum / (n as f64) } else { 0.0 };
+    let zmean = if area_sum > 0.0 { zsum / area_sum } else { 0.0 };
     let pal = if ov.color_mode == 0 { "Hypsometric" } else { "Biomes" };
     println!(
         "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}% | pts={} palette={} dirty=(w={} c={})",
-        zmin, zmean, zmax, 100.0 * (land as f64 / world.depth_m.len().max(1) as f64), n_pts, pal, ov.world_dirty, ov.color_dirty
+        zmin, zmean, zmax, 100.0 * (land_area / area_sum.max(1.0)), n_pts, pal, ov.world_dirty, ov.color_dirty
     );
 }
 

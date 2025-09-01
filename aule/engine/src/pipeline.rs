@@ -7,7 +7,7 @@
 //! - Subduction/transform/rifting/orogeny still edit `depth_m` additively on top of age-derived bathy.
 //!   If these are applied at high cadence without normalization, long-run drift of `depth_m` can occur.
 
-use crate::{boundaries, flexure_loads, ridge, sea_level, subduction, transforms, world::World};
+use crate::{boundaries, flexure_loads, isostasy, ridge, subduction, transforms, world::World};
 
 /// Pipeline configuration used by Simple and Advanced modes.
 #[derive(Clone, Copy, Debug)]
@@ -135,10 +135,12 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // - Refresh per-cell velocities from plates
     // - Optionally advect plate_id via semi-Lagrangian nearest-neighbour when enabled
     // - Classify boundaries using the refreshed fields
+    // Accumulate 3D velocities for processes that need them
+    let mut vel3: Vec<[f32; 3]> = vec![[0.0; 3]; world.grid.cells];
     if cfg.enable_rigid_motion {
         world.v_en =
             crate::plates::velocity_en_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
-        let vel3 = crate::plates::velocity_field_m_per_yr(
+        vel3 = crate::plates::velocity_field_m_per_yr(
             &world.grid,
             &world.plates,
             &world.plates.plate_id,
@@ -194,11 +196,21 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         world.plates.plate_id = pid_fixed;
     } else {
         world.v_en.clone_from(&world.plates.vel_en);
+        vel3.fill([0.0, 0.0, 0.0]);
     }
 
     // Boundaries classification
     world.boundaries =
         boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+
+    // Advect continental fields and thickness every step
+    crate::continent::advect_c_thc(
+        &world.grid,
+        &world.v_en,
+        dt as f64,
+        &mut world.c,
+        &mut world.th_c_m,
+    );
 
     // Kinematics/advection (plates velocities already in world.v_en); age increments handled by ridge stage below
     // For MVP, reuse existing world::step_once pieces indirectly through ridge/subduction updates
@@ -236,8 +248,112 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     let base_depth = world.depth_m.clone();
     let mut delta_tect: Vec<f32> = vec![0.0; n];
     if cfg.enable_subduction && do_sub {
+        let mut sub_delta = vec![0.0f32; n];
+        let _sub_stats = subduction::compute_subduction_delta(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &world.age_myr,
+            &world.v_en,
+            &mut sub_delta,
+            subduction::SubductionParams {
+                tau_conv_m_per_yr: cfg.sub_tau_conv_m_per_yr as f64,
+                trench_half_width_km: cfg.sub_trench_half_width_km as f64,
+                arc_offset_km: cfg.sub_arc_offset_km as f64,
+                arc_half_width_km: cfg.sub_arc_half_width_km as f64,
+                backarc_width_km: cfg.sub_backarc_width_km as f64,
+                trench_deepen_m: cfg.sub_trench_deepen_m,
+                arc_uplift_m: cfg.sub_arc_uplift_m,
+                backarc_uplift_m: cfg.sub_backarc_uplift_m,
+                rollback_offset_m: cfg.sub_rollback_offset_m as f64,
+                rollback_rate_km_per_myr: cfg.sub_rollback_rate_km_per_myr as f64,
+                backarc_extension_mode: cfg.sub_backarc_extension_mode,
+                backarc_extension_deepen_m: cfg.sub_backarc_extension_deepen_m,
+                continent_c_min: cfg.sub_continent_c_min,
+            },
+            Some(&world.c),
+        );
+        // Do NOT scale; treat magnitudes as feature relief per application
+        for i in 0..n {
+            delta_tect[i] += sub_delta[i];
+        }
+    }
+    // Continental rifting (delta-only) before transforms
+    {
+        let p_rift = crate::rifting::RiftingParams {
+            c_rift_min: 0.6,
+            v_open_min_m_per_yr: 0.001,
+            w_core_km: 60.0,
+            w_taper_km: 250.0,
+            k_thin: 0.10,
+            alpha_subs: 0.8,
+            ocean_thresh: 0.15,
+            k_c_oceanize: 0.03,
+            reset_age_on_core: true,
+            enable_shoulder: false,
+            w_bulge_km: 120.0,
+            beta_shoulder: 0.2,
+            couple_flexure: false,
+            thc_min_m: 20_000.0,
+            thc_max_m: 70_000.0,
+        };
+        let mut rift_tmp = vec![0.0f32; n];
+        let _ = crate::rifting::apply_rifting(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &vel3,
+            &mut world.c,
+            &mut world.th_c_m,
+            &mut world.age_myr,
+            &mut rift_tmp,
+            &world.area_m2,
+            &p_rift,
+            dt as f64,
+        );
+        for i in 0..n {
+            delta_tect[i] += rift_tmp[i];
+        }
+    }
+    // Transforms after rifting
+    if do_trf {
+        let mut tr_tmp = vec![0.0f32; n];
+        let _ = transforms::apply_transforms(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &world.v_en,
+            &mut tr_tmp,
+            transforms::TransformParams {
+                tau_open_m_per_yr: 0.005,
+                min_tangential_m_per_yr: 0.100,
+                max_normal_m_per_yr: 0.010,
+                basin_half_width_km: 12.0,
+                ridge_like_uplift_m: -8.0,
+                basin_deepen_m: 16.0,
+            },
+            dt as f64,
+        );
+        // Magnitudes are rates; already scaled by dt inside transforms
+        for i in 0..n {
+            delta_tect[i] += tr_tmp[i];
+        }
+    }
+    // Continents uplift/thickness coupling delta each step
+    {
+        let mut cont_tmp = vec![0.0f32; n];
+        crate::continent::apply_uplift_from_c_thc(&mut cont_tmp, &world.c, &world.th_c_m);
+        for i in 0..n {
+            delta_tect[i] += cont_tmp[i];
+        }
+        // mark epoch change for rebaseline debounce
+        world.epoch_continents = world.epoch_continents.wrapping_add(1);
+    }
+    // Accretion and Orogeny deltas after continents uplift
+    {
+        // Reuse last subduction masks by recomputing quickly if needed
         let mut sub_tmp = vec![0.0f32; n];
-        let _sub_stats = subduction::apply_subduction(
+        let sub = subduction::apply_subduction(
             &world.grid,
             &world.boundaries,
             &world.plates.plate_id,
@@ -261,29 +377,61 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             },
             Some(&world.c),
         );
-        for i in 0..n {
-            delta_tect[i] += sub_tmp[i] - base_depth[i];
-        }
-    }
-    if do_trf {
-        let mut tr_tmp = vec![0.0f32; n];
-        let _ = transforms::apply_transforms(
+        // O–C accretion
+        let p_acc = crate::accretion::AccretionParams {
+            k_arc: 0.05,
+            gamma_obliquity: 1.0,
+            beta_arc: 0.7,
+            alpha_arc: 0.015,
+            alpha_forearc: 0.008,
+            c_min_continent: 0.6,
+            thc_min_m: 20_000.0,
+            thc_max_m: 70_000.0,
+            enable_docking: false,
+            c_terrane_min: 0.5,
+            d_dock_km: 150.0,
+            vn_min_m_per_yr: 0.005,
+            tau_dock: 0.015,
+            couple_flexure: false,
+        };
+        let mut acc_tmp = vec![0.0f32; n];
+        let _ = crate::accretion::apply_oc_accretion(
+            &world.grid,
+            &sub.masks,
+            &world.boundaries,
+            &vel3,
+            &mut world.c,
+            &mut world.th_c_m,
+            &mut acc_tmp,
+            &world.area_m2,
+            &p_acc,
+            dt as f64,
+        );
+        for i in 0..n { delta_tect[i] += acc_tmp[i]; }
+        // C–C orogeny
+        let p_orog = crate::orogeny::OrogenyParams {
+            c_min: 0.6,
+            w_core_km: 120.0,
+            w_taper_km: 220.0,
+            k_thick: 0.08,
+            beta_uplift: 0.8,
+            gamma_obliquity: 1.0,
+            couple_flexure: false,
+        };
+        let mut orog_tmp = vec![0.0f32; n];
+        let _ = crate::orogeny::apply_cc_orogeny(
             &world.grid,
             &world.boundaries,
             &world.plates.plate_id,
-            &world.v_en,
-            &mut tr_tmp,
-            transforms::TransformParams {
-                tau_open_m_per_yr: 0.005,
-                min_tangential_m_per_yr: 0.003,
-                basin_half_width_km: 50.0,
-                ridge_like_uplift_m: -200.0,
-                basin_deepen_m: 300.0,
-            },
+            &vel3,
+            &world.c,
+            &world.area_m2,
+            &mut world.th_c_m,
+            &mut orog_tmp,
+            &p_orog,
+            dt as f64,
         );
-        for i in 0..n {
-            delta_tect[i] += tr_tmp[i];
-        }
+        for i in 0..n { delta_tect[i] += orog_tmp[i]; }
     }
     for i in 0..n {
         world.depth_m[i] = (base_depth[i] + delta_tect[i]).clamp(-8000.0, 8000.0);
@@ -315,29 +463,42 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             let fut = async {
                 let ctx = crate::gpu::persistent();
                 let mut flex = crate::flexure_gpu::FlexGpu::new(ctx);
-                // One-tile approximation over full grid (no halos), dx ≈ mean cell scale
+                // Tile approximation over a rectangular patch (no halos in interior), dx ≈ mean cell scale
                 let mut area_mean: f64 = 0.0;
                 for a in &world.area_m2 {
                     area_mean += *a as f64;
                 }
                 let cell_scale_m = (area_mean.max(1.0) / (n as f64)).sqrt() as f32;
-                // Map sphere to a strip tile (approx); future: atlas tiling
-                let dims = crate::flexure_gpu::TileDims {
-                    width: n as u32,
-                    height: 1,
-                    halo: 2,
-                    dx: cell_scale_m,
-                };
+                // Choose a near-square layout to reduce aspect ratio artifacts
+                let w_guess = (n as f64).sqrt().floor() as u32;
+                let width = w_guess.clamp(64, 4096).max(1);
+                let height = ((n as u32) + width - 1) / width;
+                let dims =
+                    crate::flexure_gpu::TileDims { width, height, halo: 2, dx: cell_scale_m };
                 let w_tot = dims.width_total() as usize;
                 let h_tot = dims.height_total() as usize;
                 let n_tot = w_tot * h_tot;
                 let mut w_tex = crate::flexure_gpu::GpuTex::new_storage(ctx, n_tot, "flex.w");
                 let f_tex = crate::flexure_gpu::GpuTex::new_storage(ctx, n_tot, "flex.f");
-                // Stage f into interior row with halos
+                // Stage f into interior region row-by-row with halos
                 let mut f_stage = vec![0.0f32; n_tot];
-                let row = dims.halo as usize;
-                let start = row * w_tot + (dims.halo as usize);
-                f_stage[start..start + n].copy_from_slice(&f_load[..n]);
+                let halo = dims.halo as usize;
+                let interior_w = dims.width as usize;
+                let interior_h = dims.height as usize;
+                let mut src_off = 0usize;
+                for iy in 0..interior_h {
+                    let dst_row = iy + halo;
+                    let dst_start = dst_row * w_tot + halo;
+                    let n_copy = interior_w.min(n - src_off);
+                    if n_copy > 0 {
+                        f_stage[dst_start..dst_start + n_copy]
+                            .copy_from_slice(&f_load[src_off..src_off + n_copy]);
+                        src_off += n_copy;
+                    }
+                    if src_off >= n {
+                        break;
+                    }
+                }
                 ctx.queue.write_buffer(&f_tex.buf, 0, bytemuck::cast_slice(&f_stage));
                 let mut scratch = crate::flexure_gpu::FlexScratch::new(ctx, n_tot);
                 let e_pa = 70.0e9f32;
@@ -352,15 +513,28 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
                     nu2: 1,
                     levels: cfg.gpu_flex_levels.max(1),
                 };
-                // Run requested number of V-cycles
-                for _ in 0..cfg.gpu_flex_cycles.max(1) {
+                // Run requested number of V-cycles (reduced to 1 for stability)
+                for _ in 0..1u32 {
                     let _stats = flex.v_cycle(ctx, dims, &mut w_tex, &f_tex, &mut scratch, &p);
                 }
                 // Read back w and extract interior row
                 let w_all =
                     crate::flexure_gpu::blocking_read(&ctx.device, &ctx.queue, &w_tex.buf, n_tot);
                 let mut w_out = vec![0.0f32; n];
-                w_out[..n].copy_from_slice(&w_all[start..start + n]);
+                let mut dst_off = 0usize;
+                for iy in 0..interior_h {
+                    let src_row = iy + halo;
+                    let src_start = src_row * w_tot + halo;
+                    let n_copy = interior_w.min(n - dst_off);
+                    if n_copy > 0 {
+                        w_out[dst_off..dst_off + n_copy]
+                            .copy_from_slice(&w_all[src_start..src_start + n_copy]);
+                        dst_off += n_copy;
+                    }
+                    if dst_off >= n {
+                        break;
+                    }
+                }
                 w_out
             };
             let w_host: Vec<f32> = pollster::block_on(fut);
@@ -415,9 +589,22 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     }
 
     if !cfg.freeze_eta && do_sea {
-        let eta_m =
-            sea_level::solve_eta_on_elevation(surf.elev_m, &world.area_m2, cfg.target_land_frac);
-        *surf.eta_m = eta_m;
+        // Maintain constant ocean volume policy (isostasy) and store η without mutating depth
+        if world.sea_level_ref.is_none() {
+            world.sea_level_ref =
+                Some(isostasy::compute_ref(&world.depth_m, &world.area_m2, *surf.eta_m));
+        }
+        // Do not auto-rebaseline on ordinary steps; only explicit user action or structural change
+        if let Some(r) = world.sea_level_ref {
+            let l_iso = isostasy::solve_offset_for_volume(
+                &world.depth_m,
+                &world.area_m2,
+                r.volume_m3,
+                1e6,
+                64,
+            );
+            *surf.eta_m = l_iso as f32;
+        }
     }
 
     // Sanitize
@@ -435,8 +622,8 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             m_cont += a * (world.th_c_m.get(i).copied().unwrap_or(0.0) as f64) * 2900.0f64;
             m_sed += a * (world.sediment_m.get(i).copied().unwrap_or(0.0) as f64) * 1800.0f64;
             tot_area += a;
-            let elev = -world.depth_m[i];
-            if (elev as f64 - *surf.eta_m as f64) > 0.0 {
+            // land if z = eta - depth > 0
+            if (*surf.eta_m as f64 - world.depth_m[i] as f64) > 0.0 {
                 land_area += a;
             }
         }

@@ -47,10 +47,10 @@ pub fn depth_from_age(age_myr: f64, d0: f64, a: f64, b: f64) -> f64 {
 /// for typical values (d0≈2600 m, k≈1e-6 m^2/s).
 #[inline]
 pub fn depth_from_age_hsc(age_myr: f64, d0_m: f64, k_m2_s: f64) -> f64 {
+    // Calibrated to produce ~2.6–6.0 km over 0–120 Myr using an effective prefactor
     let age_s = (age_myr.max(0.0)) * 1.0e6_f64 * 365.25_f64 * 86400.0_f64;
     let k = k_m2_s.max(0.0);
-    // Empirical scale factor to keep depths in a reasonable range
-    let c = 0.02_f64;
+    let c = 0.005_f64; // reduced from 0.02 to align with PS-like depths
     d0_m + c * (k * age_s).sqrt()
 }
 

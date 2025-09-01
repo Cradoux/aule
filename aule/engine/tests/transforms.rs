@@ -19,24 +19,47 @@ fn determinism_sign_and_idempotence() {
     let p = transforms::TransformParams {
         tau_open_m_per_yr: 0.005,
         min_tangential_m_per_yr: 0.005,
+        max_normal_m_per_yr: 0.010,
         basin_half_width_km: 25.0,
         ridge_like_uplift_m: -200.0,
         basin_deepen_m: 400.0,
     };
-    let (m0, s0) =
-        transforms::apply_transforms(&g, &b, &plates.plate_id, &plates.vel_en, &mut depth0, p);
+    let (m0, s0) = transforms::apply_transforms(
+        &g,
+        &b,
+        &plates.plate_id,
+        &plates.vel_en,
+        &mut depth0,
+        p,
+        1.0, // dt_myr
+    );
 
     // Determinism/idempotence
     let mut depth1 = vec![3000.0_f32; g.cells];
-    let (m1, s1) =
-        transforms::apply_transforms(&g, &b, &plates.plate_id, &plates.vel_en, &mut depth1, p);
+    let (m1, s1) = transforms::apply_transforms(
+        &g,
+        &b,
+        &plates.plate_id,
+        &plates.vel_en,
+        &mut depth1,
+        p,
+        1.0,
+    );
     assert_eq!(s0.pull_apart_cells, s1.pull_apart_cells);
     assert_eq!(s0.restraining_cells, s1.restraining_cells);
     assert_eq!(m0.pull_apart, m1.pull_apart);
     assert_eq!(m0.restraining, m1.restraining);
 
     let mut depth2 = depth1.clone();
-    let _ = transforms::apply_transforms(&g, &b, &plates.plate_id, &plates.vel_en, &mut depth2, p);
+    let _ = transforms::apply_transforms(
+        &g,
+        &b,
+        &plates.plate_id,
+        &plates.vel_en,
+        &mut depth2,
+        p,
+        1.0,
+    );
     assert_eq!(depth1, depth2);
 
     // Sign checks if non-empty
