@@ -635,6 +635,25 @@ fn render_advanced_panels(
                     .text("Max overlay points"),
             )
             .changed();
+        ui.separator();
+        ui.label("Plate Type overlay");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut ov.show_plate_type, "Show Plate Type");
+            let mut mode = ov.plate_type_mode;
+            egui::ComboBox::from_id_source("plate_type_mode")
+                .selected_text(if mode == 0 { "Plate-level" } else { "Cell-level" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mode, 0, "Plate-level");
+                    ui.selectable_value(&mut mode, 1, "Cell-level");
+                });
+            if mode != ov.plate_type_mode {
+                ov.plate_type_mode = mode;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut ov.c_thresh_cont, 0.4..=0.9).text("C_cont_thresh"));
+            ui.add(egui::Slider::new(&mut ov.c_thresh_ocean, 0.0..=0.4).text("C_ocean_thresh"));
+        });
         ui.label(format!(
             "land = {:.1}%  amplitude = {:.0} m",
             ov.cont_land_frac * 100.0,

@@ -236,6 +236,25 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Boundaries classification
     world.boundaries =
         boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+    // Plate-id diagnostics and healing
+    {
+        let mut invalid = 0usize;
+        for &pid in &world.plates.plate_id {
+            if pid == crate::plates::INVALID_PLATE_ID {
+                invalid += 1;
+            }
+        }
+        if invalid > 0 {
+            println!("[debug] invalid_plate_cells={}", invalid);
+            crate::plates::heal_plate_ids(&world.grid, &mut world.plates.plate_id);
+            // Refresh velocities after healing to keep kinematics consistent
+            world.v_en = crate::plates::velocity_en_m_per_yr(
+                &world.grid,
+                &world.plates,
+                &world.plates.plate_id,
+            );
+        }
+    }
     // Plate birth/death scaffolding (diagnostic only; disabled by default via cadence=0)
     if do_spawn {
         // Pick a convergent boundary cell if available; fallback to center cell
@@ -374,6 +393,10 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         &mut world.c,
         &mut world.th_c_m,
     );
+    // Clamp C to [0,1] defensively
+    for v in &mut world.c {
+        *v = v.clamp(0.0, 1.0);
+    }
     // 2) Age, sediment via generic scalar advection using 3D velocities
     // Build 3D velocities if not already (vel3 above reflects enable_rigid_motion)
     let vel3_for_adv =
@@ -815,12 +838,24 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         let mut th_units_bug = 0.0f32;
         for (i, _) in th_before.iter().enumerate().take(n) {
             let dth = world.th_c_m[i] - th_before[i];
-            if dth.abs() > 1000.0 { th_units_bug = th_units_bug.max(dth.abs()); }
-            if dth > cap_per_step { world.th_c_m[i] = th_before[i] + cap_per_step; th_caps += 1; }
-            if dth < -cap_per_step { world.th_c_m[i] = th_before[i] - cap_per_step; th_caps += 1; }
+            if dth.abs() > 1000.0 {
+                th_units_bug = th_units_bug.max(dth.abs());
+            }
+            if dth > cap_per_step {
+                world.th_c_m[i] = th_before[i] + cap_per_step;
+                th_caps += 1;
+            }
+            if dth < -cap_per_step {
+                world.th_c_m[i] = th_before[i] - cap_per_step;
+                th_caps += 1;
+            }
         }
-        if th_caps > 0 { println!("[cap] th_c per-step: clamped {} cells (cap={:.1} m)", th_caps, cap_per_step); }
-        if th_units_bug > 0.0 { println!("[UNITS_BUG] Δth_c max {:.1} m (>1000 m)", th_units_bug); }
+        if th_caps > 0 {
+            println!("[cap] th_c per-step: clamped {} cells (cap={:.1} m)", th_caps, cap_per_step);
+        }
+        if th_units_bug > 0.0 {
+            println!("[UNITS_BUG] Δth_c max {:.1} m (>1000 m)", th_units_bug);
+        }
     }
     // Preserve previous structural component relative to age baseline, then add incremental deltas
     for (i, _) in th_before.iter().enumerate().take(n) {

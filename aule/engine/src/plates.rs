@@ -5,6 +5,9 @@ use rand::{RngCore, SeedableRng};
 
 const RADIUS_M: f64 = 6_371_000.0;
 
+/// Sentinel used to denote an invalid/missing plate id.
+pub const INVALID_PLATE_ID: u16 = u16::MAX;
+
 /// Plate model results computed from a deterministic seed.
 pub struct Plates {
     /// Plate seed unit vectors (f64)
@@ -214,6 +217,47 @@ fn assign_voronoi(grid: &Grid, seeds_axes: &[[f64; 3]]) -> Vec<u16> {
         plate_id[i] = best_id;
     }
     plate_id
+}
+
+/// Heal invalid plate ids in-place by assigning each invalid cell to the nearest valid plate.
+///
+/// Strategy: multi-source BFS starting from all valid cells; propagate their plate ids into
+/// neighbouring invalid regions using the 1-ring adjacency until all cells are labeled.
+pub fn heal_plate_ids(grid: &Grid, plate_id: &mut [u16]) {
+    let n = grid.cells.min(plate_id.len());
+    if n == 0 {
+        return;
+    }
+    // Collect valid seeds
+    let mut dist: Vec<i32> = vec![-1; n];
+    let mut q: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for i in 0..n {
+        if plate_id[i] != INVALID_PLATE_ID {
+            dist[i] = 0;
+            q.push_back(i);
+        }
+    }
+    if q.is_empty() {
+        // No valid seeds: assign a default plate id 0 to all cells
+        for pid in plate_id.iter_mut().take(n) {
+            *pid = 0;
+        }
+        return;
+    }
+    while let Some(u) = q.pop_front() {
+        let pid_u = plate_id[u];
+        for &vn in &grid.n1[u] {
+            let v = vn as usize;
+            if v >= n {
+                continue;
+            }
+            if plate_id[v] == INVALID_PLATE_ID && dist[v] < 0 {
+                plate_id[v] = pid_u;
+                dist[v] = dist[u] + 1;
+                q.push_back(v);
+            }
+        }
+    }
 }
 
 fn euler_poles(num_plates: usize, seed: u64) -> (Vec<[f32; 3]>, Vec<f32>) {

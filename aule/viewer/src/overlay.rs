@@ -50,6 +50,13 @@ pub struct OverlayState {
     pub show_plates: bool,
     pub show_vel: bool,
     pub show_bounds: bool,
+    /// Show Plate Type overlay (plate-level or cell-level)
+    pub show_plate_type: bool,
+    /// 0 = Plate-level, 1 = Cell-level
+    pub plate_type_mode: u32,
+    /// Thresholds for classification by C̄
+    pub c_thresh_cont: f32,
+    pub c_thresh_ocean: f32,
     // Kinematics (rigid plates)
     pub kin_enable: bool,
     pub kin_trail_steps: u32,
@@ -343,6 +350,10 @@ impl Default for OverlayState {
             show_plates: false,
             show_vel: false,
             show_bounds: false,
+            show_plate_type: false,
+            plate_type_mode: 0,
+            c_thresh_cont: 0.60,
+            c_thresh_ocean: 0.20,
             kin_enable: true,
             kin_trail_steps: 0,
             kin_trails: None,
@@ -678,10 +689,26 @@ pub fn wrap_midpoint_equirect(pu: Pos2, pv: Pos2, rect: Rect) -> Pos2 {
 #[allow(dead_code)]
 pub fn build_plate_points(rect: Rect, latlon: &[[f32; 2]], plate_id: &[u16]) -> Vec<Shape> {
     let mut shapes = Vec::with_capacity(plate_id.len());
+    let hatch_a = Color32::from_gray(160);
+    let hatch_b = Color32::from_gray(60);
     for (i, &pid) in plate_id.iter().enumerate() {
         let p = project_equirect(latlon[i][0], latlon[i][1], rect);
-        let col = color_for_plate(pid);
-        shapes.push(Shape::circle_filled(p, 1.0, col));
+        if pid == engine::plates::INVALID_PLATE_ID {
+            // Hatched grey for invalid cells
+            let dx = 2.0;
+            let dy = 2.0;
+            shapes.push(Shape::line_segment(
+                [Pos2::new(p.x - dx, p.y - dy), Pos2::new(p.x + dx, p.y + dy)],
+                Stroke::new(1.0, hatch_a),
+            ));
+            shapes.push(Shape::line_segment(
+                [Pos2::new(p.x - dx, p.y + dy), Pos2::new(p.x + dx, p.y - dy)],
+                Stroke::new(1.0, hatch_b),
+            ));
+        } else {
+            let col = color_for_plate(pid);
+            shapes.push(Shape::circle_filled(p, 1.0, col));
+        }
     }
     shapes
 }
@@ -930,6 +957,73 @@ impl OverlayState {
             self.live_bounds_cap = new_bd.max(self.min_cap());
             self.live_subd_cap = new_sd.max(self.min_cap());
         }
+    }
+
+    /// Plate Type overlay (plate-level): classify each plate by area-weighted mean C̄.
+    /// 0 = oceanic (C̄ ≤ c_thresh_ocean), 1 = mixed, 2 = continental (C̄ ≥ c_thresh_cont)
+    pub fn rebuild_plate_type_plate_level(
+        &mut self,
+        rect: Rect,
+        world: &engine::world::World,
+        c_thresh_ocean: f32,
+        c_thresh_cont: f32,
+    ) -> Vec<Shape> {
+        let n = world.grid.cells;
+        // Accumulate per-plate area and C*area
+        let mut area_by_plate: std::collections::HashMap<u16, f64> =
+            std::collections::HashMap::new();
+        let mut carea_by_plate: std::collections::HashMap<u16, f64> =
+            std::collections::HashMap::new();
+        for i in 0..n {
+            let pid = world.plates.plate_id[i];
+            let a = world.area_m2[i] as f64;
+            let c = world.c[i].clamp(0.0, 1.0) as f64;
+            *area_by_plate.entry(pid).or_insert(0.0) += a;
+            *carea_by_plate.entry(pid).or_insert(0.0) += a * c;
+        }
+        // Per-plate classification
+        let mut class_by_plate: std::collections::HashMap<u16, u8> =
+            std::collections::HashMap::new();
+        for (pid, area) in &area_by_plate {
+            let ca = carea_by_plate.get(pid).copied().unwrap_or(0.0);
+            let cbar = if *area > 0.0 { (ca / *area) as f32 } else { 0.0 };
+            let class = if cbar >= c_thresh_cont {
+                2u8
+            } else if cbar <= c_thresh_ocean {
+                0u8
+            } else {
+                1u8
+            };
+            class_by_plate.insert(*pid, class);
+        }
+        // Emit points colored by class with borders implied by class color
+        let mut shapes: Vec<Shape> = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = project_equirect(world.grid.latlon[i][0], world.grid.latlon[i][1], rect);
+            let cls = class_by_plate.get(&world.plates.plate_id[i]).copied().unwrap_or(1);
+            let col = match cls {
+                0 => Color32::from_rgb(40, 120, 220),  // oceanic: blue
+                2 => Color32::from_rgb(200, 140, 60),  // continental: brown/orange
+                _ => Color32::from_rgb(120, 170, 120), // mixed: greenish
+            };
+            shapes.push(Shape::circle_filled(p, 1.2, col));
+        }
+        shapes
+    }
+
+    /// Plate Type overlay (cell-level): color by C with viridis ramp, borders drawn elsewhere
+    pub fn rebuild_plate_type_cell_level(
+        &mut self,
+        rect: Rect,
+        world: &engine::world::World,
+    ) -> Vec<Shape> {
+        let mut shapes: Vec<Shape> = Vec::with_capacity(world.grid.cells);
+        for i in 0..world.grid.cells {
+            let p = project_equirect(world.grid.latlon[i][0], world.grid.latlon[i][1], rect);
+            let col = viridis_map(world.c[i].clamp(0.0, 1.0), 0.0, 1.0);
+            shapes.push(Shape::circle_filled(p, 1.2, col));
+        }
+        shapes
     }
 }
 
@@ -1565,14 +1659,10 @@ pub fn draw_advanced_layers(
         }
     }
     if ov.show_plates {
-        if ov.plates_cache.is_none() {
-            ov.plates_cache =
-                Some(build_plate_points(rect, &world.grid.latlon, &world.plates.plate_id));
-        }
-        if let Some(shapes) = ov.plates_cache.as_ref() {
-            for s in shapes {
-                painter.add(s.clone());
-            }
+        // Always rebuild plate points each frame to avoid starving large regions under caps
+        let shapes = build_plate_points(rect, &world.grid.latlon, &world.plates.plate_id);
+        for s in shapes {
+            painter.add(s);
         }
     }
     if ov.show_vel {
@@ -1605,6 +1695,21 @@ pub fn draw_advanced_layers(
         if let Some(shapes) = ov.bounds_cache.as_ref() {
             for s in shapes {
                 painter.add(s.clone());
+            }
+        }
+    }
+    // Plate Type overlay
+    if ov.show_plate_type {
+        if ov.plate_type_mode == 0 {
+            let shapes =
+                ov.rebuild_plate_type_plate_level(rect, world, ov.c_thresh_ocean, ov.c_thresh_cont);
+            for s in shapes {
+                painter.add(s);
+            }
+        } else {
+            let shapes = ov.rebuild_plate_type_cell_level(rect, world);
+            for s in shapes {
+                painter.add(s);
             }
         }
     }
