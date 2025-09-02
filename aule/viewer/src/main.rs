@@ -444,6 +444,68 @@ fn render_simple_panels(
         if changed {
             apply_simple_palette(ov, world, ctx);
         }
+        ui.separator();
+        changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
+        if ov.show_plate_type {
+            // Compute simple legend: counts per class and area shares
+            let mut n_cont = 0usize;
+            let mut n_mix = 0usize;
+            let mut n_ocean = 0usize;
+            let mut area_cont: f64 = 0.0;
+            let mut area_mix: f64 = 0.0;
+            let mut area_ocean: f64 = 0.0;
+            // Reuse plate-level classification shares like overlay does
+            use std::collections::HashMap;
+            let mut area_by_plate: HashMap<u16, f64> = HashMap::new();
+            let mut area_cont_plate: HashMap<u16, f64> = HashMap::new();
+            let mut area_ocean_plate: HashMap<u16, f64> = HashMap::new();
+            for i in 0..world.grid.cells {
+                let pid = world.plates.plate_id[i];
+                let a = world.area_m2[i] as f64;
+                let c = world.c[i].clamp(0.0, 1.0) as f64;
+                *area_by_plate.entry(pid).or_insert(0.0) += a;
+                if c >= (ov.c_thresh_cont as f64) {
+                    *area_cont_plate.entry(pid).or_insert(0.0) += a;
+                }
+                if c <= (ov.c_thresh_ocean as f64) {
+                    *area_ocean_plate.entry(pid).or_insert(0.0) += a;
+                }
+            }
+            for (pid, area) in &area_by_plate {
+                let ac = area_cont_plate.get(pid).copied().unwrap_or(0.0);
+                let ao = area_ocean_plate.get(pid).copied().unwrap_or(0.0);
+                let sc = if *area > 0.0 { ac / *area } else { 0.0 };
+                let so = if *area > 0.0 { ao / *area } else { 0.0 };
+                if sc >= 0.6 {
+                    n_cont += 1;
+                    area_cont += *area;
+                } else if so >= 0.6 {
+                    n_ocean += 1;
+                    area_ocean += *area;
+                } else {
+                    n_mix += 1;
+                    area_mix += *area;
+                }
+            }
+            let area_tot: f64 = area_cont + area_mix + area_ocean;
+            if area_tot > 0.0 {
+                ui.label(format!(
+                    "Plate Type: continental={} ({:.1}%), mixed={} ({:.1}%), oceanic={} ({:.1}%)",
+                    n_cont,
+                    100.0 * area_cont / area_tot,
+                    n_mix,
+                    100.0 * area_mix / area_tot,
+                    n_ocean,
+                    100.0 * area_ocean / area_tot
+                ));
+            } else {
+                ui.label("Plate Type: no area");
+            }
+        }
+        if changed {
+            ov.color_dirty = true;
+            ov.bathy_cache = None;
+        }
     });
 
     egui::CollapsingHeader::new("Export").default_open(true).show(ui, |ui| {
@@ -510,6 +572,66 @@ fn render_advanced_panels(
             );
         });
         changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
+        if changed {
+            ov.color_dirty = true;
+            ov.bathy_cache = None;
+        }
+        if ov.show_plate_type {
+            // Compute simple legend: counts per class and area shares
+            let mut n_cont = 0usize;
+            let mut n_mix = 0usize;
+            let mut n_ocean = 0usize;
+            let mut area_cont: f64 = 0.0;
+            let mut area_mix: f64 = 0.0;
+            let mut area_ocean: f64 = 0.0;
+            // Reuse plate-level classification shares like overlay does
+            use std::collections::HashMap;
+            let mut area_by_plate: HashMap<u16, f64> = HashMap::new();
+            let mut area_cont_plate: HashMap<u16, f64> = HashMap::new();
+            let mut area_ocean_plate: HashMap<u16, f64> = HashMap::new();
+            for i in 0..world.grid.cells {
+                let pid = world.plates.plate_id[i];
+                let a = world.area_m2[i] as f64;
+                let c = world.c[i].clamp(0.0, 1.0) as f64;
+                *area_by_plate.entry(pid).or_insert(0.0) += a;
+                if c >= (ov.c_thresh_cont as f64) {
+                    *area_cont_plate.entry(pid).or_insert(0.0) += a;
+                }
+                if c <= (ov.c_thresh_ocean as f64) {
+                    *area_ocean_plate.entry(pid).or_insert(0.0) += a;
+                }
+            }
+            for (pid, area) in &area_by_plate {
+                let ac = area_cont_plate.get(pid).copied().unwrap_or(0.0);
+                let ao = area_ocean_plate.get(pid).copied().unwrap_or(0.0);
+                let sc = if *area > 0.0 { ac / *area } else { 0.0 };
+                let so = if *area > 0.0 { ao / *area } else { 0.0 };
+                if sc >= 0.6 {
+                    n_cont += 1;
+                    area_cont += *area;
+                } else if so >= 0.6 {
+                    n_ocean += 1;
+                    area_ocean += *area;
+                } else {
+                    n_mix += 1;
+                    area_mix += *area;
+                }
+            }
+            let area_tot: f64 = area_cont + area_mix + area_ocean;
+            if area_tot > 0.0 {
+                ui.label(format!(
+                    "Plate Type: continental={} ({:.1}%), mixed={} ({:.1}%), oceanic={} ({:.1}%)",
+                    n_cont,
+                    100.0 * area_cont / area_tot,
+                    n_mix,
+                    100.0 * area_mix / area_tot,
+                    n_ocean,
+                    100.0 * area_ocean / area_tot
+                ));
+            } else {
+                ui.label("Plate Type: no area");
+            }
+        }
         if changed {
             ov.color_dirty = true;
             ov.bathy_cache = None;
@@ -1858,11 +1980,17 @@ fn main() {
                                                     println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                                 }
                                             }
-                                            if let Some(tid) = ov.raster_tex_id { let avail = ui.available_size(); ui.image(egui::load::SizedTexture::new(tid, avail)); }
+                                            // Draw GPU raster and capture its actual rect for overlays
+                                            let mut rect_img = rect;
+                                            if let Some(tid) = ov.raster_tex_id {
+                                                let avail = ui.available_size();
+                                                let resp = ui.image(egui::load::SizedTexture::new(tid, avail));
+                                                rect_img = resp.rect;
+                                            }
                                             // Draw parity heat overlay as red dots if enabled
                                             if ov.show_parity_heat {
                                                 if let Some(points) = &ov.parity_points {
-                                                    let rect_px = rect;
+                                                    let rect_px = rect_img;
                                                     // current raster size
                                                     let (rw, rh) = ov.raster_size;
                                                     let mut mesh = egui::epaint::Mesh::default();
@@ -1875,7 +2003,7 @@ fn main() {
                                                 }
                                             }
                                             // Draw overlays on top (skip bathy points to avoid overdraw)
-                                            let saved = ov.show_bathy; ov.show_bathy = false; overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov); ov.show_bathy = saved;
+                                            let saved = ov.show_bathy; ov.show_bathy = false; overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); ov.show_bathy = saved;
                                         }
                                     } else {
                                         // CPU fallback raster
