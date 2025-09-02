@@ -1,8 +1,13 @@
-//! World stepper (T-400): update world by one kinematic step.
+//! Legacy world stepper (deprecated): retained for tests only.
+//!
+//! NOTE: This module predates the unified `pipeline::step_full` orchestrator. It does not
+//! compose all deltas nor solve sea level correctly by the elevation convention. Keep it
+//! out of runtime paths; tests may rely on it for narrow unit behaviors.
 
 use crate::{age::depth_from_age, boundaries::Boundaries, ridge, subduction, world::World};
 
 /// Step parameters
+#[allow(dead_code)]
 pub struct StepParams {
     /// Time step in Myr.
     pub dt_myr: f32,
@@ -12,6 +17,7 @@ pub struct StepParams {
 
 /// Step result stats
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub struct StepStats {
     /// Simulation time after the step (Myr).
     pub t_myr: f64,
@@ -26,6 +32,7 @@ pub struct StepStats {
 /// 4) age += dt except at ridges
 /// 5) subduction edits depth (uses age & boundaries)
 /// 6) depth from age curve
+#[allow(dead_code)]
 pub fn step(world: &mut World, p: &StepParams) -> StepStats {
     // 1) velocities: plates already hold fixed Euler poles; v_en set from plates
     world.v_en.clone_from(&world.plates.vel_en);

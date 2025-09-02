@@ -54,6 +54,24 @@ pub fn depth_from_age_hsc(age_myr: f64, d0_m: f64, k_m2_s: f64) -> f64 {
     d0_m + c * (k * age_s).sqrt()
 }
 
+/// Plate-cooling blend with asymptote: d(t) = d_inf - (d_inf - (d_ridge + A sqrt(t))) * exp(-t/τ).
+/// Units: age in Myr, distances in meters, τ in Myr, A in m/√Myr.
+#[inline]
+pub fn depth_from_age_blend(
+    age_myr: f64,
+    d_ridge_m: f64,
+    a_sqrt_m_per_sqrt_myr: f64,
+    d_inf_m: f64,
+    tau_myr: f64,
+) -> f64 {
+    let t = age_myr.max(0.0);
+    let base = d_ridge_m + a_sqrt_m_per_sqrt_myr * t.sqrt();
+    let tau = tau_myr.max(1e-6);
+    let w = (-t / tau).exp();
+    let d = d_inf_m - (d_inf_m - base) * w;
+    d.clamp(0.0, d_inf_m.max(d_ridge_m))
+}
+
 /// Plate cooling depth model with asymptotic plate thickness/maximum depth `z_plate_m`.
 /// For simplicity we cap the HSC curve at `z_plate_m`. With large `z_plate_m` the
 /// result approaches HSC at young ages. `t_myr` is accepted for API completeness but

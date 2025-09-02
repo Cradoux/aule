@@ -54,6 +54,8 @@ fn run_to_t_realtime(
                 cadence_flx_every: ov.cadence_flx_every.max(1),
                 cadence_sea_every: ov.cadence_sea_every.max(1),
                 cadence_surf_every: ov.cadence_sea_every.max(1),
+                substeps_transforms: 4,
+                substeps_subduction: 4,
                 use_gpu_flexure: true,
                 gpu_flex_levels: ov.levels.max(1),
                 gpu_flex_cycles: ov.flex_cycles.max(1),
@@ -83,6 +85,16 @@ fn run_to_t_realtime(
                 sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                 sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                 sub_continent_c_min: ov.sub_continent_c_min,
+                cadence_spawn_plate_every: 0,
+                cadence_retire_plate_every: 0,
+                cadence_force_balance_every: 8,
+                fb_gain: 1.0e-12,
+                fb_damp_per_myr: 0.2,
+                fb_k_conv: 1.0,
+                fb_k_div: 0.5,
+                fb_k_trans: 0.1,
+                fb_max_domega: 5.0e-9,
+                fb_max_omega: 2.0e-7,
             };
             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
             let mut eta = world.sea.eta_m;
@@ -246,7 +258,9 @@ fn render_simple_panels(
                     },
                 );
                 let imprint = engine::continent::imprint_orogenic_belts(&world.grid, &belts);
-                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) { *d += *di; }
+                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) {
+                    *d += *di;
+                }
             }
             // Solve amplitude for target land fraction (area-based). We'll apply uplift only; sea offset handled via world.sea.eta_m
             let target_land = ov.simple_target_land.clamp(0.0, 0.5);
@@ -261,11 +275,11 @@ fn render_simple_panels(
                 1e-4,
                 48,
             );
-            // Apply uplift to a base copy so we can retry amplitude if needed
-            let base_depth = world.depth_m.clone();
-            let mut amp_used_m = amp_m as f32;
-            world.depth_m.clone_from(&base_depth);
-            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_used_m * *t; }
+            // Apply uplift using the solved amplitude; no boost retries
+            let amp_used_m = amp_m as f32;
+            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
+                *d -= amp_used_m * *t;
+            }
             // Solve η so that land fraction with elev=η−depth matches target
             let eta_off = engine::isostasy::solve_offset_for_land_fraction(
                 &world.depth_m,
@@ -278,15 +292,14 @@ fn render_simple_panels(
             // Seed continents fields so subsequent steps preserve uplift
             world.c.clone_from(&continent_tpl);
             if continents_n == 0 {
-                // Cratonic thickness: tapered core with mild spatial noise, deterministic
                 let th = engine::continent::build_craton_thickness(
                     &world.grid,
                     &continent_tpl,
-                    22.0,  // base km
-                    16.0,  // extra km in core
-                    2.0,   // noise km scaled by template
+                    22.0,
+                    16.0,
+                    2.0,
                     ov.simple_seed,
-                    1.5,   // taper exponent
+                    1.5,
                 );
                 world.th_c_m.clone_from_slice(&th);
             } else {
@@ -301,29 +314,8 @@ fn render_simple_panels(
                     land_area += a as f64;
                 }
             }
-            let mut land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
-            // If we saturated amplitude and still miss target significantly, boost once and resolve again
-            if (land_frac - ov.simple_target_land as f64).abs() > 0.05 {
-                let amp_boost = (amp_used_m * 1.25).min(6000.0);
-                println!("[simple] land target not reachable with current amplitude; boosting A → {:.0} m", amp_boost);
-                world.depth_m.clone_from(&base_depth);
-                for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_boost * *t; }
-                let eta_off2 = engine::isostasy::solve_offset_for_land_fraction(
-                    &world.depth_m,
-                    &world.area_m2,
-                    ov.simple_target_land,
-                    64,
-                );
-                world.sea.eta_m = -(eta_off2 as f32);
-                amp_used_m = amp_boost;
-                world.th_c_m.fill(amp_used_m);
-                // Recompute achieved land after boost
-                land_area = 0.0;
-                for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                    if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
-                }
-                land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
-            }
+            let land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
+            // No boost retry. Diagnostics only.
             // Elevation stats (m)
             let mut zmin = f32::INFINITY;
             let mut zmax = f32::NEG_INFINITY;
@@ -341,9 +333,7 @@ fn render_simple_panels(
             let _zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
             println!(
                 "[simple] target_land={:.2} solved_eta={:+.0} m | land={:.3}",
-                ov.simple_target_land,
-                world.sea.eta_m,
-                land_frac
+                ov.simple_target_land, world.sea.eta_m, land_frac
             );
             println!(
                 "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%",
@@ -353,14 +343,9 @@ fn render_simple_panels(
                 land_frac * 100.0
             );
             // Guards (use eta-adjusted elevation for land/ocean checks)
-            let has_land = world
-                .depth_m
-                .iter()
-                .any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
-            let has_ocean = world
-                .depth_m
-                .iter()
-                .any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
+            let has_land = world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
+            let has_ocean =
+                world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
             debug_assert!(has_land, "no land after solve");
             debug_assert!(has_ocean, "no ocean after solve");
             // Apply palette then mark dirty
@@ -1309,6 +1294,8 @@ fn main() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_plate_adjacency = !ov.show_plate_adjacency; ov.net_adj_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_triple_junctions = !ov.show_triple_junctions; ov.net_tj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
@@ -1525,11 +1512,13 @@ fn main() {
                                                             log_mass_budget: false,
                                                             enable_subduction: !ov.disable_subduction,
                                                             enable_rigid_motion: true,
-                                                            cadence_trf_every: 5,
+                                                            cadence_trf_every: ov.cadence_trf_every.max(1),
                                                             cadence_sub_every: ov.cadence_sub_every.max(1),
                                                             cadence_flx_every: ov.cadence_flx_every.max(1),
                                                             cadence_sea_every: ov.cadence_sea_every.max(1),
                                                             cadence_surf_every: ov.cadence_sea_every.max(1),
+                                                            substeps_transforms: 4,
+                                                            substeps_subduction: 4,
                                                             use_gpu_flexure: false,
                                                             gpu_flex_levels: ov.levels.max(1),
                                                             gpu_flex_cycles: ov.flex_cycles.max(1),
@@ -1559,6 +1548,16 @@ fn main() {
                                                             sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                                                             sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                                                             sub_continent_c_min: ov.sub_continent_c_min,
+                                                            cadence_spawn_plate_every: 0,
+                                                            cadence_retire_plate_every: 0,
+                                                            cadence_force_balance_every: 8,
+                                                            fb_gain: 1.0e-12,
+                                                            fb_damp_per_myr: 0.2,
+                                                            fb_k_conv: 1.0,
+                                                            fb_k_div: 0.5,
+                                                            fb_k_trans: 0.1,
+                                                            fb_max_domega: 5.0e-9,
+                                                            fb_max_omega: 2.0e-7,
                                                         };
                                                         let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
                                                         let mut eta = world.sea.eta_m;
@@ -1568,7 +1567,7 @@ fn main() {
                                                             cfg,
                                                         );
                                                         world.sea.eta_m = eta;
-                                                        // Elevation stats and logging: use z = elev_tmp[i] - eta (which equals -depth - eta + eta = -depth)
+                                                        // Elevation stats and logging: z in elev_tmp is already (η − depth); do not add η again
                                                         // Invalidate plate/boundary caches so overlays reflect updated plate_id and edges
                                                         ov.plates_cache = None;
                                                         ov.bounds_cache = None;
@@ -1579,7 +1578,7 @@ fn main() {
                                                         let mut total_area = 0.0f64;
                                                         for (&z0, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
                                                              if z0.is_finite() {
-                                                                 let z = z0 + world.sea.eta_m; // elevation relative to sea: η − depth = (-depth) + η
+                                                                 let z = z0; // already η − depth
                                                                  zmin = zmin.min(z);
                                                                  zmax = zmax.max(z);
                                                                  zsum += z as f64;
@@ -1900,8 +1899,10 @@ fn main() {
                                                 cadence_sub_every: ov.cadence_sub_every.max(1),
                                                 cadence_flx_every: ov.cadence_flx_every.max(1),
                                                 cadence_sea_every: ov.cadence_sea_every.max(1),
-                                                cadence_surf_every: ov.cadence_surf_every.max(1),
-                                                use_gpu_flexure: true,
+                                                cadence_surf_every: ov.cadence_sea_every.max(1),
+                                                substeps_transforms: 4,
+                                                substeps_subduction: 4,
+                                                use_gpu_flexure: false,
                                                 gpu_flex_levels: ov.levels.max(1),
                                                 gpu_flex_cycles: ov.flex_cycles.max(1),
                                                 gpu_wj_omega: ov.wj_omega,
@@ -1930,6 +1931,16 @@ fn main() {
                                                 sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                                                 sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                                                 sub_continent_c_min: ov.sub_continent_c_min,
+                                                cadence_spawn_plate_every: 0,
+                                                cadence_retire_plate_every: 0,
+                                                cadence_force_balance_every: 8,
+                                                fb_gain: 1.0e-12,
+                                                fb_damp_per_myr: 0.2,
+                                                fb_k_conv: 1.0,
+                                                fb_k_div: 0.5,
+                                                fb_k_trans: 0.1,
+                                                fb_max_domega: 5.0e-9,
+                                                fb_max_omega: 2.0e-7,
                                             };
                                             // Use world.depth_m order as backing for elevation upload later
                                             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
@@ -1940,7 +1951,7 @@ fn main() {
                                                 cfg,
                                             );
                                             world.sea.eta_m = eta;
-                                            // Elevation stats and logging: use z = elev_tmp[i] - eta (which equals -depth - eta + eta = -depth)
+                                            // Elevation stats and logging: z in elev_tmp is already (η − depth); do not add η again
                                             // Invalidate plate/boundary caches so overlays reflect updated plate_id and edges
                                             ov.plates_cache = None;
                                             ov.bounds_cache = None;
@@ -1951,7 +1962,7 @@ fn main() {
                                             let mut total_area = 0.0f64;
                                             for (&z0, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
                                                  if z0.is_finite() {
-                                                     let z = z0 + world.sea.eta_m; // elevation relative to sea: η − depth = (-depth) + η
+                                                     let z = z0; // already η − depth
                                                      zmin = zmin.min(z);
                                                      zmax = zmax.max(z);
                                                      zsum += z as f64;
@@ -2120,7 +2131,9 @@ fn main() {
                                     cadence_sub_every: ov.cadence_sub_every.max(1),
                                     cadence_flx_every: ov.cadence_flx_every.max(1),
                                     cadence_sea_every: ov.cadence_sea_every.max(1),
-                                    cadence_surf_every: ov.cadence_surf_every.max(1),
+                                    cadence_surf_every: ov.cadence_sea_every.max(1),
+                                    substeps_transforms: 4,
+                                    substeps_subduction: 4,
                                     use_gpu_flexure: false,
                                     gpu_flex_levels: ov.levels.max(1),
                                     gpu_flex_cycles: ov.flex_cycles.max(1),
@@ -2150,6 +2163,16 @@ fn main() {
                                     sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                                     sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                                     sub_continent_c_min: ov.sub_continent_c_min,
+                                    cadence_spawn_plate_every: 0,
+                                    cadence_retire_plate_every: 0,
+                                    cadence_force_balance_every: 8,
+                                    fb_gain: 1.0e-12,
+                                    fb_damp_per_myr: 0.2,
+                                    fb_k_conv: 1.0,
+                                    fb_k_div: 0.5,
+                                    fb_k_trans: 0.1,
+                                    fb_max_domega: 5.0e-9,
+                                    fb_max_omega: 2.0e-7,
                                 };
                                 let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
                                 let mut eta = world.sea.eta_m;

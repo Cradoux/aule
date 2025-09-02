@@ -93,7 +93,11 @@ pub fn apply_surface_processes(
     let dt_yr = (dt_myr * 1.0e6) as f32;
 
     // Elevation field (m)
-    let elev_m: Vec<f32> = depth_m.iter().map(|&d| -d).collect();
+    let mut elev_m: Vec<f32> = depth_m.iter().map(|&d| -d).collect();
+    // Priority-flood-like depression fill (iterative, land-only). This raises local closed pits
+    // to their lowest spill elevation using repeated local minima elimination.
+    // Ocean cells (elev<0) act as fixed outlets and are not modified.
+    fill_depressions_iterative(grid, &mut elev_m, 8);
 
     // 1) Local slope magnitude using least-squares plane fit in local EN frame.
     let slope = compute_slope_mag(grid, &elev_m);
@@ -214,28 +218,57 @@ pub fn apply_surface_processes(
         }
     }
 
-    // 6) Hillslope diffusion: explicit 5-point-like stencil on irregular grid using 1-ring mean
-    // We approximate Laplacian with mean of neighbors minus center.
-    let subcycles = p.subcycles.max(1);
+    // 6) Hillslope diffusion (resolution-aware): explicit update with distance-weighted Laplacian.
+    // Stability (CFL): κ * dt * sum_j (1/dx_ij^2) <= 0.24 (safety vs 0.25).
+    let mut smax = 0.0f64;
+    {
+        for i in 0..n {
+            let lat_i = grid.latlon[i][0] as f64;
+            let lon_i = grid.latlon[i][1] as f64;
+            let cos_lat = lat_i.cos();
+            let mut s = 0.0f64;
+            for &nj in &grid.n1[i] {
+                let j = nj as usize;
+                let lat_j = grid.latlon[j][0] as f64;
+                let lon_j = grid.latlon[j][1] as f64;
+                let dx_e = (lon_j - lon_i) * cos_lat * 6_371_000.0f64;
+                let dx_n = (lat_j - lat_i) * 6_371_000.0f64;
+                let dx2 = (dx_e * dx_e + dx_n * dx_n).max(1.0);
+                s += 1.0 / dx2;
+            }
+            if s > smax {
+                smax = s;
+            }
+        }
+    }
+    let kappa = p.k_diff as f64;
+    let mut subcycles = p.subcycles.max(1);
+    if smax > 0.0 {
+        let req = (kappa * (dt_yr as f64) * smax / 0.24).ceil() as u32;
+        if req > subcycles {
+            subcycles = req.min(128);
+        }
+    }
     let dt_sub = dt_yr / (subcycles as f32);
     for _ in 0..subcycles {
         let before: Vec<f32> = depth_m.to_vec();
         for i in 0..n {
-            // Simple Laplacian approximation
-            let mut sum = 0.0f32;
-            let mut cnt = 0.0f32;
+            let lat_i = grid.latlon[i][0] as f64;
+            let lon_i = grid.latlon[i][1] as f64;
+            let cos_lat = lat_i.cos();
+            let mut acc = 0.0f64;
             for &nj in &grid.n1[i] {
                 let j = nj as usize;
-                sum += before[j];
-                cnt += 1.0;
+                let lat_j = grid.latlon[j][0] as f64;
+                let lon_j = grid.latlon[j][1] as f64;
+                let dx_e = (lon_j - lon_i) * cos_lat * 6_371_000.0f64;
+                let dx_n = (lat_j - lat_i) * 6_371_000.0f64;
+                let dx2 = (dx_e * dx_e + dx_n * dx_n).max(1.0);
+                let inv_dx2 = 1.0 / dx2;
+                acc += (before[j] as f64 - before[i] as f64) * inv_dx2;
             }
-            if cnt > 0.0 {
-                let mean_nb = sum / cnt;
-                let lap = mean_nb - before[i];
-                // Δdepth = κ * lap * dt
-                let d = p.k_diff * lap * dt_sub;
-                depth_m[i] += d;
-            }
+            let d = (p.k_diff as f64) * (dt_sub as f64) * acc;
+            depth_m[i] = (before[i] as f64 + d) as f32;
         }
     }
 
@@ -310,4 +343,34 @@ fn compute_steepest_receiver(grid: &Grid, elev_m: &[f32]) -> Vec<i32> {
         recv[i] = best_j;
     }
     recv
+}
+
+/// Iteratively fill depressions on land (elev>=0) by raising local minima to the
+/// minimum neighbor elevation. Limited passes for stability; ocean (elev<0) remains unchanged.
+fn fill_depressions_iterative(grid: &Grid, elev_m: &mut [f32], max_passes: usize) {
+    let n = grid.cells;
+    for _ in 0..max_passes {
+        let mut changed = false;
+        for i in 0..n {
+            let zi = elev_m[i];
+            if zi < 0.0 {
+                continue; // ocean seed
+            }
+            let mut min_nb = f32::INFINITY;
+            for &nj in &grid.n1[i] {
+                let j = nj as usize;
+                let zj = elev_m[j];
+                if zj < min_nb {
+                    min_nb = zj;
+                }
+            }
+            if min_nb.is_finite() && zi < min_nb {
+                elev_m[i] = min_nb;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }

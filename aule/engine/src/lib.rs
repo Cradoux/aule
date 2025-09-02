@@ -25,6 +25,8 @@ pub mod fields;
 pub mod flexure;
 /// GPU flexure multigrid scaffold (WGSL).
 pub mod flexure_gpu;
+/// Force-balance update for Euler poles.
+pub mod force_balance;
 /// Geometric utilities used by solvers.
 pub mod geo;
 /// Minimal GPU helper for tests (T-020).
@@ -37,6 +39,8 @@ pub mod hypsometry;
 pub mod isostasy;
 /// Orogeny (C–C collision) bilateral thickening/uplift.
 pub mod orogeny;
+/// Plate adjacency and triple-junction diagnostics.
+pub mod plate_network;
 /// Plates seeding and velocities.
 pub mod plates;
 /// Ridge births and fringe assignment (CPU pass).

@@ -326,6 +326,12 @@ pub struct OverlayState {
     // View toggle and globe controls (T-701)
     pub view_mode: ViewMode,
     pub globe: GlobeUi,
+
+    // Boundary network overlays
+    pub show_plate_adjacency: bool,
+    pub show_triple_junctions: bool,
+    pub net_adj_cache: Option<Vec<Shape>>, // adjacency strokes
+    pub net_tj_cache: Option<Vec<Shape>>,  // triple junction dots
 }
 
 impl Default for OverlayState {
@@ -588,6 +594,10 @@ impl Default for OverlayState {
                 pitch: 0.3,
                 radius: 1.15,
             },
+            show_plate_adjacency: false,
+            show_triple_junctions: false,
+            net_adj_cache: None,
+            net_tj_cache: None,
         }
     }
 }
@@ -599,6 +609,8 @@ impl OverlayState {
         self.plates_cache = None;
         self.vel_cache = None;
         self.bounds_cache = None;
+        self.net_adj_cache = None;
+        self.net_tj_cache = None;
         self.age_cache = None;
         self.bathy_cache = None;
         self.subd_trench = None;
@@ -1427,6 +1439,46 @@ impl OverlayState {
         self.trans_pull = Some(shapes_p);
         self.trans_rest = Some(shapes_r);
     }
+
+    pub fn shapes_for_plate_adjacency(
+        &mut self,
+        rect: Rect,
+        grid: &engine::grid::Grid,
+        edges: &[(u32, u32, u8)],
+    ) -> &[Shape] {
+        if self.net_adj_cache.is_none() {
+            // Reuse boundary stroke builder
+            let cap = self.effective_bounds_cap() as usize;
+            self.net_adj_cache = Some(build_boundary_strokes(rect, &grid.latlon, edges, cap));
+        }
+        self.net_adj_cache.as_deref().unwrap_or_default()
+    }
+
+    pub fn shapes_for_triple_junctions(
+        &mut self,
+        rect: Rect,
+        grid: &engine::grid::Grid,
+        plate_id: &[u16],
+    ) -> &[Shape] {
+        if self.net_tj_cache.is_none() {
+            let mut shapes = Vec::new();
+            for i in 0..grid.cells {
+                let mut uniq: std::collections::HashSet<u16> =
+                    std::collections::HashSet::with_capacity(8);
+                uniq.insert(plate_id[i]);
+                for &nj in &grid.n1[i] {
+                    uniq.insert(plate_id[nj as usize]);
+                    if uniq.len() >= 3 {
+                        let p = project_equirect(grid.latlon[i][0], grid.latlon[i][1], rect);
+                        shapes.push(Shape::circle_filled(p, 2.0, Color32::from_rgb(255, 255, 0)));
+                        break;
+                    }
+                }
+            }
+            self.net_tj_cache = Some(shapes);
+        }
+        self.net_tj_cache.as_deref().unwrap_or_default()
+    }
 }
 
 /// Draw the primary color layer for Simple mode. Ensures a color/bathy layer is available
@@ -1500,6 +1552,16 @@ pub fn draw_advanced_layers(
         }
         if ov.legend_on {
             ov.draw_legend(painter, rect);
+        }
+    }
+    if ov.show_plate_adjacency {
+        for s in ov.shapes_for_plate_adjacency(rect, &world.grid, &world.boundaries.edges).iter() {
+            painter.add(s.clone());
+        }
+    }
+    if ov.show_triple_junctions {
+        for s in ov.shapes_for_triple_junctions(rect, &world.grid, &world.plates.plate_id).iter() {
+            painter.add(s.clone());
         }
     }
     if ov.show_plates {

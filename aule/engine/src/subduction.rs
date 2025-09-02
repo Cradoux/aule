@@ -204,11 +204,20 @@ pub fn apply_subduction(
         }
     }
 
-    // Thresholds
+    // Thresholds and slab-geometry-derived arc offset
     let trench_hw_m = params.trench_half_width_km * KM;
-    let arc_off_m = params.arc_offset_km * KM;
     let arc_hw_m = params.arc_half_width_km * KM;
     let backarc_w_m = params.backarc_width_km * KM;
+    // Simple slab geometry: arc offset from trench ≈ depth_at_arc / tan(dip)
+    // Earth-like defaults: depth_at_arc ≈ 120 km, dip ≈ 30°
+    let slab_depth_m = 120.0 * KM;
+    let slab_dip_rad = 30.0f64.to_radians();
+    let arc_off_m_geom = if slab_dip_rad.tan() > 1e-6 {
+        (slab_depth_m / slab_dip_rad.tan()).clamp(40.0 * KM, 300.0 * KM)
+    } else {
+        140.0 * KM
+    };
+    let arc_off_m = arc_off_m_geom;
 
     let mut masks = SubductionMasks {
         trench: vec![false; grid.cells],
@@ -395,11 +404,18 @@ pub fn compute_subduction_delta(
         }
     }
 
-    // Thresholds
+    // Thresholds and slab-geometry-derived arc offset
     let trench_hw_m = params.trench_half_width_km * KM;
-    let arc_off_m = params.arc_offset_km * KM;
     let arc_hw_m = params.arc_half_width_km * KM;
     let backarc_w_m = params.backarc_width_km * KM;
+    let slab_depth_m = 120.0 * KM;
+    let slab_dip_rad = 30.0f64.to_radians();
+    let arc_off_m_geom = if slab_dip_rad.tan() > 1e-6 {
+        (slab_depth_m / slab_dip_rad.tan()).clamp(40.0 * KM, 300.0 * KM)
+    } else {
+        140.0 * KM
+    };
+    let arc_off_m = arc_off_m_geom;
 
     let mut masks = SubductionMasks {
         trench: vec![false; grid.cells],

@@ -36,30 +36,16 @@ fn determinism_sign_and_idempotence() {
 
     // Determinism/idempotence
     let mut depth1 = vec![3000.0_f32; g.cells];
-    let (m1, s1) = transforms::apply_transforms(
-        &g,
-        &b,
-        &plates.plate_id,
-        &plates.vel_en,
-        &mut depth1,
-        p,
-        1.0,
-    );
+    let (m1, s1) =
+        transforms::apply_transforms(&g, &b, &plates.plate_id, &plates.vel_en, &mut depth1, p, 1.0);
     assert_eq!(s0.pull_apart_cells, s1.pull_apart_cells);
     assert_eq!(s0.restraining_cells, s1.restraining_cells);
     assert_eq!(m0.pull_apart, m1.pull_apart);
     assert_eq!(m0.restraining, m1.restraining);
 
     let mut depth2 = depth1.clone();
-    let _ = transforms::apply_transforms(
-        &g,
-        &b,
-        &plates.plate_id,
-        &plates.vel_en,
-        &mut depth2,
-        p,
-        1.0,
-    );
+    let _ =
+        transforms::apply_transforms(&g, &b, &plates.plate_id, &plates.vel_en, &mut depth2, p, 1.0);
     assert_eq!(depth1, depth2);
 
     // Sign checks if non-empty

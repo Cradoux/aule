@@ -144,12 +144,20 @@ pub fn apply_oc_accretion(
             dcf += (p.alpha_forearc as f64) * ((vn_ref * 1.0e6) / H_REF) * dt * w_fore;
         }
         if dthc != 0.0 || dcf != 0.0 {
-            let th_new = (th_c_m[i] as f64 + dthc).clamp(p.thc_min_m as f64, p.thc_max_m as f64);
+            // Per-operator safety: clamp per-step thickness and uplift; flag units issues
+            let cap_th = 200.0f64;
+            let cap_uplift = 200.0f64;
+            if dthc.abs() > 1000.0 {
+                println!("[UNITS_BUG] accretion Δth_c raw {:.1} m (>1000 m)", dthc);
+            }
+            let dthc_c = dthc.clamp(-cap_th, cap_th);
+            let uplift = dthc_c; // beta already applied into dthc
+            let th_new = (th_c_m[i] as f64 + dthc_c).clamp(p.thc_min_m as f64, p.thc_max_m as f64);
             let dc_new = (c[i] as f64 + dcf).clamp(0.0, 1.0);
-            let uplift = dthc; // beta already applied
             th_c_m[i] = th_new as f32;
             c[i] = dc_new as f32;
-            depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
+            let uplift_c = uplift.clamp(-cap_uplift, cap_uplift);
+            depth_m[i] = (depth_m[i] - uplift_c as f32).clamp(-8000.0, 8000.0);
             dthc_area += dthc * (area_m2[i] as f64);
             d_c_area += dcf * (area_m2[i] as f64);
             dthc_max = dthc_max.max(dthc);

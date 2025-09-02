@@ -225,8 +225,18 @@ pub fn apply_cc_orogeny(
         if w_sum <= 0.0 {
             continue;
         }
-        let dthc = (r_mean * dt) * w_sum;
-        let uplift = (p.beta_uplift as f64) * dthc;
+        let dthc_raw = (r_mean * dt) * w_sum;
+        let uplift_raw = (p.beta_uplift as f64) * dthc_raw;
+        let cap = 300.0f64;
+        let dthc_capped = dthc_raw.clamp(-cap, cap);
+        let uplift = uplift_raw.clamp(-cap, cap);
+        if dthc_raw.abs() > cap {
+            println!("[cap] orogeny: thickening capped (raw={:.1} m, cap={:.0} m)", dthc_raw, cap);
+        }
+        if uplift_raw.abs() > cap {
+            println!("[cap] orogeny: uplift capped (raw={:.1} m, cap={:.0} m)", uplift_raw, cap);
+        }
+        let dthc = dthc_capped;
         th_c_m[i] = (th_c_m[i] + dthc as f32).clamp(0.0, 70_000.0);
         depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
         dthc_mean += dthc * (area_m2[i] as f64);

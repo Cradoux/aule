@@ -27,6 +27,33 @@ pub fn w_line_analytic(x: f64, p_n_per_m: f64, d: f64, k: f64) -> f64 {
     pref * (-s).exp() * (s.cos() + s.sin())
 }
 
+/// Compute a simple Te field (m) from age (Myr) and continental fraction C (0..1).
+///
+/// Policy:
+/// - Oceanic Te grows with age, from 5 km at 0 Myr to 40 km at ≥120 Myr (logistic cap).
+/// - Continental Te uses a higher baseline: 20–70 km depending on th_c and C.
+/// - Blend by C.
+pub fn compute_te_field(age_myr: &[f32], c: &[f32], th_c_m: &[f32], out_te_m: &mut [f32]) {
+    let n = out_te_m.len().min(age_myr.len()).min(c.len()).min(th_c_m.len());
+    for i in 0..n {
+        let age = age_myr[i] as f64;
+        let ci = c[i].clamp(0.0, 1.0) as f64;
+        // Oceanic: logistic growth with age
+        let te_ocean = {
+            let te_min = 5_000.0f64;
+            let te_max = 40_000.0f64;
+            let t50 = 30.0f64; // age at half-rise (Myr)
+            let k = 0.08f64; // steepness
+            te_min + (te_max - te_min) / (1.0 + (-k * (age - t50)).exp())
+        };
+        // Continental: scale with thickness (20–70 km across 20–70 km crust)
+        let thc = th_c_m[i] as f64;
+        let te_cont = 20_000.0 + (thc - 20_000.0).clamp(0.0, 50_000.0);
+        let te = (1.0 - ci) * te_ocean + ci * te_cont;
+        out_te_m[i] = te as f32;
+    }
+}
+
 /// Result of the CG solve for 1D flexure.
 #[derive(Debug, Clone)]
 pub struct FlexSolve {

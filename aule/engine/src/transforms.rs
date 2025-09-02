@@ -218,14 +218,25 @@ pub fn apply_transforms(
     }
 
     // Edits are additive; caller is expected to recompute baseline depth from age first
-    // Scale magnitudes by dt (rates → meters); cap to avoid unphysical jumps per step
-    let dt_s = (dt_myr.max(0.0)) * 1.0e6;
-    // Typical transform relief O(1e2 m) over O(10–50) Myr → rates O(2–10 mm/yr)
-    let cap_m_per_step = 100.0f32; // conservative per-step cap
-    let uplift_step = (params.ridge_like_uplift_m * (dt_s as f32) * 1.0e-3)
-        .clamp(-cap_m_per_step, cap_m_per_step);
-    let deepen_step =
-        (params.basin_deepen_m * (dt_s as f32) * 1.0e-3).clamp(-cap_m_per_step, cap_m_per_step);
+    // Interpret magnitudes as rates (m/Myr); scale by dt (Myr) and cap per-step changes
+    let dt = (dt_myr.max(0.0)) as f32;
+    let cap_m_per_step = 200.0f32;
+    let uplift_raw = params.ridge_like_uplift_m * dt;
+    let deepen_raw = params.basin_deepen_m * dt;
+    let uplift_step = uplift_raw.clamp(-cap_m_per_step, cap_m_per_step);
+    let deepen_step = deepen_raw.clamp(-cap_m_per_step, cap_m_per_step);
+    if uplift_raw.abs() > cap_m_per_step {
+        println!(
+            "[cap] transforms: restraining uplift capped (raw={:.1} m, dt={:.2} Myr, cap={:.0} m)",
+            uplift_raw, dt, cap_m_per_step
+        );
+    }
+    if deepen_raw.abs() > cap_m_per_step {
+        println!(
+            "[cap] transforms: pull-apart deepen capped (raw={:.1} m, dt={:.2} Myr, cap={:.0} m)",
+            deepen_raw, dt, cap_m_per_step
+        );
+    }
     for (i, d) in depth_m.iter_mut().enumerate() {
         if masks.pull_apart[i] {
             *d += deepen_step;
