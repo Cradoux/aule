@@ -5,8 +5,9 @@ fn compute_ref_deterministic() {
     // Fixed inputs
     let depth = vec![1000.0f32, -200.0, 300.0, 0.0, 50.0];
     let area = vec![1.0e6f32; depth.len()];
-    let r1 = crate_engine::isostasy::compute_ref(&depth, &area);
-    let r2 = crate_engine::isostasy::compute_ref(&depth, &area);
+    let eta = 0.0f32;
+    let r1 = crate_engine::isostasy::compute_ref(&depth, &area, eta);
+    let r2 = crate_engine::isostasy::compute_ref(&depth, &area, eta);
     assert_eq!(r1.ocean_area_m2, r2.ocean_area_m2);
     assert_eq!(r1.volume_m3, r2.volume_m3);
 }

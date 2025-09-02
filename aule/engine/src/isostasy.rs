@@ -19,13 +19,148 @@ pub fn ocean_volume_from_depth(depth_m: &[f32], area_m2: &[f32]) -> (f64, f64) {
     (vol, area)
 }
 
-/// Compute the reference ocean area and volume from the current depths.
+/// Solve eta using exact hypsometry prefix sums (monotone, bracketless).
 ///
-/// Ocean cells are those with depth > 0 (positive down). Returns a [`SeaLevelRef`]
-/// capturing the ocean area (m^2) and volume (m^3).
-pub fn compute_ref(depth_m: &[f32], area_m2: &[f32]) -> SeaLevelRef {
-    let (v, a) = ocean_volume_from_depth(depth_m, area_m2);
-    SeaLevelRef { volume_m3: v, ocean_area_m2: a }
+/// Safety rails:
+/// - Sanitizes inputs: clamp depths to [-9000, 11000], discard non-finite area.
+/// - Bounds eta to ±20 km; on failure returns `eta_prev`.
+pub fn solve_eta_hypsometry(depth_m: &[f32], area_m2: &[f32], v_target: f64, eta_prev: f64) -> f64 {
+    let n = depth_m.len().min(area_m2.len());
+    if n == 0 {
+        return eta_prev;
+    }
+    // Pair and sanitize
+    let mut cells: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut d = depth_m[i];
+        if !d.is_finite() {
+            d = 0.0;
+        }
+        d = d.clamp(-9000.0, 11000.0);
+        let mut a = area_m2[i];
+        if !a.is_finite() || a <= 0.0 {
+            a = 0.0;
+        }
+        cells.push((d, a));
+    }
+    // Sort by depth ascending
+    cells.sort_by(|(d1, _), (d2, _)| d1.partial_cmp(d2).unwrap_or(std::cmp::Ordering::Equal));
+    // Prefix sums
+    let mut s = 0.0f64; // area
+    let mut p = 0.0f64; // area*depth
+    let mut s_prefix: Vec<f64> = Vec::with_capacity(n);
+    let mut p_prefix: Vec<f64> = Vec::with_capacity(n);
+    for (d, a) in &cells {
+        s += *a as f64;
+        p += (*a as f64) * (*d as f64);
+        s_prefix.push(s);
+        p_prefix.push(p);
+    }
+    if s <= 0.0 {
+        return eta_prev;
+    }
+    // Binary search index such that V(depth_k) <= V_target
+    let mut lo = 0usize;
+    let mut hi = n - 1;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let d_mid = cells[mid].0 as f64;
+        let v_mid = d_mid * s_prefix[mid] - p_prefix[mid];
+        if v_mid <= v_target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let k = lo.saturating_sub(1);
+    let sk = s_prefix[k].max(1.0);
+    let pk = p_prefix[k];
+    let eta = (v_target + pk) / sk;
+    let eta_bounded = eta.clamp(-20_000.0, 20_000.0);
+    if eta_bounded.is_finite() {
+        eta_bounded
+    } else {
+        eta_prev
+    }
+}
+
+/// Compute eta for a target ocean area fraction using hypsometry (exact, area-weighted).
+/// Returns (eta, ocean_area_m2, ocean_volume_m3).
+pub fn solve_eta_for_ocean_area_fraction_hypso(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_ocean_frac: f64,
+) -> (f64, f64, f64) {
+    let n = depth_m.len().min(area_m2.len());
+    if n == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    // Pair and sanitize
+    let mut cells: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut d = depth_m[i];
+        if !d.is_finite() {
+            d = 0.0;
+        }
+        d = d.clamp(-9000.0, 11000.0);
+        let mut a = area_m2[i];
+        if !a.is_finite() || a <= 0.0 {
+            a = 0.0;
+        }
+        cells.push((d, a));
+    }
+    // Sort by depth ascending
+    cells.sort_by(|(d1, _), (d2, _)| d1.partial_cmp(d2).unwrap_or(std::cmp::Ordering::Equal));
+    // Prefix sums
+    let mut s = 0.0f64; // area
+    let mut p = 0.0f64; // area*depth
+    let mut s_prefix: Vec<f64> = Vec::with_capacity(n);
+    let mut p_prefix: Vec<f64> = Vec::with_capacity(n);
+    for (d, a) in &cells {
+        s += *a as f64;
+        p += (*a as f64) * (*d as f64);
+        s_prefix.push(s);
+        p_prefix.push(p);
+    }
+    if s <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let total_area = s;
+    let target_ocean_area = (target_ocean_frac.clamp(0.0, 1.0)) * total_area;
+    // Ocean area = total_area - S[k] for any eta in [depth_k, depth_{k+1}).
+    // Find k so that total_area - S[k] ≈ target_ocean_area → S[k] ≈ total_area - target.
+    let target_s = (total_area - target_ocean_area).clamp(0.0, total_area);
+    let mut k = 0usize;
+    while k + 1 < n && s_prefix[k] < target_s {
+        k += 1;
+    }
+    // eta at this threshold; clamp within neighbor depths
+    let eta = cells[k].0 as f64;
+    let area_suffix = total_area - s_prefix[k];
+    let p_suffix = p_prefix[n - 1] - p_prefix[k];
+    let vol = (p_suffix - eta * area_suffix).max(0.0);
+    (eta, area_suffix, vol)
+}
+
+/// Compute the reference ocean area and volume using elevation definition.
+///
+/// Ocean cells are those with (depth + eta_ref) > 0 (positive down). Returns a [`SeaLevelRef`]
+/// capturing the ocean area (m^2) and volume (m^3) consistent with rendering and the solver.
+pub fn compute_ref(depth_m: &[f32], area_m2: &[f32], eta_ref_m: f32) -> SeaLevelRef {
+    assert_eq!(depth_m.len(), area_m2.len());
+    let mut vol = 0.0f64;
+    let mut area = 0.0f64;
+    let eta = eta_ref_m as f64;
+    for i in 0..depth_m.len() {
+        // Ocean if (depth - eta) > 0 ⇔ z = η − depth < 0
+        let d = depth_m[i] as f64 - eta;
+        let a = area_m2[i] as f64;
+        if d > 0.0 && a > 0.0 {
+            vol += d * a;
+            area += a;
+        }
+    }
+    SeaLevelRef { volume_m3: vol, ocean_area_m2: area }
 }
 
 /// Set the world's sea-level reference to the current ocean state and return it.
@@ -34,7 +169,7 @@ pub fn compute_ref(depth_m: &[f32], area_m2: &[f32]) -> SeaLevelRef {
 /// to topography (e.g., adding continents). If there are no ocean cells, sets both
 /// fields to 0 and logs a note.
 pub fn rebaseline(world: &mut World, area_m2: &[f32]) -> SeaLevelRef {
-    let r = compute_ref(&world.depth_m, area_m2);
+    let r = compute_ref(&world.depth_m, area_m2, world.sea.eta_m);
     world.sea_level_ref = Some(r);
     let area_sum: f64 = area_m2.iter().map(|&a| a as f64).sum();
     let frac = if area_sum > 0.0 { r.ocean_area_m2 / area_sum } else { 0.0 };
@@ -247,6 +382,69 @@ pub fn solve_offset_for_volume(
         }
     }
     off
+}
+
+/// Solve η directly (meters) so that ocean_volume(depth+η) ~= target_vol_m3 via robust bracketing.
+/// Starts from an initial guess `eta0_m` and expands the bracket until it encloses the root.
+pub fn solve_eta_for_volume(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_vol_m3: f64,
+    eta0_m: f64,
+    tol_volume_m3: f64,
+    max_iter: u32,
+) -> f64 {
+    #[inline]
+    fn vol_eta(depth_m: &[f32], area_m2: &[f32], eta: f64) -> f64 {
+        let mut v = 0.0f64;
+        for (d, a) in depth_m.iter().zip(area_m2.iter()) {
+            // Ocean thickness with η-convention (z = η − depth) is max(depth − η, 0)
+            let dd = (*d as f64) - eta;
+            if dd > 0.0 {
+                v += dd * (*a as f64);
+            }
+        }
+        v
+    }
+
+    // (hypsometry variant defined at top-level)
+
+    // Center bracket around eta0
+    let mut half_span = 6_000.0_f64;
+    let mut lo = eta0_m - half_span;
+    let mut hi = eta0_m + half_span;
+    let mut f_lo = vol_eta(depth_m, area_m2, lo) - target_vol_m3;
+    let mut f_hi = vol_eta(depth_m, area_m2, hi) - target_vol_m3;
+    // Expand until we bracket or hit a generous limit
+    let mut expands = 0;
+    while !(f_lo <= 0.0 && f_hi >= 0.0) && expands < 16 {
+        half_span *= 2.0;
+        lo = eta0_m - half_span;
+        hi = eta0_m + half_span;
+        f_lo = vol_eta(depth_m, area_m2, lo) - target_vol_m3;
+        f_hi = vol_eta(depth_m, area_m2, hi) - target_vol_m3;
+        expands += 1;
+    }
+    // If still not bracketed, return the closer endpoint to avoid extreme jumps
+    if !(f_lo <= 0.0 && f_hi >= 0.0) {
+        return if f_lo.abs() < f_hi.abs() { lo } else { hi };
+    }
+    // Bisection
+    let mut mid = 0.5 * (lo + hi);
+    for _ in 0..max_iter {
+        mid = 0.5 * (lo + hi);
+        let f_mid = vol_eta(depth_m, area_m2, mid) - target_vol_m3;
+        if f_mid.abs() <= tol_volume_m3 || (hi - lo).abs() < 1e-6 {
+            return mid;
+        }
+        if (f_mid > 0.0) == (f_lo > 0.0) {
+            lo = mid;
+            f_lo = f_mid;
+        } else {
+            hi = mid;
+        }
+    }
+    mid
 }
 
 /// Solve uniform offset (meters) so that land fraction equals `target_land_frac`.

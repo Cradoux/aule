@@ -99,3 +99,53 @@ pub fn advect_plate_id(
         plate_id_out[i] = plate_id_in[j];
     }
 }
+
+/// Advect a scalar field via nearest-neighbour semi-Lagrangian backtrace using 3D velocities.
+pub fn advect_scalar(
+    grid: &Grid,
+    vel_m_per_yr: &[[f32; 3]],
+    dt_myr: f64,
+    src: &[f32],
+    dst: &mut [f32],
+) {
+    let n = grid.cells.min(vel_m_per_yr.len()).min(src.len()).min(dst.len());
+    for i in 0..n {
+        let r = grid.pos_xyz[i];
+        let v = vel_m_per_yr[i];
+        let r_src = backtrace_r(r, v, dt_myr);
+        // Start search locally and refine by greedy improvement over rings
+        let mut j = nearest_idx_local(grid, i, r_src);
+        let mut best_d2 = {
+            let dx = grid.pos_xyz[j][0] - r_src[0];
+            let dy = grid.pos_xyz[j][1] - r_src[1];
+            let dz = grid.pos_xyz[j][2] - r_src[2];
+            dx * dx + dy * dy + dz * dz
+        };
+        for _ in 0..24 {
+            let mut improved = false;
+            let try_idx =
+                |k: usize, j_cur: &mut usize, d2_best: &mut f32, improved_flag: &mut bool| {
+                    let p = grid.pos_xyz[k];
+                    let dx = p[0] - r_src[0];
+                    let dy = p[1] - r_src[1];
+                    let dz = p[2] - r_src[2];
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 < *d2_best || ((d2 - *d2_best).abs() <= f32::EPSILON && k < *j_cur) {
+                        *d2_best = d2;
+                        *j_cur = k;
+                        *improved_flag = true;
+                    }
+                };
+            for &k in &grid.n1[j] {
+                try_idx(k as usize, &mut j, &mut best_d2, &mut improved);
+            }
+            for &k in &grid.n2[j] {
+                try_idx(k as usize, &mut j, &mut best_d2, &mut improved);
+            }
+            if !improved {
+                break;
+            }
+        }
+        dst[i] = src[j];
+    }
+}

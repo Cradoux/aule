@@ -54,6 +54,8 @@ fn run_to_t_realtime(
                 cadence_flx_every: ov.cadence_flx_every.max(1),
                 cadence_sea_every: ov.cadence_sea_every.max(1),
                 cadence_surf_every: ov.cadence_sea_every.max(1),
+                substeps_transforms: 4,
+                substeps_subduction: 4,
                 use_gpu_flexure: true,
                 gpu_flex_levels: ov.levels.max(1),
                 gpu_flex_cycles: ov.flex_cycles.max(1),
@@ -83,6 +85,16 @@ fn run_to_t_realtime(
                 sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                 sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                 sub_continent_c_min: ov.sub_continent_c_min,
+                cadence_spawn_plate_every: 0,
+                cadence_retire_plate_every: 0,
+                cadence_force_balance_every: 8,
+                fb_gain: 1.0e-12,
+                fb_damp_per_myr: 0.2,
+                fb_k_conv: 1.0,
+                fb_k_div: 0.5,
+                fb_k_trans: 0.1,
+                fb_max_domega: 5.0e-9,
+                fb_max_omega: 2.0e-7,
             };
             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
             let mut eta = world.sea.eta_m;
@@ -246,7 +258,9 @@ fn render_simple_panels(
                     },
                 );
                 let imprint = engine::continent::imprint_orogenic_belts(&world.grid, &belts);
-                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) { *d += *di; }
+                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) {
+                    *d += *di;
+                }
             }
             // Solve amplitude for target land fraction (area-based). We'll apply uplift only; sea offset handled via world.sea.eta_m
             let target_land = ov.simple_target_land.clamp(0.0, 0.5);
@@ -261,11 +275,11 @@ fn render_simple_panels(
                 1e-4,
                 48,
             );
-            // Apply uplift to a base copy so we can retry amplitude if needed
-            let base_depth = world.depth_m.clone();
-            let mut amp_used_m = amp_m as f32;
-            world.depth_m.clone_from(&base_depth);
-            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_used_m * *t; }
+            // Apply uplift using the solved amplitude; no boost retries
+            let amp_used_m = amp_m as f32;
+            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
+                *d -= amp_used_m * *t;
+            }
             // Solve η so that land fraction with elev=η−depth matches target
             let eta_off = engine::isostasy::solve_offset_for_land_fraction(
                 &world.depth_m,
@@ -278,77 +292,20 @@ fn render_simple_panels(
             // Seed continents fields so subsequent steps preserve uplift
             world.c.clone_from(&continent_tpl);
             if continents_n == 0 {
-                // Cratonic thickness: tapered core with mild spatial noise, deterministic
                 let th = engine::continent::build_craton_thickness(
                     &world.grid,
                     &continent_tpl,
-                    22.0,  // base km
-                    16.0,  // extra km in core
-                    2.0,   // noise km scaled by template
+                    22.0,
+                    16.0,
+                    2.0,
                     ov.simple_seed,
-                    1.5,   // taper exponent
+                    1.5,
                 );
                 world.th_c_m.clone_from_slice(&th);
             } else {
                 world.th_c_m.fill(amp_used_m);
             }
             world.epoch_continents = world.epoch_continents.wrapping_add(1);
-            // Run one unified pipeline step so Generate World matches Play codepath
-            {
-                let cfg = engine::pipeline::PipelineCfg {
-                    dt_myr: 0.0, // settle using current fields without advancing time
-                    steps_per_frame: 1,
-                    enable_flexure: !ov.disable_flexure,
-                    enable_erosion: !ov.disable_erosion,
-                    target_land_frac: ov.simple_target_land,
-                    freeze_eta: ov.freeze_eta,
-                    log_mass_budget: false,
-                    enable_subduction: !ov.disable_subduction,
-                    enable_rigid_motion: true,
-                    cadence_trf_every: ov.cadence_trf_every.max(1),
-                    cadence_sub_every: ov.cadence_sub_every.max(1),
-                    cadence_flx_every: ov.cadence_flx_every.max(1),
-                    cadence_sea_every: ov.cadence_sea_every.max(1),
-                    cadence_surf_every: ov.cadence_sea_every.max(1),
-                    use_gpu_flexure: true,
-                    gpu_flex_levels: ov.levels.max(1),
-                    gpu_flex_cycles: ov.flex_cycles.max(1),
-                    gpu_wj_omega: ov.wj_omega,
-                    subtract_mean_load: ov.subtract_mean_load,
-                    surf_k_stream: ov.surf_k_stream,
-                    surf_m_exp: ov.surf_m_exp,
-                    surf_n_exp: ov.surf_n_exp,
-                    surf_k_diff: ov.surf_k_diff,
-                    surf_k_tr: ov.surf_k_tr,
-                    surf_p_exp: ov.surf_p_exp,
-                    surf_q_exp: ov.surf_q_exp,
-                    surf_rho_sed: ov.surf_rho_sed,
-                    surf_min_slope: ov.surf_min_slope,
-                    surf_subcycles: ov.surf_subcycles,
-                    surf_couple_flexure: ov.surf_couple_flexure,
-                    sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
-                    sub_trench_half_width_km: ov.sub_trench_half_width_km,
-                    sub_arc_offset_km: ov.sub_arc_offset_km,
-                    sub_arc_half_width_km: ov.sub_arc_half_width_km,
-                    sub_backarc_width_km: ov.sub_backarc_width_km,
-                    sub_trench_deepen_m: ov.sub_trench_deepen_m,
-                    sub_arc_uplift_m: ov.sub_arc_uplift_m,
-                    sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
-                    sub_rollback_offset_m: ov.sub_rollback_offset_m,
-                    sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
-                    sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
-                    sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
-                    sub_continent_c_min: ov.sub_continent_c_min,
-                };
-                let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
-                let mut eta = world.sea.eta_m;
-                engine::pipeline::step_full(
-                    world,
-                    engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
-                    cfg,
-                );
-                world.sea.eta_m = eta;
-            }
             // Diagnostics and UI updates using elev = η − depth
             let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
             let mut land_area = 0.0f64;
@@ -357,29 +314,8 @@ fn render_simple_panels(
                     land_area += a as f64;
                 }
             }
-            let mut land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
-            // If we saturated amplitude and still miss target significantly, boost once and resolve again
-            if (land_frac - ov.simple_target_land as f64).abs() > 0.05 {
-                let amp_boost = (amp_used_m * 1.25).min(6000.0);
-                println!("[simple] land target not reachable with current amplitude; boosting A → {:.0} m", amp_boost);
-                world.depth_m.clone_from(&base_depth);
-                for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) { *d -= amp_boost * *t; }
-                let eta_off2 = engine::isostasy::solve_offset_for_land_fraction(
-                    &world.depth_m,
-                    &world.area_m2,
-                    ov.simple_target_land,
-                    64,
-                );
-                world.sea.eta_m = -(eta_off2 as f32);
-                amp_used_m = amp_boost;
-                world.th_c_m.fill(amp_used_m);
-                // Recompute achieved land after boost
-                land_area = 0.0;
-                for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
-                    if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; }
-                }
-                land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
-            }
+            let land_frac = if total_area > 0.0 { land_area / total_area } else { 0.0 };
+            // No boost retry. Diagnostics only.
             // Elevation stats (m)
             let mut zmin = f32::INFINITY;
             let mut zmax = f32::NEG_INFINITY;
@@ -397,9 +333,7 @@ fn render_simple_panels(
             let _zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
             println!(
                 "[simple] target_land={:.2} solved_eta={:+.0} m | land={:.3}",
-                ov.simple_target_land,
-                world.sea.eta_m,
-                land_frac
+                ov.simple_target_land, world.sea.eta_m, land_frac
             );
             println!(
                 "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%",
@@ -409,14 +343,9 @@ fn render_simple_panels(
                 land_frac * 100.0
             );
             // Guards (use eta-adjusted elevation for land/ocean checks)
-            let has_land = world
-                .depth_m
-                .iter()
-                .any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
-            let has_ocean = world
-                .depth_m
-                .iter()
-                .any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
+            let has_land = world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
+            let has_ocean =
+                world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
             debug_assert!(has_land, "no land after solve");
             debug_assert!(has_ocean, "no ocean after solve");
             // Apply palette then mark dirty
@@ -451,7 +380,11 @@ fn render_simple_panels(
                     ui.selectable_value(&mut ov.simple_preset, 2, "Few large");
                     ui.selectable_value(&mut ov.simple_preset, 3, "Supercontinent");
                 });
-            if ui.button("Pangea").on_hover_text("Set Supercontinent preset and regenerate").clicked() {
+            if ui
+                .button("Pangea")
+                .on_hover_text("Set Supercontinent preset and regenerate")
+                .clicked()
+            {
                 ov.simple_preset = 3;
                 // Force a fresh world regenerate next frame via existing Generate button path
                 // by toggling world_dirty and raster_dirty; user clicks Generate World to apply.
@@ -654,16 +587,28 @@ fn render_advanced_panels(
         ui.separator();
         ui.label("Supercontinent belts (if n=0)");
         changed |= ui
-            .add(egui::Slider::new(&mut ov.belt_hw_primary_km, 100.0..=800.0).text("Primary half-width (km)"))
+            .add(
+                egui::Slider::new(&mut ov.belt_hw_primary_km, 100.0..=800.0)
+                    .text("Primary half-width (km)"),
+            )
             .changed();
         changed |= ui
-            .add(egui::Slider::new(&mut ov.belt_hw_secondary_km, 80.0..=600.0).text("Secondary half-width (km)"))
+            .add(
+                egui::Slider::new(&mut ov.belt_hw_secondary_km, 80.0..=600.0)
+                    .text("Secondary half-width (km)"),
+            )
             .changed();
         changed |= ui
-            .add(egui::Slider::new(&mut ov.belt_uplift_primary_m, 0.0..=1500.0).text("Primary uplift (m)"))
+            .add(
+                egui::Slider::new(&mut ov.belt_uplift_primary_m, 0.0..=1500.0)
+                    .text("Primary uplift (m)"),
+            )
             .changed();
         changed |= ui
-            .add(egui::Slider::new(&mut ov.belt_uplift_secondary_m, 0.0..=1000.0).text("Secondary uplift (m)"))
+            .add(
+                egui::Slider::new(&mut ov.belt_uplift_secondary_m, 0.0..=1000.0)
+                    .text("Secondary uplift (m)"),
+            )
             .changed();
         changed |= ui
             .add(egui::Slider::new(&mut ov.belt_diag_deg, 0.0..=60.0).text("Diagonal angle (deg)"))
@@ -703,53 +648,139 @@ fn render_advanced_panels(
         }
     });
 
-    egui::CollapsingHeader::new("Subduction (bands & magnitudes)").default_open(true).show(ui, |ui| {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Preset:");
-            egui::ComboBox::from_id_source("subduction_preset_combo")
-                .selected_text(match ov.sub_preset { 1 => "Strong rollback", 2 => "Back-arc extension", 3 => "Weak arcs", _ => "Reference" })
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(ov.sub_preset == 0, "Reference").clicked() { ov.sub_preset = 0; apply_sub_preset(ov); changed = true; }
-                    if ui.selectable_label(ov.sub_preset == 1, "Strong rollback").clicked() { ov.sub_preset = 1; apply_sub_preset(ov); changed = true; }
-                    if ui.selectable_label(ov.sub_preset == 2, "Back-arc extension").clicked() { ov.sub_preset = 2; apply_sub_preset(ov); changed = true; }
-                    if ui.selectable_label(ov.sub_preset == 3, "Weak arcs").clicked() { ov.sub_preset = 3; apply_sub_preset(ov); changed = true; }
-                });
-        });
-        ui.label("Convergence threshold and band geometry");
-        changed |= ui.add(egui::Slider::new(&mut ov.sub_tau_conv_m_per_yr, 0.001..=0.02).text("τ_conv (m/yr)")).changed();
-        ui.horizontal(|ui| {
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_trench_half_width_km, 10.0..=120.0).text("Trench half-width (km)")).changed();
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_offset_km, 60.0..=300.0).text("Arc offset (km)")).changed();
-        });
-        ui.horizontal(|ui| {
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_half_width_km, 10.0..=80.0).text("Arc half-width (km)")).changed();
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_width_km, 60.0..=300.0).text("Back-arc width (km)")).changed();
-        });
-        ui.separator();
-        ui.label("Magnitudes (m; positive deepens, negative uplifts)");
-        changed |= ui.add(egui::Slider::new(&mut ov.sub_trench_deepen_m, 500.0..=4000.0).text("Trench deepen (m)")).changed();
-        ui.horizontal(|ui| {
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_arc_uplift_m, -1000.0..=0.0).text("Arc uplift (m)")).changed();
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_uplift_m, -1000.0..=0.0).text("Back-arc uplift (m)")).changed();
-        });
-        ui.separator();
-        ui.label("Rollback and extension mode");
-        ui.horizontal(|ui| {
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_rollback_offset_m, 0.0..=200_000.0).text("Rollback offset (m)")).changed();
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_rollback_rate_km_per_myr, 0.0..=40.0).text("Rollback rate (km/Myr)")).changed();
-        });
-        changed |= ui.checkbox(&mut ov.sub_backarc_extension_mode, "Back-arc extension mode").changed();
-        if ov.sub_backarc_extension_mode {
-            changed |= ui.add(egui::Slider::new(&mut ov.sub_backarc_extension_deepen_m, 0.0..=1000.0).text("Back-arc deepen (m)")).changed();
-        }
-        ui.separator();
-        changed |= ui.add(egui::Slider::new(&mut ov.sub_continent_c_min, 0.4..=0.9).text("Continental C threshold")).changed();
-        if changed {
-            ov.world_dirty = true;
-            ov.bathy_cache = None;
-        }
-    });
+    egui::CollapsingHeader::new("Subduction (bands & magnitudes)").default_open(true).show(
+        ui,
+        |ui| {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Preset:");
+                egui::ComboBox::from_id_source("subduction_preset_combo")
+                    .selected_text(match ov.sub_preset {
+                        1 => "Strong rollback",
+                        2 => "Back-arc extension",
+                        3 => "Weak arcs",
+                        _ => "Reference",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(ov.sub_preset == 0, "Reference").clicked() {
+                            ov.sub_preset = 0;
+                            apply_sub_preset(ov);
+                            changed = true;
+                        }
+                        if ui.selectable_label(ov.sub_preset == 1, "Strong rollback").clicked() {
+                            ov.sub_preset = 1;
+                            apply_sub_preset(ov);
+                            changed = true;
+                        }
+                        if ui.selectable_label(ov.sub_preset == 2, "Back-arc extension").clicked() {
+                            ov.sub_preset = 2;
+                            apply_sub_preset(ov);
+                            changed = true;
+                        }
+                        if ui.selectable_label(ov.sub_preset == 3, "Weak arcs").clicked() {
+                            ov.sub_preset = 3;
+                            apply_sub_preset(ov);
+                            changed = true;
+                        }
+                    });
+            });
+            ui.label("Convergence threshold and band geometry");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut ov.sub_tau_conv_m_per_yr, 0.001..=0.02)
+                        .text("τ_conv (m/yr)"),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_trench_half_width_km, 10.0..=120.0)
+                            .text("Trench half-width (km)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_arc_offset_km, 60.0..=300.0)
+                            .text("Arc offset (km)"),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_arc_half_width_km, 10.0..=80.0)
+                            .text("Arc half-width (km)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_backarc_width_km, 60.0..=300.0)
+                            .text("Back-arc width (km)"),
+                    )
+                    .changed();
+            });
+            ui.separator();
+            ui.label("Magnitudes (m; positive deepens, negative uplifts)");
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut ov.sub_trench_deepen_m, 500.0..=4000.0)
+                        .text("Trench deepen (m)"),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_arc_uplift_m, -1000.0..=0.0)
+                            .text("Arc uplift (m)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_backarc_uplift_m, -1000.0..=0.0)
+                            .text("Back-arc uplift (m)"),
+                    )
+                    .changed();
+            });
+            ui.separator();
+            ui.label("Rollback and extension mode");
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_rollback_offset_m, 0.0..=200_000.0)
+                            .text("Rollback offset (m)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_rollback_rate_km_per_myr, 0.0..=40.0)
+                            .text("Rollback rate (km/Myr)"),
+                    )
+                    .changed();
+            });
+            changed |= ui
+                .checkbox(&mut ov.sub_backarc_extension_mode, "Back-arc extension mode")
+                .changed();
+            if ov.sub_backarc_extension_mode {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut ov.sub_backarc_extension_deepen_m, 0.0..=1000.0)
+                            .text("Back-arc deepen (m)"),
+                    )
+                    .changed();
+            }
+            ui.separator();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut ov.sub_continent_c_min, 0.4..=0.9)
+                        .text("Continental C threshold"),
+                )
+                .changed();
+            if changed {
+                ov.world_dirty = true;
+                ov.bathy_cache = None;
+            }
+        },
+    );
 
     egui::CollapsingHeader::new("Playback & Caps").default_open(ov.adv_open_playback).show(
         ui,
@@ -1263,6 +1294,8 @@ fn main() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_plate_adjacency = !ov.show_plate_adjacency; ov.net_adj_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_triple_junctions = !ov.show_triple_junctions; ov.net_tj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
@@ -1287,8 +1320,7 @@ fn main() {
                                     ui.label(format!("Aulé Viewer v{}", env!("CARGO_PKG_VERSION")));
                                     ui.separator();
                                     ui.label("Mode:");
-                                    ui.selectable_value(&mut ov.mode_simple, true, "Simple");
-                                    ui.selectable_value(&mut ov.mode_simple, false, "Advanced");
+                                    ui.checkbox(&mut ov.mode_simple, "Simple mode");
                                     ui.separator();
                                     ui.label("View:");
                                     ui.selectable_value(&mut ov.view_mode, overlay::ViewMode::Map, "Map 2D");
@@ -1468,44 +1500,98 @@ fn main() {
                                                         let _sub_every = ov.cadence_sub_every.max(1);
                                                         let _flx_every = ov.cadence_flx_every.max(1);
                                                         let _sea_every = ov.cadence_sea_every.max(1);
-                                                        // Full-physics defaults in Simple mode per step
-                                                        let sp = engine::world::StepParams {
-                                                            dt_myr: 1.0,
-                                                            do_flexure: true,
-                                                            do_isostasy: true,
-                                                            do_transforms: true,
-                                                            do_subduction: true,
-                                                            do_continents: true,
-                                                            do_ridge_birth: true,
-                                                            auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                                                            do_rigid_motion: true,
-                                                            do_orogeny: false,
-                                                            do_accretion: false,
-                                                            do_rifting: false,
-                                                            do_surface: false,
-                                                            surface_params: engine::surface::SurfaceParams {
-                                                                k_stream: ov.surf_k_stream,
-                                                                m_exp: ov.surf_m_exp,
-                                                                n_exp: ov.surf_n_exp,
-                                                                k_diff: ov.surf_k_diff,
-                                                                k_tr: ov.surf_k_tr,
-                                                                p_exp: ov.surf_p_exp,
-                                                                q_exp: ov.surf_q_exp,
-                                                                rho_sed: ov.surf_rho_sed,
-                                                                min_slope: ov.surf_min_slope,
-                                                                subcycles: ov.surf_subcycles.max(1),
-                                                                couple_flexure: ov.surf_couple_flexure,
-                                                            },
-                                                            advection_every: 1,
-                                                            transforms_every: 1,
-                                                            subduction_every: 1,
-                                                            flexure_every: 1,
-                                                            sea_every: 1,
-                                                            do_advection: true,
-                                                            do_sea: true,
-                                                        };
+                                                        // (legacy StepParams block removed; pipeline used below)
                                                         let t0 = world.clock.t_myr;
-                                                        let _ = engine::world::step_once(&mut world, &sp);
+                                                        let cfg = engine::pipeline::PipelineCfg {
+                                                            dt_myr,
+                                                            steps_per_frame: 1,
+                                                            enable_flexure: !ov.disable_flexure,
+                                                            enable_erosion: !ov.disable_erosion,
+                                                            target_land_frac: ov.simple_target_land,
+                                                            freeze_eta: ov.freeze_eta,
+                                                            log_mass_budget: false,
+                                                            enable_subduction: !ov.disable_subduction,
+                                                            enable_rigid_motion: true,
+                                                            cadence_trf_every: ov.cadence_trf_every.max(1),
+                                                            cadence_sub_every: ov.cadence_sub_every.max(1),
+                                                            cadence_flx_every: ov.cadence_flx_every.max(1),
+                                                            cadence_sea_every: ov.cadence_sea_every.max(1),
+                                                            cadence_surf_every: ov.cadence_sea_every.max(1),
+                                                            substeps_transforms: 4,
+                                                            substeps_subduction: 4,
+                                                            use_gpu_flexure: false,
+                                                            gpu_flex_levels: ov.levels.max(1),
+                                                            gpu_flex_cycles: ov.flex_cycles.max(1),
+                                                            gpu_wj_omega: ov.wj_omega,
+                                                            subtract_mean_load: ov.subtract_mean_load,
+                                                            surf_k_stream: ov.surf_k_stream,
+                                                            surf_m_exp: ov.surf_m_exp,
+                                                            surf_n_exp: ov.surf_n_exp,
+                                                            surf_k_diff: ov.surf_k_diff,
+                                                            surf_k_tr: ov.surf_k_tr,
+                                                            surf_p_exp: ov.surf_p_exp,
+                                                            surf_q_exp: ov.surf_q_exp,
+                                                            surf_rho_sed: ov.surf_rho_sed,
+                                                            surf_min_slope: ov.surf_min_slope,
+                                                            surf_subcycles: ov.surf_subcycles.max(1),
+                                                            surf_couple_flexure: ov.surf_couple_flexure,
+                                                            sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
+                                                            sub_trench_half_width_km: ov.sub_trench_half_width_km,
+                                                            sub_arc_offset_km: ov.sub_arc_offset_km,
+                                                            sub_arc_half_width_km: ov.sub_arc_half_width_km,
+                                                            sub_backarc_width_km: ov.sub_backarc_width_km,
+                                                            sub_trench_deepen_m: ov.sub_trench_deepen_m,
+                                                            sub_arc_uplift_m: ov.sub_arc_uplift_m,
+                                                            sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
+                                                            sub_rollback_offset_m: ov.sub_rollback_offset_m,
+                                                            sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
+                                                            sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
+                                                            sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
+                                                            sub_continent_c_min: ov.sub_continent_c_min,
+                                                            cadence_spawn_plate_every: 0,
+                                                            cadence_retire_plate_every: 0,
+                                                            cadence_force_balance_every: 8,
+                                                            fb_gain: 1.0e-12,
+                                                            fb_damp_per_myr: 0.2,
+                                                            fb_k_conv: 1.0,
+                                                            fb_k_div: 0.5,
+                                                            fb_k_trans: 0.1,
+                                                            fb_max_domega: 5.0e-9,
+                                                            fb_max_omega: 2.0e-7,
+                                                        };
+                                                        let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
+                                                        let mut eta = world.sea.eta_m;
+                                                        engine::pipeline::step_full(
+                                                            &mut world,
+                                                            engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                                                            cfg,
+                                                        );
+                                                        world.sea.eta_m = eta;
+                                                        // Elevation stats and logging: z in elev_tmp is already (η − depth); do not add η again
+                                                        // Invalidate plate/boundary caches so overlays reflect updated plate_id and edges
+                                                        ov.plates_cache = None;
+                                                        ov.bounds_cache = None;
+                                                        let mut zmin = f32::INFINITY;
+                                                        let mut zmax = f32::NEG_INFINITY;
+                                                        let mut zsum = 0.0f64;
+                                                        let mut land_area = 0.0f64;
+                                                        let mut total_area = 0.0f64;
+                                                        for (&z0, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
+                                                             if z0.is_finite() {
+                                                                 let z = z0; // already η − depth
+                                                                 zmin = zmin.min(z);
+                                                                 zmax = zmax.max(z);
+                                                                 zsum += z as f64;
+                                                                 total_area += a as f64;
+                                                                 if z > 0.0 { land_area += a as f64; }
+                                                             }
+                                                         }
+                                                        let zmean = if total_area > 0.0 { zsum / total_area } else { 0.0 };
+                                                        println!("[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%", zmin, zmean, zmax, 100.0 * land_area / total_area.max(1.0));
+                                                        // Bookkeeping
+                                                        ov.color_dirty = true;
+                                                        ov.world_dirty = true;
+                                                        ctx.request_repaint();
                                                         // Per-step land fraction (area-weighted) using elev = η − depth
                                                         let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
                                                         let mut land_area: f64 = 0.0;
@@ -1813,8 +1899,10 @@ fn main() {
                                                 cadence_sub_every: ov.cadence_sub_every.max(1),
                                                 cadence_flx_every: ov.cadence_flx_every.max(1),
                                                 cadence_sea_every: ov.cadence_sea_every.max(1),
-                                                cadence_surf_every: ov.cadence_surf_every.max(1),
-                                                use_gpu_flexure: true,
+                                                cadence_surf_every: ov.cadence_sea_every.max(1),
+                                                substeps_transforms: 4,
+                                                substeps_subduction: 4,
+                                                use_gpu_flexure: false,
                                                 gpu_flex_levels: ov.levels.max(1),
                                                 gpu_flex_cycles: ov.flex_cycles.max(1),
                                                 gpu_wj_omega: ov.wj_omega,
@@ -1828,7 +1916,7 @@ fn main() {
                                                 surf_q_exp: ov.surf_q_exp,
                                                 surf_rho_sed: ov.surf_rho_sed,
                                                 surf_min_slope: ov.surf_min_slope,
-                                                surf_subcycles: ov.surf_subcycles,
+                                                surf_subcycles: ov.surf_subcycles.max(1),
                                                 surf_couple_flexure: ov.surf_couple_flexure,
                                                 sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
                                                 sub_trench_half_width_km: ov.sub_trench_half_width_km,
@@ -1843,6 +1931,16 @@ fn main() {
                                                 sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
                                                 sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
                                                 sub_continent_c_min: ov.sub_continent_c_min,
+                                                cadence_spawn_plate_every: 0,
+                                                cadence_retire_plate_every: 0,
+                                                cadence_force_balance_every: 8,
+                                                fb_gain: 1.0e-12,
+                                                fb_damp_per_myr: 0.2,
+                                                fb_k_conv: 1.0,
+                                                fb_k_div: 0.5,
+                                                fb_k_trans: 0.1,
+                                                fb_max_domega: 5.0e-9,
+                                                fb_max_omega: 2.0e-7,
                                             };
                                             // Use world.depth_m order as backing for elevation upload later
                                             let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
@@ -1853,7 +1951,7 @@ fn main() {
                                                 cfg,
                                             );
                                             world.sea.eta_m = eta;
-                                            // Elevation stats and logging: use z = elev_tmp[i] - eta (which equals -depth - eta + eta = -depth)
+                                            // Elevation stats and logging: z in elev_tmp is already (η − depth); do not add η again
                                             // Invalidate plate/boundary caches so overlays reflect updated plate_id and edges
                                             ov.plates_cache = None;
                                             ov.bounds_cache = None;
@@ -1862,8 +1960,9 @@ fn main() {
                                             let mut zsum = 0.0f64;
                                             let mut land_area = 0.0f64;
                                             let mut total_area = 0.0f64;
-                                            for (&z, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
-                                                 if z.is_finite() {
+                                            for (&z0, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
+                                                 if z0.is_finite() {
+                                                     let z = z0; // already η − depth
                                                      zmin = zmin.min(z);
                                                      zmax = zmax.max(z);
                                                      zsum += z as f64;
@@ -1871,7 +1970,7 @@ fn main() {
                                                      if z > 0.0 { land_area += a as f64; }
                                                  }
                                              }
-                                            let zmean = if total_area > 0.0 { zsum / (elev_tmp.len().max(1) as f64) } else { 0.0 };
+                                            let zmean = if total_area > 0.0 { zsum / total_area } else { 0.0 };
                                             println!("[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%", zmin, zmean, zmax, 100.0 * land_area / total_area.max(1.0));
                                             // Bookkeeping
                                             steps_done += 1;
@@ -2016,42 +2115,73 @@ fn main() {
                                 let _sub_every = ov.cadence_sub_every.max(1);
                                 let _flx_every = ov.cadence_flx_every.max(1);
                                 let _sea_every = ov.cadence_sea_every.max(1);
-                                let sp = engine::world::StepParams {
-                                    dt_myr: dt_myr as f64,
-                                    do_flexure: true,
-                                    do_isostasy: true,
-                                    do_transforms: true,
-                                    do_subduction: true,
-                                    do_continents: true,
-                                    do_ridge_birth: true,
-                                    auto_rebaseline_after_continents: ov.auto_rebaseline_l,
-                                    do_rigid_motion: true,
-                                    do_orogeny: false,
-                                    do_accretion: false,
-                                    do_rifting: false,
-                                    do_surface: false,
-                                    surface_params: engine::surface::SurfaceParams {
-                                        k_stream: ov.surf_k_stream,
-                                        m_exp: ov.surf_m_exp,
-                                        n_exp: ov.surf_n_exp,
-                                        k_diff: ov.surf_k_diff,
-                                        k_tr: ov.surf_k_tr,
-                                        p_exp: ov.surf_p_exp,
-                                        q_exp: ov.surf_q_exp,
-                                        rho_sed: ov.surf_rho_sed,
-                                        min_slope: ov.surf_min_slope,
-                                        subcycles: ov.surf_subcycles.max(1),
-                                        couple_flexure: ov.surf_couple_flexure,
-                                    },
-                                    advection_every: 1,
-                                    transforms_every: 1,
-                                    subduction_every: 1,
-                                    flexure_every: 1,
-                                    sea_every: 1,
-                                    do_advection: true,
-                                    do_sea: true,
+                                // Unified pipeline stepping path
+                                let t0 = world.clock.t_myr;
+                                let cfg = engine::pipeline::PipelineCfg {
+                                    dt_myr,
+                                    steps_per_frame: 1,
+                                    enable_flexure: !ov.disable_flexure,
+                                    enable_erosion: !ov.disable_erosion,
+                                    target_land_frac: ov.simple_target_land,
+                                    freeze_eta: ov.freeze_eta,
+                                    log_mass_budget: false,
+                                    enable_subduction: !ov.disable_subduction,
+                                    enable_rigid_motion: true,
+                                    cadence_trf_every: ov.cadence_trf_every.max(1),
+                                    cadence_sub_every: ov.cadence_sub_every.max(1),
+                                    cadence_flx_every: ov.cadence_flx_every.max(1),
+                                    cadence_sea_every: ov.cadence_sea_every.max(1),
+                                    cadence_surf_every: ov.cadence_sea_every.max(1),
+                                    substeps_transforms: 4,
+                                    substeps_subduction: 4,
+                                    use_gpu_flexure: false,
+                                    gpu_flex_levels: ov.levels.max(1),
+                                    gpu_flex_cycles: ov.flex_cycles.max(1),
+                                    gpu_wj_omega: ov.wj_omega,
+                                    subtract_mean_load: ov.subtract_mean_load,
+                                    surf_k_stream: ov.surf_k_stream,
+                                    surf_m_exp: ov.surf_m_exp,
+                                    surf_n_exp: ov.surf_n_exp,
+                                    surf_k_diff: ov.surf_k_diff,
+                                    surf_k_tr: ov.surf_k_tr,
+                                    surf_p_exp: ov.surf_p_exp,
+                                    surf_q_exp: ov.surf_q_exp,
+                                    surf_rho_sed: ov.surf_rho_sed,
+                                    surf_min_slope: ov.surf_min_slope,
+                                    surf_subcycles: ov.surf_subcycles.max(1),
+                                    surf_couple_flexure: ov.surf_couple_flexure,
+                                    sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
+                                    sub_trench_half_width_km: ov.sub_trench_half_width_km,
+                                    sub_arc_offset_km: ov.sub_arc_offset_km,
+                                    sub_arc_half_width_km: ov.sub_arc_half_width_km,
+                                    sub_backarc_width_km: ov.sub_backarc_width_km,
+                                    sub_trench_deepen_m: ov.sub_trench_deepen_m,
+                                    sub_arc_uplift_m: ov.sub_arc_uplift_m,
+                                    sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
+                                    sub_rollback_offset_m: ov.sub_rollback_offset_m,
+                                    sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
+                                    sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
+                                    sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
+                                    sub_continent_c_min: ov.sub_continent_c_min,
+                                    cadence_spawn_plate_every: 0,
+                                    cadence_retire_plate_every: 0,
+                                    cadence_force_balance_every: 8,
+                                    fb_gain: 1.0e-12,
+                                    fb_damp_per_myr: 0.2,
+                                    fb_k_conv: 1.0,
+                                    fb_k_div: 0.5,
+                                    fb_k_trans: 0.1,
+                                    fb_max_domega: 5.0e-9,
+                                    fb_max_omega: 2.0e-7,
                                 };
-                                let stats = engine::world::step_once(&mut world, &sp);
+                                let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
+                                let mut eta = world.sea.eta_m;
+                                engine::pipeline::step_full(
+                                    &mut world,
+                                    engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                                    cfg,
+                                );
+                                world.sea.eta_m = eta;
                                 // Step log (one line per step) using elev = η − depth
                                 let area_total: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
                                 let mut land_area: f64 = 0.0;
@@ -2060,9 +2190,9 @@ fn main() {
                                 }
                                 let land_frac = if area_total > 0.0 { land_area / area_total } else { 0.0 };
                                 println!(
-                                    "[step] t={:.1} Myr dt={:.1} | div={} conv={} trans={} | land={:.1}% C̄={:.1}% | residual flex={}",
-                                    stats.t_myr, stats.dt_myr, stats.div_count, stats.conv_count, stats.trans_count, land_frac * 100.0, stats.c_bar * 100.0,
-                                    if sp.do_flexure { format!("{:.3e}", world.last_flex_residual) } else { "–".to_string() }
+                                    "[step] t={:.1}→{:.1} Myr | land={:.1}% | residual flex={}",
+                                    t0, world.clock.t_myr, land_frac * 100.0,
+                                    if !ov.disable_flexure { format!("{:.3e}", world.last_flex_residual) } else { "–".to_string() }
                                 );
                                 // Edge-triggered snapshots
                                 let f = snapshot_every_myr.max(0.0);
@@ -2101,7 +2231,8 @@ fn main() {
 // Helper to apply preset values to subduction controls
 fn apply_sub_preset(ov: &mut overlay::OverlayState) {
     match ov.sub_preset {
-        1 => { // Strong rollback
+        1 => {
+            // Strong rollback
             ov.sub_rollback_offset_m = 80_000.0;
             ov.sub_rollback_rate_km_per_myr = 20.0;
             ov.sub_trench_deepen_m = 2200.0;
@@ -2109,7 +2240,8 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
             ov.sub_backarc_uplift_m = -150.0;
             ov.sub_backarc_extension_mode = false;
         }
-        2 => { // Back-arc extension
+        2 => {
+            // Back-arc extension
             ov.sub_backarc_extension_mode = true;
             ov.sub_backarc_extension_deepen_m = 600.0;
             ov.sub_trench_deepen_m = 2000.0;
@@ -2118,7 +2250,8 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
             ov.sub_rollback_offset_m = 40_000.0;
             ov.sub_rollback_rate_km_per_myr = 10.0;
         }
-        3 => { // Weak arcs
+        3 => {
+            // Weak arcs
             ov.sub_trench_deepen_m = 1500.0;
             ov.sub_arc_uplift_m = -120.0;
             ov.sub_backarc_uplift_m = -60.0;
@@ -2126,7 +2259,8 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
             ov.sub_rollback_offset_m = 0.0;
             ov.sub_rollback_rate_km_per_myr = 0.0;
         }
-        _ => { // Reference
+        _ => {
+            // Reference
             ov.sub_tau_conv_m_per_yr = 0.005;
             ov.sub_trench_half_width_km = 40.0;
             ov.sub_arc_offset_km = 140.0;

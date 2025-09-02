@@ -204,7 +204,17 @@ pub fn apply_rifting(
     let w_core_m = (p.w_core_km as f64) * KM;
     let w_taper_m = (p.w_taper_km as f64) * KM;
     let w_bulge_m = (p.w_bulge_km as f64) * KM;
-    let r_thin = (p.k_thin as f64) * (vd_mean * 1.0e6);
+    let mut r_thin = (p.k_thin as f64) * (vd_mean * 1.0e6);
+    // Safety: clamp thinning rate to realistic maximum (m/Myr)
+    // With 35 mm/yr opening and k_thin=0.0025 → ~87.5 m/Myr; allow up to 150 m/Myr
+    let r_thin_cap_m_per_myr: f64 = 150.0;
+    if r_thin.abs() > r_thin_cap_m_per_myr {
+        println!(
+            "[cap] rifting: thinning rate capped (raw={:.1} m/Myr, cap={:.0} m/Myr)",
+            r_thin, r_thin_cap_m_per_myr
+        );
+        r_thin = r_thin.signum() * r_thin_cap_m_per_myr;
+    }
     let dt = dt_myr.max(0.0);
 
     let mut dthc_area = 0.0f64;
@@ -251,12 +261,33 @@ pub fn apply_rifting(
         if w_sum > 0.0 {
             // thinning distributed by side weights
             let w_side = w_sum; // symmetric application
-            dthc -= r_thin * dt * w_side;
-            let th_new = (th_c_m[i] as f64 + dthc).clamp(p.thc_min_m as f64, p.thc_max_m as f64);
-            let removed = (th_c_m[i] as f64 - th_new).max(0.0);
+                                // Per-step cap on crustal thickness change (|Δth_c| ≤ 75 m)
+            let dthc_raw = -r_thin * dt * w_side;
+            let dthc_cap = 300.0f64;
+            let dthc_step = dthc_raw.clamp(-dthc_cap, dthc_cap);
+            if dthc_raw.abs() > dthc_cap {
+                println!(
+                    "[cap] rifting: crustal thinning capped (raw={:.1} m, cap={:.0} m)",
+                    dthc_raw, dthc_cap
+                );
+            }
+            dthc += dthc_step;
+            let th_new =
+                (th_c_m[i] as f64 + dthc_step).clamp(p.thc_min_m as f64, p.thc_max_m as f64);
+            // Use step-local removal only, not absolute difference when clamped, to avoid runaway subsidence
+            let removed_step = (-dthc_step).max(0.0);
             th_c_m[i] = th_new as f32;
             // Airy-like subsidence; positive down
-            subs += (p.alpha_subs as f64) * removed;
+            let subs_raw = (p.alpha_subs as f64) * removed_step;
+            let subs_cap = 200.0f64;
+            let subs_capped = subs_raw.clamp(-subs_cap, subs_cap);
+            if subs_raw.abs() > subs_cap {
+                println!(
+                    "[cap] rifting: subsidence capped (raw={:.1} m, cap={:.0} m)",
+                    subs_raw, subs_cap
+                );
+            }
+            subs += subs_capped;
             depth_m[i] = (depth_m[i] + subs as f32).clamp(-8000.0, 8000.0);
             dthc_area += dthc * (area_m2[i] as f64);
             subs_area += subs * (area_m2[i] as f64);
@@ -281,7 +312,15 @@ pub fn apply_rifting(
         if p.enable_shoulder && (in_bulge_l || in_bulge_r) {
             let w_b: f64 =
                 (if in_bulge_l { 1.0 } else { 0.0 }) + (if in_bulge_r { 1.0 } else { 0.0 });
-            let uplift = (p.beta_shoulder as f64) * r_thin * dt * w_b.min(1.0);
+            let uplift_raw = (p.beta_shoulder as f64) * r_thin * dt * w_b.min(1.0);
+            let uplift_cap = 200.0f64;
+            let uplift = uplift_raw.clamp(-uplift_cap, uplift_cap);
+            if uplift_raw.abs() > uplift_cap {
+                println!(
+                    "[cap] rifting: shoulder uplift capped (raw={:.1} m, cap={:.0} m)",
+                    uplift_raw, uplift_cap
+                );
+            }
             depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
         }
     }

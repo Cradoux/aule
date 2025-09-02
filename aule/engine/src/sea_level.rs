@@ -214,11 +214,41 @@ pub fn solve_eta_on_elevation(
 /// Solve sea level to achieve a target land fraction (0..1) using world's depth/area.
 pub fn solve_to_target_land(
     world: &crate::world::World,
-    _elev_m: &[f32],
+    elev_m: &[f32],
     target_land_frac: f32,
     eta_m: &mut f32,
 ) {
-    let target_ocean = (1.0 - target_land_frac).clamp(0.0, 1.0);
-    let off = solve_offset_for_ocean_area_fraction(&world.depth_m, &world.area_m2, target_ocean);
-    *eta_m = off as f32;
+    // Elevation-based solver: find η such that area where (elev - η) > 0 matches target land fraction
+    // This maintains consistency with rendering (z = η − depth) and isostasy definitions.
+    let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+    if total_area <= 0.0 {
+        *eta_m = 0.0;
+        return;
+    }
+    let target = target_land_frac.clamp(0.0, 1.0) as f64;
+    let land_frac = |eta: f64| -> f64 {
+        let mut land = 0.0f64;
+        for (z, &a) in elev_m.iter().zip(world.area_m2.iter()) {
+            if (*z as f64 - eta) > 0.0 {
+                land += a as f64;
+            }
+        }
+        land / total_area
+    };
+    let mut lo = -11_000.0f64;
+    let mut hi = 9_000.0f64;
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        let lf = land_frac(mid);
+        if (lf - target).abs() < 2e-3 {
+            *eta_m = mid as f32;
+            return;
+        }
+        if lf > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    *eta_m = (0.5 * (lo + hi)) as f32;
 }

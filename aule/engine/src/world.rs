@@ -56,6 +56,8 @@ pub struct World {
     pub last_flex_residual: f32,
     /// Cumulative sediment thickness in meters (≥0), updated by surface processes.
     pub sediment_m: Vec<f32>,
+    /// Elastic thickness field Te (meters), used to parameterize flexure response.
+    pub te_m: Vec<f32>,
     /// Last surface-processes stats (if applied this step).
     pub last_surface_stats: Option<crate::surface::SurfaceStats>,
     /// Continents change epoch counter (bump when C/th_c change applied).
@@ -64,6 +66,12 @@ pub struct World {
     pub last_rebaseline_epoch: u64,
     /// Sea state (offset from geoid). Positive raises sea level (more ocean).
     pub sea: SeaState,
+    /// Last-step crustal mass (kg) for budget deltas.
+    pub last_mass_cont_kg: f64,
+    /// Last-step sediment mass (kg) for budget deltas.
+    pub last_mass_sed_kg: f64,
+    /// Last-step ocean volume (m^3) for budget deltas.
+    pub last_ocean_vol_m3: f64,
 }
 
 /// Simple-mode preset parameters for deterministic world generation.
@@ -235,6 +243,7 @@ impl World {
         let c = vec![0.0f32; grid.cells];
         let th_c_m = vec![0.0f32; grid.cells];
         let sediment_m = vec![0.0f32; grid.cells];
+        let cells = grid.cells;
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
         // Precompute area in m^2 using Earth radius
         const R_EARTH_M: f64 = 6_371_000.0;
@@ -257,10 +266,14 @@ impl World {
             area_m2,
             last_flex_residual: 0.0,
             sediment_m,
+            te_m: vec![25_000.0; cells],
             last_surface_stats: None,
             epoch_continents: 0,
             last_rebaseline_epoch: 0,
             sea: SeaState { eta_m: 0.0 },
+            last_mass_cont_kg: 0.0,
+            last_mass_sed_kg: 0.0,
+            last_ocean_vol_m3: 0.0,
         }
     }
 
@@ -274,8 +287,12 @@ impl World {
         self.c.fill(0.0);
         self.th_c_m.fill(0.0);
         self.sediment_m.fill(0.0);
+        self.te_m.fill(25_000.0);
         self.clock = Clock { t_myr: 0.0, step_idx: 0 };
         self.sea_level_ref = None;
+        self.last_mass_cont_kg = 0.0;
+        self.last_mass_sed_kg = 0.0;
+        self.last_ocean_vol_m3 = 0.0;
         self.boundaries =
             Boundaries::classify(&self.grid, &self.plates.plate_id, &self.v_en, 0.005);
 
@@ -304,8 +321,8 @@ impl World {
             }
             self.depth_m[i] = d.clamp(0.0, 6000.0);
         }
-        // Capture reference ocean volume for constant-volume isostasy
-        let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2);
+        // Capture reference ocean volume for constant-volume isostasy using elevation definition
+        let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2, self.sea.eta_m);
         self.sea_level_ref = Some(ref_sea);
 
         // 3) Continents: build template.
@@ -383,104 +400,31 @@ impl World {
             }
         }
 
-        // 5) Low-F path: use a moderate fixed amplitude for stability and determinism
-        if self.grid.frequency <= 32 {
-            let amp_fixed = 1600.0f32;
-            for (i, &cm) in tpl.iter().enumerate() {
-                self.depth_m[i] -= amp_fixed * cm;
-            }
-            let off0 = crate::sea_level::solve_offset_for_ocean_area_fraction(
-                &self.depth_m,
-                &self.area_m2,
-                target_ocean_frac as f32,
-            );
-            self.sea.eta_m = off0 as f32;
-        } else {
-            // High-F path: area-quantile mask uplift then set eta
-            let target_land = preset.target_land_frac.clamp(0.0, 1.0) as f64;
-            let mut pairs: Vec<(f32, f64)> =
-                tpl.iter().cloned().zip(self.area_m2.iter().map(|&a| a as f64)).collect();
-            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let total_area: f64 = pairs.iter().map(|p| p.1).sum();
-            let mut acc: f64 = 0.0;
-            let mut q: f32 = 0.0;
-            for (u, a) in pairs.iter().rev() {
-                acc += *a;
-                if total_area > 0.0 && (acc / total_area) >= target_land {
-                    q = *u;
-                    break;
-                }
-            }
-            let mut min_active_u: f32 = f32::INFINITY;
-            let mut mask: Vec<f32> = vec![0.0; tpl.len()];
-            for i in 0..tpl.len() {
-                if tpl[i] >= q && tpl[i] > 0.0 {
-                    mask[i] = 1.0;
-                    if tpl[i] < min_active_u {
-                        min_active_u = tpl[i];
-                    }
-                }
-            }
-            if !min_active_u.is_finite() || min_active_u <= 0.0 {
-                min_active_u = 1.0;
-            }
-            let d0 = 2600.0f32;
-            let mut amp_quant = (d0 + 100.0) / min_active_u;
-            amp_quant = amp_quant.clamp(0.0, 6000.0);
-            for (i, &m) in mask.iter().enumerate() {
-                self.depth_m[i] -= amp_quant * m;
-            }
-            let off0 = crate::sea_level::solve_offset_for_ocean_area_fraction(
-                &self.depth_m,
-                &self.area_m2,
-                target_ocean_frac as f32,
-            );
-            self.sea.eta_m = off0 as f32;
+        // 5) Use principled amplitude solver only (no fixed/quantile/fallback paths)
+        let (amp_m, off_m) = crate::isostasy::solve_amplitude_for_land_fraction(
+            &tpl,
+            &self.depth_m,
+            &self.area_m2,
+            preset.target_land_frac,
+            0.0,
+            6000.0,
+            2e-2,
+            1e-4,
+            48,
+        );
+        for (i, &cm) in tpl.iter().enumerate() {
+            self.depth_m[i] -= (amp_m as f32) * cm;
         }
+        self.sea.eta_m = -(off_m as f32);
 
         // 6) Skip subduction/flexure in Simple; keep land fraction stable
 
-        // 7) Robustness fallback: if the field is too flat or ocean fraction is degenerate,
-        // apply a minimal deterministic uplift using the continent template, then set η to match target ocean.
-        {
-            // Compute variance and current ocean fraction with η
-            let mut mean = 0.0f64;
-            for &d in &self.depth_m {
-                mean += d as f64;
-            }
-            let n = self.depth_m.len().max(1) as f64;
-            mean /= n;
-            let mut var = 0.0f64;
-            for &d in &self.depth_m {
-                let x = (d as f64) - mean;
-                var += x * x;
-            }
-            let mut tot = 0.0f64;
-            let mut ocean = 0.0f64;
-            for (d, a) in self.depth_m.iter().zip(self.area_m2.iter()) {
-                if (*d as f64 + self.sea.eta_m as f64) > 0.0 {
-                    ocean += *a as f64;
-                }
-                tot += *a as f64;
-            }
-            let ocean_frac_now = if tot > 0.0 { ocean / tot } else { 0.0 };
-            if var < 1.0e5 || ocean_frac_now <= 0.01 || ocean_frac_now >= 0.99 {
-                // Apply a small, bounded uplift
-                let amp_fallback = 1800.0f32;
-                for (i, &cm) in tpl.iter().enumerate() {
-                    self.depth_m[i] -= amp_fallback * cm;
-                }
-                // Recompute η for target area after fallback
-                let off_fallback = crate::sea_level::solve_offset_for_ocean_area_fraction(
-                    &self.depth_m,
-                    &self.area_m2,
-                    target_ocean_frac as f32,
-                );
-                self.sea.eta_m = off_fallback as f32;
-            }
-        }
+        // 7) No robustness fallback: keep the solver result deterministically
 
         // 8) Final: keep η managed externally (viewer) in Simple mode; do not modify depths here
+        // Capture reference ocean state AFTER continents and final η using elevation definition
+        let ref_after = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2, self.sea.eta_m);
+        self.sea_level_ref = Some(ref_after);
 
         // Report stats
         let mut dmin = f32::INFINITY;
@@ -849,13 +793,13 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &sub_masks_owned
         };
         let p_acc = crate::accretion::AccretionParams {
-            k_arc: 0.05,
+            k_arc: 0.002,
             gamma_obliquity: 1.0,
-            beta_arc: 0.7,
-            alpha_arc: 0.015,
-            alpha_forearc: 0.008,
+            beta_arc: 0.02,
+            alpha_arc: 0.001,
+            alpha_forearc: 0.0004,
             c_min_continent: 0.6,
-            thc_min_m: 20_000.0,
+            thc_min_m: 0.0,
             thc_max_m: 70_000.0,
             enable_docking: false,
             c_terrane_min: 0.5,
@@ -933,10 +877,12 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             transforms::TransformParams {
                 tau_open_m_per_yr: TAU_OPEN_M_PER_YR,
                 min_tangential_m_per_yr: 0.003,
+                max_normal_m_per_yr: 0.010,
                 basin_half_width_km: 50.0,
                 ridge_like_uplift_m: -200.0,
                 basin_deepen_m: 300.0,
             },
+            sp.dt_myr,
         );
         for i in 0..n {
             delta_tect[i] += tr_tmp[i];
@@ -1091,7 +1037,8 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     if sp.do_isostasy && do_sea_step {
         let ts0 = Instant::now();
         if world.sea_level_ref.is_none() {
-            world.sea_level_ref = Some(isostasy::compute_ref(&world.depth_m, &world.area_m2));
+            world.sea_level_ref =
+                Some(isostasy::compute_ref(&world.depth_m, &world.area_m2, world.sea.eta_m));
         }
         if sp.auto_rebaseline_after_continents
             && world.epoch_continents != world.last_rebaseline_epoch

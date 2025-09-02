@@ -30,6 +30,8 @@ pub struct TransformParams {
     pub tau_open_m_per_yr: f64,
     /// Minimum tangential speed (m/yr) to deem transform active.
     pub min_tangential_m_per_yr: f64,
+    /// Maximum normal component magnitude (m/yr) to count as near-pure transform.
+    pub max_normal_m_per_yr: f64,
     /// Half-width of transform band (km) measured from the fault trace.
     pub basin_half_width_km: f64,
     /// Uplift (negative, shallower) applied in restraining zones (m).
@@ -54,6 +56,7 @@ pub fn apply_transforms(
     v_en: &[[f32; 2]],
     depth_m: &mut [f32],
     params: TransformParams,
+    dt_myr: f64,
 ) -> (TransformMasks, TransformStats) {
     assert_eq!(v_en.len(), grid.cells);
     assert_eq!(depth_m.len(), grid.cells);
@@ -94,8 +97,8 @@ pub fn apply_transforms(
         n_min = n_min.min(n_abs);
         n_max = n_max.max(n_abs);
         n_sum += n_abs;
-        // Only gate by tangential magnitude to drop numerically dead edges.
-        if t_abs >= params.min_tangential_m_per_yr {
+        // Gate by high tangential magnitude AND low normal component.
+        if t_abs >= params.min_tangential_m_per_yr && n_abs <= params.max_normal_m_per_yr {
             passing += 1;
             // Shear sense from stored signed t_m_per_yr (aligned with stored t_hat)
             if ek.t_m_per_yr >= 0.0 {
@@ -215,11 +218,30 @@ pub fn apply_transforms(
     }
 
     // Edits are additive; caller is expected to recompute baseline depth from age first
+    // Interpret magnitudes as rates (m/Myr); scale by dt (Myr) and cap per-step changes
+    let dt = (dt_myr.max(0.0)) as f32;
+    let cap_m_per_step = 200.0f32;
+    let uplift_raw = params.ridge_like_uplift_m * dt;
+    let deepen_raw = params.basin_deepen_m * dt;
+    let uplift_step = uplift_raw.clamp(-cap_m_per_step, cap_m_per_step);
+    let deepen_step = deepen_raw.clamp(-cap_m_per_step, cap_m_per_step);
+    if uplift_raw.abs() > cap_m_per_step {
+        println!(
+            "[cap] transforms: restraining uplift capped (raw={:.1} m, dt={:.2} Myr, cap={:.0} m)",
+            uplift_raw, dt, cap_m_per_step
+        );
+    }
+    if deepen_raw.abs() > cap_m_per_step {
+        println!(
+            "[cap] transforms: pull-apart deepen capped (raw={:.1} m, dt={:.2} Myr, cap={:.0} m)",
+            deepen_raw, dt, cap_m_per_step
+        );
+    }
     for (i, d) in depth_m.iter_mut().enumerate() {
         if masks.pull_apart[i] {
-            *d += params.basin_deepen_m;
+            *d += deepen_step;
         } else if masks.restraining[i] {
-            *d += params.ridge_like_uplift_m;
+            *d += uplift_step;
         }
     }
 

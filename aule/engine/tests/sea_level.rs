@@ -44,3 +44,41 @@ fn cyclic_bounds() {
         assert!(eta.abs() <= 60.0 + 1e-6);
     }
 }
+
+#[test]
+fn land_fraction_offset_hits_target_on_synthetic_dem() {
+    // Synthetic DEM spanning [-2000, 4000] so land fraction varies smoothly with offset
+    let n = 2048usize;
+    let mut depth = vec![0.0f32; n];
+    let area = vec![1.0f32; n];
+    for (i, d) in depth.iter_mut().enumerate().take(n) {
+        let t = (i as f64) / ((n - 1) as f64);
+        *d = (-2000.0 + t * 6000.0) as f32; // [-2000, 4000]
+    }
+    let target_land = 0.30f32;
+    let off =
+        crate_engine::isostasy::solve_offset_for_land_fraction(&depth, &area, target_land, 64);
+    // Elevation = -(depth+off); land if elevation > 0 -> depth+off < 0
+    let mut land_area = 0.0f64;
+    let mut total_area = 0.0f64;
+    for (&d, &a) in depth.iter().zip(area.iter()) {
+        if (d as f64 + off) < 0.0 {
+            land_area += a as f64;
+        }
+        total_area += a as f64;
+    }
+    let frac = if total_area > 0.0 { land_area / total_area } else { 0.0 } as f32;
+    assert!((frac - target_land).abs() <= 0.02);
+}
+
+#[test]
+fn constant_volume_offset_preserves_volume_on_shift() {
+    // DEM with positive depths only; shifting by -X should reduce volume by X*area
+    let n = 100usize;
+    let depth = vec![2000.0f32; n];
+    let area = vec![2.0f32; n];
+    let (v0, _a0) = crate_engine::isostasy::ocean_volume_from_depth(&depth, &area);
+    let target = v0 - (1000.0 * (2.0 * n as f32)) as f64;
+    let off = crate_engine::isostasy::solve_offset_for_volume(&depth, &area, target, 1e3, 64);
+    assert!(off < 0.0);
+}

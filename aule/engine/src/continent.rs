@@ -224,8 +224,16 @@ pub fn build_supercontinent_belts(seed: u64, p: BeltParams) -> Vec<GreatCircleBe
     ];
     let n2 = normalize3(n2u);
     vec![
-        GreatCircleBelt { n_hat: n1, half_width_km: p.half_width_km_primary, uplift_m: p.uplift_primary_m },
-        GreatCircleBelt { n_hat: n2, half_width_km: p.half_width_km_secondary, uplift_m: p.uplift_secondary_m },
+        GreatCircleBelt {
+            n_hat: n1,
+            half_width_km: p.half_width_km_primary,
+            uplift_m: p.uplift_primary_m,
+        },
+        GreatCircleBelt {
+            n_hat: n2,
+            half_width_km: p.half_width_km_secondary,
+            uplift_m: p.uplift_secondary_m,
+        },
     ]
 }
 
@@ -400,21 +408,27 @@ pub fn advect_c_thc(
             src_lon += 2.0 * std::f64::consts::PI;
         }
 
-        // Choose nearest among self + 1-ring neighbours in lat/lon
-        let mut best_j = i;
-        let mut best_d2 = (grid.latlon[i][0] as f64 - src_lat).powi(2)
-            + (grid.latlon[i][1] as f64 - src_lon).powi(2);
+        // Conservative 1-ring interpolation: weights ~ 1/d2, normalized
+        let mut wsum = 1.0f64; // include self with unit weight
+        let mut c_acc = c[i] as f64;
+        let mut thc_acc = th_c_m[i] as f64;
         for &nj in &grid.n1[i] {
             let j = nj as usize;
             let d2 = (grid.latlon[j][0] as f64 - src_lat).powi(2)
                 + (grid.latlon[j][1] as f64 - src_lon).powi(2);
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best_j = j;
-            }
+            let w = 1.0 / d2.max(1e-12);
+            wsum += w;
+            c_acc += w * (c[j] as f64);
+            thc_acc += w * (th_c_m[j] as f64);
         }
-        c_new[i] = c[best_j];
-        thc_new[i] = th_c_m[best_j];
+        c_new[i] = (c_acc / wsum) as f32;
+        let advected = (thc_acc / wsum) as f32;
+        let raw = advected - th_c_m[i];
+        if raw.abs() > 1000.0 {
+            println!("[UNITS_BUG] advect_thc Δth_c raw {:.1} m (>1000 m)", raw);
+        }
+        let dth = raw.clamp(-200.0, 200.0);
+        thc_new[i] = th_c_m[i] + dth;
     }
     c.copy_from_slice(&c_new);
     th_c_m.copy_from_slice(&thc_new);
@@ -425,8 +439,17 @@ pub fn advect_c_thc(
 /// depth[i] += -(C[i] * th_c_m[i]).
 pub fn apply_uplift_from_c_thc(depth_m: &mut [f32], c: &[f32], th_c_m: &[f32]) {
     let n = depth_m.len().min(c.len()).min(th_c_m.len());
+    // Isostatic coupling: uplift/deepen proportional to crustal thickness anomaly
+    // relative to a reference continental thickness, scaled by buoyancy factor
+    // ≈ (rho_m - rho_c) / rho_m.
+    const TH_REF_M: f32 = 35_000.0; // reference continental crust thickness (m)
+    const RHO_C: f32 = 2850.0; // kg/m^3
+    const RHO_M: f32 = 3300.0; // kg/m^3
+    let buoyancy: f32 = (RHO_M - RHO_C) / RHO_M; // ~0.136
     for i in 0..n {
-        depth_m[i] += -(c[i] * th_c_m[i]);
+        let th_anom = th_c_m[i] - TH_REF_M; // m; positive if thicker than reference
+        let dz = -(c[i] * buoyancy * th_anom); // negative shallows (uplift), positive deepens
+        depth_m[i] = (depth_m[i] + dz).clamp(-8000.0, 8000.0);
     }
 }
 

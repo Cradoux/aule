@@ -28,6 +28,70 @@ impl Plates {
         let vel_en = velocities(grid, &plate_id, &pole_axis, &omega_rad_yr);
         Self { seeds, plate_id, pole_axis, omega_rad_yr, vel_en }
     }
+
+    /// Spawn a new plate near `cell` by adding a seed/pole and reassigning a small local patch.
+    ///
+    /// Deterministic given (grid positions, current plate count, seed). Keeps existing plate indices stable.
+    /// Returns the new plate id.
+    pub fn spawn_plate_at(&mut self, grid: &Grid, cell: usize, seed: u64, ring_r: u32) -> u16 {
+        let new_pid = self.seeds.len() as u16;
+        // Seed axis from target cell position (normalized)
+        let r = [
+            grid.pos_xyz[cell][0] as f64,
+            grid.pos_xyz[cell][1] as f64,
+            grid.pos_xyz[cell][2] as f64,
+        ];
+        let r_n = normalize(r);
+        self.seeds.push(r_n);
+        // Simple deterministic pole axis and omega derived from seed and index
+        let h = seed ^ (new_pid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let axis = hash_to_unit(h);
+        self.pole_axis.push([axis[0] as f32, axis[1] as f32, axis[2] as f32]);
+        // Small angular speed in a plausible range, deterministic from hash bits
+        let omega = ((h.rotate_left(13) as f64) / (u64::MAX as f64)) * 1.0e-7;
+        self.omega_rad_yr.push(omega as f32);
+        // Reassign a local patch to the new plate id using BFS up to ring_r rings
+        let mut visited: Vec<bool> = vec![false; grid.cells];
+        let mut q: std::collections::VecDeque<(usize, u32)> = std::collections::VecDeque::new();
+        q.push_back((cell.min(grid.cells - 1), 0));
+        visited[cell.min(grid.cells - 1)] = true;
+        while let Some((u, d)) = q.pop_front() {
+            self.plate_id[u] = new_pid;
+            if d >= ring_r {
+                continue;
+            }
+            for &vn in &grid.n1[u] {
+                let v = vn as usize;
+                if !visited[v] {
+                    visited[v] = true;
+                    q.push_back((v, d + 1));
+                }
+            }
+        }
+        // Refresh velocities for fallback path
+        self.vel_en = velocities(grid, &self.plate_id, &self.pole_axis, &self.omega_rad_yr);
+        new_pid
+    }
+
+    /// Soft-retire a plate by reassigning its cells to `merge_into` and zeroing its omega.
+    /// Indices remain stable; velocities are rebuilt. No-op if ids are equal or out of range.
+    pub fn retire_plate_soft(&mut self, grid: &Grid, plate_id_to_retire: u16, merge_into: u16) {
+        let nplates = self.pole_axis.len() as u16;
+        if plate_id_to_retire >= nplates
+            || merge_into >= nplates
+            || plate_id_to_retire == merge_into
+        {
+            return;
+        }
+        for pid in &mut self.plate_id {
+            if *pid == plate_id_to_retire {
+                *pid = merge_into;
+            }
+        }
+        // Zero rotation so retired plate contributes no motion even if referenced
+        self.omega_rad_yr[plate_id_to_retire as usize] = 0.0;
+        self.vel_en = velocities(grid, &self.plate_id, &self.pole_axis, &self.omega_rad_yr);
+    }
 }
 
 /// Compute per-cell 3D surface velocities (m/yr) using current `plate_id` and plate kinematics.
@@ -172,6 +236,16 @@ fn euler_poles(num_plates: usize, seed: u64) -> (Vec<[f32; 3]>, Vec<f32>) {
         omegas.push(omega as f32);
     }
     (axes, omegas)
+}
+
+#[inline]
+fn hash_to_unit(h: u64) -> [f64; 3] {
+    let u = ((h ^ (h >> 33)) as f64 / u64::MAX as f64).clamp(0.0, 1.0);
+    let v = ((h.rotate_left(13)) as f64 / u64::MAX as f64).clamp(0.0, 1.0);
+    let theta = (2.0 * std::f64::consts::PI) * u;
+    let z = 2.0 * v - 1.0;
+    let r = (1.0 - z * z).sqrt();
+    [r * theta.cos(), r * theta.sin(), z]
 }
 
 fn velocities(

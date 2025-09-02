@@ -204,11 +204,20 @@ pub fn apply_subduction(
         }
     }
 
-    // Thresholds
+    // Thresholds and slab-geometry-derived arc offset
     let trench_hw_m = params.trench_half_width_km * KM;
-    let arc_off_m = params.arc_offset_km * KM;
     let arc_hw_m = params.arc_half_width_km * KM;
     let backarc_w_m = params.backarc_width_km * KM;
+    // Simple slab geometry: arc offset from trench ≈ depth_at_arc / tan(dip)
+    // Earth-like defaults: depth_at_arc ≈ 120 km, dip ≈ 30°
+    let slab_depth_m = 120.0 * KM;
+    let slab_dip_rad = 30.0f64.to_radians();
+    let arc_off_m_geom = if slab_dip_rad.tan() > 1e-6 {
+        (slab_depth_m / slab_dip_rad.tan()).clamp(40.0 * KM, 300.0 * KM)
+    } else {
+        140.0 * KM
+    };
+    let arc_off_m = arc_off_m_geom;
 
     let mut masks = SubductionMasks {
         trench: vec![false; grid.cells],
@@ -251,10 +260,8 @@ pub fn apply_subduction(
         // Smooth weights (cosine bell) within each band
         if masks.trench[i] {
             // Gate trench deepening by continental fraction if provided
-            let is_cont = c_opt
-                .and_then(|c| c.get(i))
-                .map(|&v| v >= params.continent_c_min)
-                .unwrap_or(false);
+            let is_cont =
+                c_opt.and_then(|c| c.get(i)).map(|&v| v >= params.continent_c_min).unwrap_or(false);
             if !is_cont {
                 let d = dist_sub[i].clamp(0.0, trench_hw_m);
                 let t = (d / trench_hw_m) as f32; // 0 at hinge → 1 at edge
@@ -289,6 +296,190 @@ pub fn apply_subduction(
             // NOTE: This overwrites any prior tectonic edit at `i` in the same step. If multiple
             // processes should superpose (e.g., transforms), apply them consistently after all
             // baselines or accumulate deltas before a single write.
+        }
+    }
+
+    SubductionResult { masks, stats }
+}
+
+/// Compute subduction-induced bathymetry deltas (meters) without rebuilding baseline.
+///
+/// Writes additive deltas into `delta_out` (same length as grid cells). Positive deepens, negative uplifts.
+/// Returns masks and stats identical to `apply_subduction`.
+pub fn compute_subduction_delta(
+    grid: &Grid,
+    boundaries: &Boundaries,
+    plate_id: &[u16],
+    age_myr: &[f32],
+    v_en: &[[f32; 2]],
+    delta_out: &mut [f32],
+    params: SubductionParams,
+    c_opt: Option<&[f32]>,
+) -> SubductionResult {
+    assert_eq!(plate_id.len(), grid.cells);
+    assert_eq!(age_myr.len(), grid.cells);
+    assert_eq!(v_en.len(), grid.cells);
+    assert_eq!(delta_out.len(), grid.cells);
+
+    // Reuse the same detection logic as apply_subduction
+    // Seeds from convergent edges
+    let mut sub_seeds: Vec<u32> = Vec::new();
+    let mut over_seeds: Vec<u32> = Vec::new();
+    for ek in &boundaries.edge_kin {
+        if ek.class as u8 != 2 {
+            continue;
+        }
+        let u = ek.u;
+        let v = ek.v;
+        let au = age_myr[u as usize] as f64;
+        let av = age_myr[v as usize] as f64;
+        let (s, o) = if (au > av) || (au == av && plate_id[u as usize] > plate_id[v as usize]) {
+            (u, v)
+        } else {
+            (v, u)
+        };
+        sub_seeds.push(s);
+        over_seeds.push(o);
+    }
+
+    // Precompute unit positions
+    let mut pos_unit: Vec<[f64; 3]> = Vec::with_capacity(grid.cells);
+    for p in &grid.pos_xyz {
+        pos_unit.push(geo::normalize([p[0] as f64, p[1] as f64, p[2] as f64]));
+    }
+
+    // Multi-source Dijkstra helper restricted to plate domains
+    let mut dist_sub: Vec<f64> = vec![f64::INFINITY; grid.cells];
+    let mut dist_over: Vec<f64> = vec![f64::INFINITY; grid.cells];
+    let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
+
+    // Subducting side
+    for &s in &sub_seeds {
+        dist_sub[s as usize] = 0.0;
+        heap.push(QItem { dist_m: 0.0, cell: s });
+    }
+    while let Some(QItem { dist_m, cell }) = heap.pop() {
+        let u = cell as usize;
+        if dist_m > dist_sub[u] {
+            continue;
+        }
+        let pid = plate_id[u];
+        for &vn in &grid.n1[u] {
+            let v = vn as usize;
+            if plate_id[v] != pid {
+                continue;
+            }
+            let s_m = geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], RADIUS_M);
+            let nd = dist_m + s_m;
+            if nd < dist_sub[v] {
+                dist_sub[v] = nd;
+                heap.push(QItem { dist_m: nd, cell: v as u32 });
+            }
+        }
+    }
+
+    // Overriding side
+    heap.clear();
+    for &s in &over_seeds {
+        dist_over[s as usize] = 0.0;
+        heap.push(QItem { dist_m: 0.0, cell: s });
+    }
+    while let Some(QItem { dist_m, cell }) = heap.pop() {
+        let u = cell as usize;
+        if dist_m > dist_over[u] {
+            continue;
+        }
+        let pid = plate_id[u];
+        for &vn in &grid.n1[u] {
+            let v = vn as usize;
+            if plate_id[v] != pid {
+                continue;
+            }
+            let s_m = geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], RADIUS_M);
+            let nd = dist_m + s_m;
+            if nd < dist_over[v] {
+                dist_over[v] = nd;
+                heap.push(QItem { dist_m: nd, cell: v as u32 });
+            }
+        }
+    }
+
+    // Thresholds and slab-geometry-derived arc offset
+    let trench_hw_m = params.trench_half_width_km * KM;
+    let arc_hw_m = params.arc_half_width_km * KM;
+    let backarc_w_m = params.backarc_width_km * KM;
+    let slab_depth_m = 120.0 * KM;
+    let slab_dip_rad = 30.0f64.to_radians();
+    let arc_off_m_geom = if slab_dip_rad.tan() > 1e-6 {
+        (slab_depth_m / slab_dip_rad.tan()).clamp(40.0 * KM, 300.0 * KM)
+    } else {
+        140.0 * KM
+    };
+    let arc_off_m = arc_off_m_geom;
+
+    let mut masks = SubductionMasks {
+        trench: vec![false; grid.cells],
+        arc: vec![false; grid.cells],
+        backarc: vec![false; grid.cells],
+    };
+    let mut stats = SubductionStats { trench_cells: 0, arc_cells: 0, backarc_cells: 0 };
+
+    for i in 0..grid.cells {
+        let is_trench = dist_sub[i].is_finite() && dist_sub[i] <= trench_hw_m;
+        let mut is_arc = false;
+        let mut is_back = false;
+        if dist_over[i].is_finite() {
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            is_arc = (d_eff - arc_off_m).abs() <= arc_hw_m;
+            is_back = !is_arc
+                && d_eff >= (arc_off_m + arc_hw_m)
+                && d_eff <= (arc_off_m + arc_hw_m + backarc_w_m);
+        }
+        if is_trench {
+            masks.trench[i] = true;
+            stats.trench_cells += 1;
+        } else if is_arc {
+            masks.arc[i] = true;
+            stats.arc_cells += 1;
+        } else if is_back {
+            masks.backarc[i] = true;
+            stats.backarc_cells += 1;
+        }
+    }
+
+    // Compute additive delta only (no baseline recompute)
+    for i in 0..grid.cells {
+        let mut delta: f32 = 0.0;
+        if masks.trench[i] {
+            // Gate trench deepening by continental fraction if provided
+            let is_cont =
+                c_opt.and_then(|c| c.get(i)).map(|&v| v >= params.continent_c_min).unwrap_or(false);
+            if !is_cont {
+                let d = dist_sub[i].clamp(0.0, trench_hw_m);
+                let t = (d / trench_hw_m) as f32;
+                let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
+                delta += params.trench_deepen_m * w;
+            }
+        }
+        if masks.arc[i] {
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            let t = ((d_eff - arc_off_m).abs() / arc_hw_m).clamp(0.0, 1.0) as f32;
+            let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
+            delta += params.arc_uplift_m * w;
+        }
+        if masks.backarc[i] {
+            let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
+            let start = arc_off_m + arc_hw_m;
+            let t = ((d_eff - start) / backarc_w_m).clamp(0.0, 1.0) as f32;
+            let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
+            if params.backarc_extension_mode {
+                delta += params.backarc_extension_deepen_m * w;
+            } else {
+                delta += params.backarc_uplift_m * w;
+            }
+        }
+        if delta != 0.0 {
+            delta_out[i] += delta;
         }
     }
 
