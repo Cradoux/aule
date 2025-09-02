@@ -562,13 +562,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     {
         let p_rift = crate::rifting::RiftingParams {
             c_rift_min: 0.60,
-            v_open_min_m_per_yr: 0.015, // 15 mm/yr
+            v_open_min_m_per_yr: 0.020, // 20 mm/yr
             w_core_km: 60.0,
             w_taper_km: 200.0,
             k_thin: 0.0025,
             alpha_subs: 0.33,
             ocean_thresh: 0.15,
-            k_c_oceanize: 0.010,
+            k_c_oceanize: 0.030,
             reset_age_on_core: true,
             enable_shoulder: true,
             w_bulge_km: 80.0,
@@ -694,6 +694,8 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         let mut amp_max = 0.0f32;
         let step_cap = cap_per_step; // reuse global per-step cap
         if world.delta_buoy_m.len() != n { world.delta_buoy_m.resize(n, 0.0); }
+        // Placeholder active-mask: off by default (filled later after subduction/transform deltas)
+        let m_active: Vec<f32> = vec![0.0; n];
         for (i, dt) in delta_tect.iter_mut().enumerate().take(n) {
             let c = world.c[i].clamp(0.0, 1.0);
             let th = world.th_c_m[i].clamp(25_000.0, 65_000.0);
@@ -704,11 +706,12 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             let old = world.delta_buoy_m[i];
             let raw = target - old;
             let step = raw.clamp(-step_cap, step_cap);
+            let s_buoy = 1.0 - m_active[i].clamp(0.0, 1.0); // full suppression inside active band
             let new_amp = old + step;
-            world.delta_buoy_m[i] = new_amp;
+            world.delta_buoy_m[i] = old + s_buoy * step;
             dstep_max = dstep_max.max(step.abs());
             amp_max = amp_max.max(new_amp.abs());
-            *dt += step; // apply only the change this step
+            *dt += s_buoy * step; // apply only the scaled change this step
         }
         println!("[buoyancy] dZ_step max={:.1} m | amp max={:.0} m", dstep_max, amp_max);
         world.epoch_continents = world.epoch_continents.wrapping_add(1);
@@ -717,7 +720,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     {
         // Reuse last subduction masks by recomputing quickly if needed
         let mut sub_tmp = vec![0.0f32; n];
-        let sub = subduction::apply_subduction(
+        let sub = subduction::compute_subduction_delta(
             &world.grid,
             &world.boundaries,
             &world.plates.plate_id,
@@ -725,14 +728,14 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             &world.v_en,
             &mut sub_tmp,
             subduction::SubductionParams {
-                tau_conv_m_per_yr: cfg.sub_tau_conv_m_per_yr as f64,
+                tau_conv_m_per_yr: (cfg.sub_tau_conv_m_per_yr.max(0.020)) as f64,
                 trench_half_width_km: cfg.sub_trench_half_width_km as f64,
                 arc_offset_km: cfg.sub_arc_offset_km as f64,
                 arc_half_width_km: cfg.sub_arc_half_width_km as f64,
                 backarc_width_km: cfg.sub_backarc_width_km as f64,
                 trench_deepen_m: cfg.sub_trench_deepen_m,
-                arc_uplift_m: cfg.sub_arc_uplift_m,
-                backarc_uplift_m: cfg.sub_backarc_uplift_m,
+                arc_uplift_m: cfg.sub_arc_uplift_m.min(8.0),
+                backarc_uplift_m: cfg.sub_backarc_uplift_m.min(6.0),
                 rollback_offset_m: cfg.sub_rollback_offset_m as f64,
                 rollback_rate_km_per_myr: cfg.sub_rollback_rate_km_per_myr as f64,
                 backarc_extension_mode: cfg.sub_backarc_extension_mode,
@@ -741,6 +744,46 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             },
             Some(&world.c),
         );
+        // Exclusive masks: build transform masks and strip out ridge/subduction
+        let mut tr_raw = vec![0.0f32; n];
+        let (tr_masks, _tr_stats) = transforms::apply_transforms(
+            &world.grid,
+            &world.boundaries,
+            &world.plates.plate_id,
+            &world.v_en,
+            &mut tr_raw,
+            transforms::TransformParams {
+                tau_open_m_per_yr: 0.005,
+                min_tangential_m_per_yr: 0.015,
+                max_normal_m_per_yr: 0.001,
+                basin_half_width_km: 10.0,
+                ridge_like_uplift_m: -3.0,
+                basin_deepen_m: 6.0,
+            },
+            dt as f64,
+        );
+        // Build exclusive masks (binary); simple 1-cell dilation via neighbor OR
+        let mut m_s: Vec<u8> = vec![0; n];
+        for (i, m) in m_s.iter_mut().enumerate().take(n) { if sub.masks.trench[i] || sub.masks.arc[i] || sub.masks.backarc[i] { *m = 1; } }
+        let mut m_t: Vec<u8> = vec![0; n];
+        for (i, m) in m_t.iter_mut().enumerate().take(n) { if tr_masks.pull_apart[i] || tr_masks.restraining[i] { *m = 1; } }
+        // Dilate subduction mask by 1 ring
+        let mut m_s_dil = m_s.clone();
+        for (i, &ms) in m_s.iter().enumerate().take(n) {
+            if ms != 0 {
+                for &nj in &world.grid.n1[i] {
+                    m_s_dil[nj as usize] = 1;
+                }
+            }
+        }
+        // Exclude ridge (not explicitly built here) by leaving room for future ridge mask
+        // Exclusivity: strip subduction from transforms
+        for i in 0..n { if m_s_dil[i] != 0 { m_t[i] = 0; } }
+        // Apply deltas honoring exclusivity
+        for i in 0..n {
+            if m_s_dil[i] != 0 { delta_tect[i] += sub_tmp[i].clamp(-cap_per_step, cap_per_step); }
+            if m_t[i] != 0 { delta_tect[i] += tr_raw[i].clamp(-cap_per_step, cap_per_step); }
+        }
         // O–C accretion
         let p_acc = crate::accretion::AccretionParams {
             k_arc: 0.002,
