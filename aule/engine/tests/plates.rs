@@ -1,4 +1,4 @@
-use engine::{grid::Grid, plates::Plates};
+use engine::{grid::Grid, plates::{Plates, INVALID_PLATE_ID, heal_plate_ids}};
 
 #[test]
 fn determinism_and_voronoi_check() {
@@ -26,4 +26,22 @@ fn determinism_and_voronoi_check() {
         }
         assert_eq!(best_id, pid);
     }
+}
+
+#[test]
+fn heal_plate_ids_fills_invalid_regions() {
+    let g = Grid::new(8);
+    let mut p = Plates::new(&g, 4, 7);
+    // Invalidate a contiguous patch (seed center and its 1-ring)
+    let center = g.cells / 2;
+    p.plate_id[center] = INVALID_PLATE_ID;
+    for &n in &g.n1[center] {
+        p.plate_id[n as usize] = INVALID_PLATE_ID;
+    }
+    // Ensure we have at least one valid elsewhere
+    assert!(p.plate_id.iter().any(|&x| x != INVALID_PLATE_ID));
+    // Heal
+    heal_plate_ids(&g, &mut p.plate_id);
+    // No invalids remain
+    assert!(p.plate_id.iter().all(|&x| x != INVALID_PLATE_ID));
 }
