@@ -959,8 +959,8 @@ impl OverlayState {
         }
     }
 
-    /// Plate Type overlay (plate-level): classify each plate by area-weighted mean C̄.
-    /// 0 = oceanic (C̄ ≤ c_thresh_ocean), 1 = mixed, 2 = continental (C̄ ≥ c_thresh_cont)
+    /// Plate Type overlay (plate-level): classify each plate by area shares and C̄.
+    /// Classes: 0=oceanic, 1=mixed, 2=continental.
     pub fn rebuild_plate_type_plate_level(
         &mut self,
         rect: Rect,
@@ -969,27 +969,39 @@ impl OverlayState {
         c_thresh_cont: f32,
     ) -> Vec<Shape> {
         let n = world.grid.cells;
-        // Accumulate per-plate area and C*area
+        // Accumulate per-plate area and C*area and area shares
         let mut area_by_plate: std::collections::HashMap<u16, f64> =
             std::collections::HashMap::new();
         let mut carea_by_plate: std::collections::HashMap<u16, f64> =
             std::collections::HashMap::new();
+        let mut area_cont: std::collections::HashMap<u16, f64> = std::collections::HashMap::new();
+        let mut area_ocean: std::collections::HashMap<u16, f64> = std::collections::HashMap::new();
         for i in 0..n {
             let pid = world.plates.plate_id[i];
             let a = world.area_m2[i] as f64;
             let c = world.c[i].clamp(0.0, 1.0) as f64;
             *area_by_plate.entry(pid).or_insert(0.0) += a;
             *carea_by_plate.entry(pid).or_insert(0.0) += a * c;
+            if c >= (c_thresh_cont as f64) {
+                *area_cont.entry(pid).or_insert(0.0) += a;
+            }
+            if c <= (c_thresh_ocean as f64) {
+                *area_ocean.entry(pid).or_insert(0.0) += a;
+            }
         }
-        // Per-plate classification
+        // Per-plate classification using area shares
         let mut class_by_plate: std::collections::HashMap<u16, u8> =
             std::collections::HashMap::new();
         for (pid, area) in &area_by_plate {
             let ca = carea_by_plate.get(pid).copied().unwrap_or(0.0);
-            let cbar = if *area > 0.0 { (ca / *area) as f32 } else { 0.0 };
-            let class = if cbar >= c_thresh_cont {
+            let _cbar = if *area > 0.0 { (ca / *area) as f32 } else { 0.0 };
+            let a_cont = area_cont.get(pid).copied().unwrap_or(0.0);
+            let a_ocean = area_ocean.get(pid).copied().unwrap_or(0.0);
+            let share_cont = if *area > 0.0 { a_cont / *area } else { 0.0 };
+            let share_ocean = if *area > 0.0 { a_ocean / *area } else { 0.0 };
+            let class = if share_cont >= 0.6 {
                 2u8
-            } else if cbar <= c_thresh_ocean {
+            } else if share_ocean >= 0.6 {
                 0u8
             } else {
                 1u8
@@ -1002,9 +1014,9 @@ impl OverlayState {
             let p = project_equirect(world.grid.latlon[i][0], world.grid.latlon[i][1], rect);
             let cls = class_by_plate.get(&world.plates.plate_id[i]).copied().unwrap_or(1);
             let col = match cls {
-                0 => Color32::from_rgb(40, 120, 220),  // oceanic: blue
-                2 => Color32::from_rgb(200, 140, 60),  // continental: brown/orange
-                _ => Color32::from_rgb(120, 170, 120), // mixed: greenish
+                0 => Color32::from_rgb(60, 140, 230),  // oceanic: cool blue
+                2 => Color32::from_rgb(220, 150, 70),  // continental: warm orange
+                _ => Color32::from_rgb(170, 120, 200), // mixed: purple
             };
             shapes.push(Shape::circle_filled(p, 1.2, col));
         }

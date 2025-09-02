@@ -241,7 +241,7 @@ impl World {
         let age_myr = vec![0.0f32; grid.cells];
         let depth_m = vec![0.0f32; grid.cells];
         let c = vec![0.0f32; grid.cells];
-        let th_c_m = vec![0.0f32; grid.cells];
+        let th_c_m = vec![35_000.0f32; grid.cells];
         let sediment_m = vec![0.0f32; grid.cells];
         let cells = grid.cells;
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
@@ -285,7 +285,11 @@ impl World {
         self.age_myr.fill(0.0);
         self.depth_m.fill(0.0);
         self.c.fill(0.0);
-        self.th_c_m.fill(0.0);
+        self.th_c_m.fill(35_000.0);
+        // Enforce continental thickness bounds after init
+        for t in &mut self.th_c_m {
+            *t = t.clamp(25_000.0, 65_000.0);
+        }
         self.sediment_m.fill(0.0);
         self.te_m.fill(25_000.0);
         self.clock = Clock { t_myr: 0.0, step_idx: 0 };

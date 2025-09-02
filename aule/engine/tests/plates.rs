@@ -1,4 +1,7 @@
-use engine::{grid::Grid, plates::{Plates, INVALID_PLATE_ID, heal_plate_ids}};
+use engine::{
+    grid::Grid,
+    plates::{heal_plate_ids, Plates, INVALID_PLATE_ID},
+};
 
 #[test]
 fn determinism_and_voronoi_check() {
@@ -44,4 +47,36 @@ fn heal_plate_ids_fills_invalid_regions() {
     heal_plate_ids(&g, &mut p.plate_id);
     // No invalids remain
     assert!(p.plate_id.iter().all(|&x| x != INVALID_PLATE_ID));
+}
+
+#[test]
+fn advection_round_trip_thc_c() {
+    use engine::{plates, sl_advect, world::World};
+    let f: u32 = 8;
+    let mut world = World::new(f, 4, 123);
+    // Seed continents
+    for (ci, thi) in world.c.iter_mut().zip(world.th_c_m.iter_mut()) {
+        *ci = 0.7;
+        *thi = 35_000.0;
+    }
+    // Build velocities from current plate ids
+    let vel3 = plates::velocity_field_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
+    // Advect forward 5 Myr
+    let dt_myr = 5.0;
+    let mut c_fwd = world.c.clone();
+    let mut th_fwd = world.th_c_m.clone();
+    engine::continent::advect_c_thc(&world.grid, &world.v_en, dt_myr, &mut c_fwd, &mut th_fwd);
+    // Backward by -5 Myr should approximately return (numerical diffusion tolerated)
+    let mut c_back = c_fwd.clone();
+    let mut th_back = th_fwd.clone();
+    engine::continent::advect_c_thc(&world.grid, &world.v_en, -dt_myr, &mut c_back, &mut th_back);
+    // Tolerances
+    let mut max_dc = 0.0f32;
+    let mut max_dth = 0.0f32;
+    for i in 0..world.grid.cells {
+        max_dc = max_dc.max((c_back[i] - world.c[i]).abs());
+        max_dth = max_dth.max((th_back[i] - world.th_c_m[i]).abs());
+    }
+    assert!(max_dc < 0.02, "max |Δc| = {}", max_dc);
+    assert!(max_dth < 200.0, "max |Δth_c| = {}", max_dth);
 }

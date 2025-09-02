@@ -421,17 +421,21 @@ pub fn advect_c_thc(
             c_acc += w * (c[j] as f64);
             thc_acc += w * (th_c_m[j] as f64);
         }
-        c_new[i] = (c_acc / wsum) as f32;
+        c_new[i] = (c_acc / wsum).clamp(0.0, 1.0) as f32;
         let advected = (thc_acc / wsum) as f32;
         let raw = advected - th_c_m[i];
         if raw.abs() > 1000.0 {
-            println!("[UNITS_BUG] advect_thc Δth_c raw {:.1} m (>1000 m)", raw);
+            println!("[advect] suspicious Δth_c {:.1} m (>|1000|) from advection", raw);
         }
-        let dth = raw.clamp(-200.0, 200.0);
-        thc_new[i] = th_c_m[i] + dth;
+        // No hard cap here; enforce global bounds after write
+        thc_new[i] = th_c_m[i] + raw;
     }
     c.copy_from_slice(&c_new);
     th_c_m.copy_from_slice(&thc_new);
+    // Enforce continental thickness bounds globally
+    for t in th_c_m.iter_mut() {
+        *t = (*t).clamp(25_000.0, 65_000.0);
+    }
 }
 
 /// Apply uplift to `depth_m` using the fields `C` (0..1) and `th_c_m` (m).
@@ -439,16 +443,19 @@ pub fn advect_c_thc(
 /// depth[i] += -(C[i] * th_c_m[i]).
 pub fn apply_uplift_from_c_thc(depth_m: &mut [f32], c: &[f32], th_c_m: &[f32]) {
     let n = depth_m.len().min(c.len()).min(th_c_m.len());
-    // Isostatic coupling: uplift/deepen proportional to crustal thickness anomaly
-    // relative to a reference continental thickness, scaled by buoyancy factor
-    // ≈ (rho_m - rho_c) / rho_m.
+    // Isostatic coupling: reference thickness and buoyancies differ under water vs air
     const TH_REF_M: f32 = 35_000.0; // reference continental crust thickness (m)
-    const RHO_C: f32 = 2850.0; // kg/m^3
-    const RHO_M: f32 = 3300.0; // kg/m^3
-    let buoyancy: f32 = (RHO_M - RHO_C) / RHO_M; // ~0.136
+                                    // Densities (kg/m^3)
+    const RHO_M: f32 = 3300.0; // mantle
+    const RHO_C: f32 = 2850.0; // continental crust
+    const RHO_W: f32 = 1000.0; // water
+    const RHO_A: f32 = 1.2; // air (~negligible)
     for i in 0..n {
         let th_anom = th_c_m[i] - TH_REF_M; // m; positive if thicker than reference
-        let dz = -(c[i] * buoyancy * th_anom); // negative shallows (uplift), positive deepens
+        let elev = -depth_m[i]; // elevation (m); >0 land, <=0 ocean
+        let rho_top = if elev > 0.0 { RHO_A } else { RHO_W };
+        let buoyancy = (RHO_M - RHO_C) / (RHO_M - rho_top);
+        let dz = -(c[i].clamp(0.0, 1.0) * buoyancy * th_anom);
         depth_m[i] = (depth_m[i] + dz).clamp(-8000.0, 8000.0);
     }
 }
