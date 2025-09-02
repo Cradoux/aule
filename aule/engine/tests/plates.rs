@@ -51,7 +51,7 @@ fn heal_plate_ids_fills_invalid_regions() {
 
 #[test]
 fn advection_round_trip_thc_c() {
-    use engine::{plates, sl_advect, world::World};
+    use engine::{plates, world::World};
     let f: u32 = 8;
     let mut world = World::new(f, 4, 123);
     // Seed continents
@@ -60,7 +60,7 @@ fn advection_round_trip_thc_c() {
         *thi = 35_000.0;
     }
     // Build velocities from current plate ids
-    let vel3 = plates::velocity_field_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
+    let _vel3 = plates::velocity_field_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
     // Advect forward 5 Myr
     let dt_myr = 5.0;
     let mut c_fwd = world.c.clone();

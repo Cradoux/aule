@@ -58,6 +58,8 @@ pub struct World {
     pub sediment_m: Vec<f32>,
     /// Elastic thickness field Te (meters), used to parameterize flexure response.
     pub te_m: Vec<f32>,
+    /// Persistent buoyancy delta amplitude (meters), composed into depth each step
+    pub delta_buoy_m: Vec<f32>,
     /// Last surface-processes stats (if applied this step).
     pub last_surface_stats: Option<crate::surface::SurfaceStats>,
     /// Continents change epoch counter (bump when C/th_c change applied).
@@ -267,6 +269,7 @@ impl World {
             last_flex_residual: 0.0,
             sediment_m,
             te_m: vec![25_000.0; cells],
+            delta_buoy_m: vec![0.0; cells],
             last_surface_stats: None,
             epoch_continents: 0,
             last_rebaseline_epoch: 0,
@@ -292,6 +295,8 @@ impl World {
         }
         self.sediment_m.fill(0.0);
         self.te_m.fill(25_000.0);
+        self.delta_buoy_m.resize(self.grid.cells, 0.0);
+        self.delta_buoy_m.fill(0.0);
         self.clock = Clock { t_myr: 0.0, step_idx: 0 };
         self.sea_level_ref = None;
         self.last_mass_cont_kg = 0.0;

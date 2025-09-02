@@ -683,23 +683,34 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             println!("[UNITS_BUG] transforms Δz max {:.1} m (>1000 m)", units_bug_max);
         }
     }
-    // Continents uplift/thickness coupling delta each step
+    // Continents buoyancy: drive persistent delta_buoy_m toward target amplitude, compose as delta
     {
-        let mut cont_tmp = vec![0.0f32; n];
-        crate::continent::apply_uplift_from_c_thc(&mut cont_tmp, &world.c, &world.th_c_m);
-        let mut units_bug_max = 0.0f32;
-        for i in 0..n {
-            let raw = cont_tmp[i];
-            if raw.abs() > 1000.0 {
-                units_bug_max = units_bug_max.max(raw.abs());
-            }
-            let add = raw.clamp(-cap_per_step, cap_per_step);
-            delta_tect[i] += add;
+        // Densities
+        let rho_m = 3300.0f32;
+        let rho_c = 2850.0f32;
+        let rho_w = 1000.0f32;
+        let rho_a = 1.2f32;
+        let mut dstep_max = 0.0f32;
+        let mut amp_max = 0.0f32;
+        let step_cap = cap_per_step; // reuse global per-step cap
+        if world.delta_buoy_m.len() != n { world.delta_buoy_m.resize(n, 0.0); }
+        for (i, dt) in delta_tect.iter_mut().enumerate().take(n) {
+            let c = world.c[i].clamp(0.0, 1.0);
+            let th = world.th_c_m[i].clamp(25_000.0, 65_000.0);
+            let elev_prev = world.sea.eta_m - world.depth_m[i];
+            let rho_top = if elev_prev > 0.0 { rho_a } else { rho_w };
+            let frac = (rho_m - rho_c) / (rho_m - rho_top);
+            let target = -c * frac * (th - 35_000.0);
+            let old = world.delta_buoy_m[i];
+            let raw = target - old;
+            let step = raw.clamp(-step_cap, step_cap);
+            let new_amp = old + step;
+            world.delta_buoy_m[i] = new_amp;
+            dstep_max = dstep_max.max(step.abs());
+            amp_max = amp_max.max(new_amp.abs());
+            *dt += step; // apply only the change this step
         }
-        if units_bug_max > 0.0 {
-            println!("[UNITS_BUG] continent Δz max {:.1} m (>1000 m)", units_bug_max);
-        }
-        // mark epoch change for rebaseline debounce
+        println!("[buoyancy] dZ_step max={:.1} m | amp max={:.0} m", dstep_max, amp_max);
         world.epoch_continents = world.epoch_continents.wrapping_add(1);
     }
     // Accretion and Orogeny deltas after continents uplift
