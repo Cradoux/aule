@@ -196,12 +196,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             }
         }
         
-        // CRITICAL FIX: Apply continental uplift to elevation field!
-        // This was the missing link - continental data was advected but never converted to elevation
-        let t_uplift0 = std::time::Instant::now();
-        crate::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
-        let ms_continental_uplift = t_uplift0.elapsed().as_secs_f64() * 1000.0;
-        println!("[continental_uplift] Applied continental thickness to depth_m field ({:.2} ms)", ms_continental_uplift);
+        // Note: Continental uplift will be applied later after all geological processes
 
         // Rebuild velocities and kinds after motion
         world.v_en =
@@ -1600,6 +1595,15 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
                 world.depth_m[i] = base_depth[i];
             }
         }
+    }
+
+    // CRITICAL FIX: Apply continental uplift AFTER all geological processes finish
+    // This ensures continental elevation follows plate motion and isn't overwritten
+    if cfg.enable_rigid_motion {
+        let t_uplift0 = std::time::Instant::now();
+        crate::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+        let ms_continental_uplift = t_uplift0.elapsed().as_secs_f64() * 1000.0;
+        println!("[continental_uplift] Applied continental thickness to depth_m field AFTER geological processes ({:.2} ms)", ms_continental_uplift);
     }
 
     // Solve eta to hit target land fraction unless frozen; elevation is independent of eta
