@@ -79,7 +79,7 @@ pub mod util;
 /// World state.
 pub mod world;
 
-/// Centralized physical constants (SI units) for densities and gravity.
+/// Centralized physical constants (SI units) for densities, gravity, and process limits.
 #[derive(Clone, Copy, Debug)]
 pub struct PhysConsts {
     /// Water density (kg/m^3)
@@ -92,6 +92,20 @@ pub struct PhysConsts {
     pub rho_air_kg_per_m3: f32,
     /// Gravity (m/s^2)
     pub g_m_per_s2: f32,
+    /// Reference continental crust thickness (m)
+    pub th_ref_continental_m: f32,
+    /// Earth radius (m)
+    pub r_earth_m: f64,
+    /// Maximum erosion rate per Myr (m/Myr)
+    pub max_erosion_rate_m_per_myr: f32,
+    /// Maximum land submergence rate per Myr (m/Myr) 
+    pub max_land_submerge_rate_m_per_myr: f32,
+    /// Elevation cap minimum (m)
+    pub elevation_cap_min_m: f32,
+    /// Elevation cap maximum (m)
+    pub elevation_cap_max_m: f32,
+    /// Small epsilon for numerical comparisons
+    pub epsilon: f32,
 }
 
 impl Default for PhysConsts {
@@ -102,6 +116,13 @@ impl Default for PhysConsts {
             rho_m_kg_per_m3: 3300.0,
             rho_air_kg_per_m3: 1.2,
             g_m_per_s2: 9.81,
+            th_ref_continental_m: 35_000.0,
+            r_earth_m: 6_371_000.0,
+            max_erosion_rate_m_per_myr: 0.5,
+            max_land_submerge_rate_m_per_myr: 0.5,
+            elevation_cap_min_m: -11_000.0,
+            elevation_cap_max_m: 9_000.0,
+            epsilon: 1e-6,
         }
     }
 }

@@ -96,10 +96,10 @@ pub fn apply_surface_processes(
     let dt_yr = (dt_myr * 1.0e6) as f32;
     let dt_myr_f32 = dt_myr as f32;
     // Soft caps to prevent overly aggressive per-step changes
-    const EROSION_CAP_M_PER_MYR: f32 = 0.5; // max erosion per Myr (m)
-    const LAND_SUBMERGE_CAP_M_PER_MYR: f32 = 0.5; // max allowed land submergence per Myr (m)
-    let erosion_cap_m = (EROSION_CAP_M_PER_MYR.max(0.0)) * dt_myr_f32;
-    let land_submerge_cap_m = (LAND_SUBMERGE_CAP_M_PER_MYR.max(0.0)) * dt_myr_f32;
+    let pc = crate::PhysConsts::default();
+    let r = pc.r_earth_m;
+    let erosion_cap_m = (pc.max_erosion_rate_m_per_myr.max(0.0)) * dt_myr_f32;
+    let land_submerge_cap_m = (pc.max_land_submerge_rate_m_per_myr.max(0.0)) * dt_myr_f32;
 
     // Elevation field (m)
     let depth_prev = depth_m.to_vec();
@@ -244,8 +244,8 @@ pub fn apply_surface_processes(
                 let j = nj as usize;
                 let lat_j = grid.latlon[j][0] as f64;
                 let lon_j = grid.latlon[j][1] as f64;
-                let dx_e = (lon_j - lon_i) * cos_lat * 6_371_000.0f64;
-                let dx_n = (lat_j - lat_i) * 6_371_000.0f64;
+            let dx_e = (lon_j - lon_i) * cos_lat * r;
+            let dx_n = (lat_j - lat_i) * r;
                 let dx2 = (dx_e * dx_e + dx_n * dx_n).max(1.0);
                 s += 1.0 / dx2;
             }
@@ -274,8 +274,8 @@ pub fn apply_surface_processes(
                 let j = nj as usize;
                 let lat_j = grid.latlon[j][0] as f64;
                 let lon_j = grid.latlon[j][1] as f64;
-                let dx_e = (lon_j - lon_i) * cos_lat * 6_371_000.0f64;
-                let dx_n = (lat_j - lat_i) * 6_371_000.0f64;
+            let dx_e = (lon_j - lon_i) * cos_lat * r;
+            let dx_n = (lat_j - lat_i) * r;
                 let dx2 = (dx_e * dx_e + dx_n * dx_n).max(1.0);
                 let inv_dx2 = 1.0 / dx2;
                 acc += (before[j] as f64 - before[i] as f64) * inv_dx2;
@@ -299,7 +299,8 @@ pub fn apply_surface_processes(
 
 fn compute_slope_mag(grid: &Grid, elevation_m: &[f32]) -> Vec<f32> {
     // Fit plane z(x,y) via least-squares over 1-ring in local EN coordinates; slope = sqrt(gx^2+gy^2)
-    const R: f64 = 6_371_000.0;
+    let pc = crate::PhysConsts::default();
+    let r = pc.r_earth_m;
     let n = grid.cells;
     let mut slope = vec![0.0f32; n];
     for i in 0..n {
@@ -317,8 +318,8 @@ fn compute_slope_mag(grid: &Grid, elevation_m: &[f32]) -> Vec<f32> {
             let j = nj as usize;
             let lat_j = grid.latlon[j][0] as f64;
             let lon_j = grid.latlon[j][1] as f64;
-            let dx = (lon_j - lon_i) * cos_lat * R; // east (m)
-            let dy = (lat_j - lat_i) * R; // north (m)
+            let dx = (lon_j - lon_i) * cos_lat * r; // east (m)
+            let dy = (lat_j - lat_i) * r; // north (m)
             let dz = (elevation_m[j] as f64) - zi;
             s_xx += dx * dx;
             s_xy += dx * dy;

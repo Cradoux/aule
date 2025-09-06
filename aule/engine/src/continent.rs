@@ -66,9 +66,10 @@ pub fn build_continents(grid: &Grid, p: ContinentParams) -> ContinentField {
     }
 
     // Parameters in radians
-    const R_EARTH_M: f64 = 6_371_000.0;
-    let sigma_rad = (p.falloff_km * 1000.0) / R_EARTH_M;
-    let r0_rad = (p.mean_radius_km * 1000.0) / R_EARTH_M;
+    let pc = crate::PhysConsts::default();
+    let r_earth_m = pc.r_earth_m;
+    let sigma_rad = (p.falloff_km * 1000.0) / r_earth_m;
+    let r0_rad = (p.mean_radius_km * 1000.0) / r_earth_m;
 
     for (i, r) in grid.pos_xyz.iter().enumerate() {
         let rhat = [r[0] as f64, r[1] as f64, r[2] as f64];
@@ -380,7 +381,8 @@ pub fn advect_c_thc(
         return;
     }
     // Precompute backtraced targets in lat/lon
-    const R_EARTH_M: f64 = 6_371_000.0;
+    let pc = crate::PhysConsts::default();
+    let r_earth_m = pc.r_earth_m;
     let years = dt_myr.max(0.0) * 1.0e6;
     let mut c_new = vec![0.0f32; n];
     let mut thc_new = vec![0.0f32; n];
@@ -396,9 +398,9 @@ pub fn advect_c_thc(
         let vn = vel_en_m_per_yr[i][1] as f64;
         let dx = ve * years; // meters east
         let dy = vn * years; // meters north
-        let dlat = dy / R_EARTH_M;
+        let dlat = dy / r_earth_m;
         let dlon = if lat.abs() < std::f64::consts::FRAC_PI_2 {
-            dx / (R_EARTH_M * lat.cos().max(1e-9))
+            dx / (r_earth_m * lat.cos().max(1e-9))
         } else {
             0.0
         };
@@ -468,17 +470,17 @@ pub fn advect_c_thc(
 pub fn apply_uplift_from_c_thc(depth_m: &mut [f32], c: &[f32], th_c_m: &[f32]) {
     let n = depth_m.len().min(c.len()).min(th_c_m.len());
     // Isostatic coupling: reference thickness and buoyancies differ under water vs air
-    const TH_REF_M: f32 = 35_000.0; // reference continental crust thickness (m)
-                                    // Densities (kg/m^3)
-    const RHO_M: f32 = 3300.0; // mantle
-    const RHO_C: f32 = 2850.0; // continental crust
-    const RHO_W: f32 = 1000.0; // water
-    const RHO_A: f32 = 1.2; // air (~negligible)
+    let pc = crate::PhysConsts::default();
+    let th_ref_m = pc.th_ref_continental_m;
+    let rho_m = pc.rho_m_kg_per_m3;
+    let rho_c = pc.rho_c_kg_per_m3;
+    let rho_w = pc.rho_w_kg_per_m3;
+    let rho_a = pc.rho_air_kg_per_m3;
     for i in 0..n {
-        let th_anom = th_c_m[i] - TH_REF_M; // m; positive if thicker than reference
+        let th_anom = th_c_m[i] - th_ref_m; // m; positive if thicker than reference
         let elev = -depth_m[i]; // elevation (m); >0 land, <=0 ocean
-        let rho_top = if elev > 0.0 { RHO_A } else { RHO_W };
-        let buoyancy = (RHO_M - RHO_C) / (RHO_M - rho_top);
+        let rho_top = if elev > 0.0 { rho_a } else { rho_w };
+        let buoyancy = (rho_m - rho_c) / (rho_m - rho_top);
         let dz = -(c[i].clamp(0.0, 1.0) * buoyancy * th_anom);
         depth_m[i] = (depth_m[i] + dz).clamp(-8000.0, 8000.0);
     }
@@ -560,7 +562,8 @@ pub fn rigid_advect_c_thc_from(
     th_out: &mut [f32],
 ) {
     let n = grid.cells.min(c_src.len()).min(th_src.len()).min(c_out.len()).min(th_out.len());
-    let r_earth = 6_371_000.0_f64;
+    let pc = crate::PhysConsts::default();
+    let r_earth = pc.r_earth_m;
     // 1) Build forward push mapping per plate: donor j -> best target i (same plate only)
     let mut plate_to_members: std::collections::HashMap<u32, Vec<usize>> =
         std::collections::HashMap::new();

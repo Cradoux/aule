@@ -27,9 +27,10 @@ static mut ELEVATION_CURR: Option<Vec<f32>> = None;
 // Removed unused ELEVATION_STAGE staging buffer
 
 // --- Hypsometry snapshot guards (poison detection & slew) ---
-const ELEVATION_CAP_MIN: f32 = -11_000.0;
-const ELEVATION_CAP_MAX: f32 = 9_000.0;
-const EPS: f32 = 1e-6;
+// Physical constants - use centralized values from engine
+fn get_phys_consts() -> engine::PhysConsts {
+    engine::PhysConsts::default()
+}
 
 use std::sync::{OnceLock, RwLock};
 
@@ -90,10 +91,11 @@ fn hyps_stats(elevation: &[f32]) -> HypsStats {
         if v < 0.0 {
             below += 1;
         }
-        if (v - ELEVATION_CAP_MIN).abs() <= 0.5 {
+        let pc = get_phys_consts();
+        if (v - pc.elevation_cap_min_m).abs() <= 0.5 {
             cap_min += 1;
         }
-        if (v - ELEVATION_CAP_MAX).abs() <= 0.5 {
+        if (v - pc.elevation_cap_max_m).abs() <= 0.5 {
             cap_max += 1;
         }
     }
@@ -133,7 +135,7 @@ fn is_poisoned_with_reason(s: &HypsStats, last: Option<LastGood>) -> Option<Pois
     if s.count_non_finite > 0 {
         return Some(PoisonReason::NonFinite);
     }
-    let min_zeroish = s.min.abs() <= EPS;
+    let min_zeroish = s.min.abs() <= get_phys_consts().epsilon;
     if min_zeroish && s.count_below_datum == 0 {
         return Some(PoisonReason::ZeroNoOcean);
     }
@@ -2578,7 +2580,7 @@ fn main() {
                                     dbg_flags,
                                     ov.hypso_d_max,
                                     ov.hypso_h_max,
-                                    1.0f32 / 6_371_000.0f32,
+                                    1.0f32 / get_phys_consts().r_earth_m as f32,
                                 );
                                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                     label: Some("globe pass"),

@@ -276,8 +276,9 @@ impl World {
         let cells = grid.cells;
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
         // Precompute area in m^2 using Earth radius
-        const R_EARTH_M: f64 = 6_371_000.0;
-        let scale = 4.0 * std::f64::consts::PI * R_EARTH_M * R_EARTH_M;
+        let pc = crate::PhysConsts::default();
+        let r_earth_m = pc.r_earth_m;
+        let scale = 4.0 * std::f64::consts::PI * r_earth_m * r_earth_m;
         let mut area_m2: Vec<f32> = Vec::with_capacity(grid.cells);
         for &a in &grid.area {
             area_m2.push((a as f64 * scale) as f32);
