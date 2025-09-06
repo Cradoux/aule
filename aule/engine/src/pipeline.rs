@@ -156,6 +156,11 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         // Check for mass conservation and apply correction if needed
         let c_sum_after = world.c.iter().sum::<f32>();
         
+        // Debug: Check if plate motion is working (always show to track force balance)
+        let max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        let max_velocity = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
+        println!("[rigid_motion] BEFORE_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr", max_omega, max_velocity);
+        
         // CRITICAL FIX: Enforce mass conservation to prevent continental loss
         let mass_loss = c_sum_before - c_sum_after;
         if mass_loss.abs() > 0.1 {
@@ -245,6 +250,43 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     world.boundaries =
         boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
     ms_boundaries += t_b0.elapsed().as_secs_f64() * 1000.0;
+    
+    // Debug: Log boundary statistics to check if they're changing
+    let stats = &world.boundaries.stats;
+    println!("[boundaries] ridge={} subd={} trans={} | total_edges={}", 
+             stats.divergent, stats.convergent, stats.transform, world.boundaries.edges.len());
+
+    // CRITICAL FIX: Apply force balance to update plate rotation rates
+    // This was missing and is why landmasses don't follow plates!
+    let t_fb0 = std::time::Instant::now();
+    let fb_params = crate::force_balance::FbParams {
+        gain: cfg.fb_gain,
+        damp_per_myr: cfg.fb_damp_per_myr,
+        k_conv: cfg.fb_k_conv,
+        k_div: cfg.fb_k_div,
+        k_trans: cfg.fb_k_trans,
+        max_domega: cfg.fb_max_domega,
+        max_omega: cfg.fb_max_omega,
+    };
+    // Store plate_id to avoid borrow checker issues
+    let plate_id = world.plates.plate_id.clone();
+    crate::force_balance::apply_force_balance(
+        &world.grid,
+        &world.boundaries,
+        &plate_id,
+        &mut world.plates,
+        &world.grid.area,
+        cfg.dt_myr as f64,
+        fb_params,
+    );
+    // Update velocity field after force balance changes omega_rad_yr
+    world.v_en = crate::plates::velocity_en_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
+    let ms_force_balance = t_fb0.elapsed().as_secs_f64() * 1000.0;
+    
+    // Debug: Check if force balance updated omega values
+    let max_omega_after = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let max_velocity_after = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
+    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr", max_omega_after, max_velocity_after);
     // Plate-id diagnostics and healing
     {
         let mut invalid = 0usize;
@@ -1791,6 +1833,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Consolidated perf log for viewer pipeline
     let step_ms = ms_boundaries
         + ms_kinematics
+        + ms_force_balance
         + ms_ridge
         + ms_subduction
         + ms_transforms
@@ -1800,10 +1843,11 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         + ms_surface
         + ms_eta;
     println!(
-        "[perf.pipeline] step={:.2} ms | kin={:.2} | bounds={:.2} | ridge={:.2} | subd={:.2} | trf={:.2} | buoy={:.2} | acc+orog={:.2} | flex={:.2} | surf={:.2} | eta={:.2}",
+        "[perf.pipeline] step={:.2} ms | kin={:.2} | bounds={:.2} | fb={:.2} | ridge={:.2} | subd={:.2} | trf={:.2} | buoy={:.2} | acc+orog={:.2} | flex={:.2} | surf={:.2} | eta={:.2}",
         step_ms,
         ms_kinematics,
         ms_boundaries,
+        ms_force_balance,
         ms_ridge,
         ms_subduction,
         ms_transforms,
