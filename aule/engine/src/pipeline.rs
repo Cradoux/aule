@@ -163,7 +163,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         
         // CRITICAL FIX: Enforce mass conservation to prevent continental loss
         let mass_loss = c_sum_before - c_sum_after;
-        if mass_loss.abs() > 0.01 { // Be much more aggressive about mass conservation
+        if mass_loss.abs() > 0.001 { // Ultra-strict mass conservation (0.1% threshold)
             // Aggressively correct mass loss - preserve continental material
             let total_existing = c_sum_after;
             if total_existing > 0.0 {
@@ -267,13 +267,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-6 } else { cfg.fb_gain }, // Increase gain to overcome damping
-        damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.01 } else { cfg.fb_damp_per_myr }, // Reduce damping significantly
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-8 } else { cfg.fb_gain }, // Reduce gain to prevent runaway acceleration
+        damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.5 } else { cfg.fb_damp_per_myr }, // Increase damping to stabilize system
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 1.0e-7, // Allow reasonable omega changes
-        max_omega: 1.0e-6, // Allow reasonable maximum omega
+        max_domega: 5.0e-9, // Severely limit omega changes to prevent runaway
+        max_omega: 1.0e-7, // Much lower speed limit for realistic motion
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
@@ -305,10 +305,15 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     let omega_saturated = (max_omega_after >= fb_params.max_omega * 0.95);
     let zero_rotation = (max_omega_after < 1.0e-9);
     
-    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}{}", 
+    // Check for runaway acceleration
+    let velocity_delta = max_velocity_after - pre_fb_max_velocity;
+    let runaway_acceleration = velocity_delta > 0.5; // If velocity increases by >0.5 m/yr per step
+    
+    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}{}{}", 
              max_omega_after, max_velocity_after,
              if omega_saturated { " [SATURATED - plates at speed limit]" } else { "" },
-             if zero_rotation { " [WARNING: Zero rotation - check gain vs damping]" } else { "" });
+             if zero_rotation { " [WARNING: Zero rotation - check gain vs damping]" } else { "" },
+             if runaway_acceleration { format!(" [RUNAWAY: +{:.3} m/yr per step!]", velocity_delta) } else { "".to_string() });
     // Plate-id diagnostics and healing
     {
         let mut invalid = 0usize;
