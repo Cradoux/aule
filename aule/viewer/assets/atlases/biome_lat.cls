@@ -1,5 +1,5 @@
 # biome_lat.cls
-# rows: name  min_lat  max_lat  min_elev_m  max_elev_m  sRGB_hex
+# rows: name  min_lat  max_lat  min_elevation_m  max_elevation_m  sRGB_hex
 polar_desert   66   90  -8000  8000  #F2F2F2
 tundra         55   66  -8000  4000  #C8E0D8
 boreal         45   55  -8000  2500  #7FA17F

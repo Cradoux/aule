@@ -136,7 +136,7 @@ pub struct PipelineCfg {
 /// Borrowed views of surface fields required by the pipeline.
 pub struct SurfaceFields<'a> {
     /// Solved surface elevation (meters), vertex-major, same order as GPU uploads.
-    pub elev_m: &'a mut [f32],
+    pub elevation_m: &'a mut [f32],
     /// Sea level eta (meters) relative to geoid; output of sea-level solve.
     pub eta_m: &'a mut f32,
 }
@@ -1767,13 +1767,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     }
 
     // Write surface elevation after eta solve: z = eta - depth
-    for (e, &d) in surf.elev_m.iter_mut().zip(world.depth_m.iter()) {
+    for (e, &d) in surf.elevation_m.iter_mut().zip(world.depth_m.iter()) {
         let z = (*surf.eta_m as f64 - d as f64) as f32;
         *e = z;
     }
 
     // Invariants & guards (TST-2): check after we have elevation
-    check_invariants(world, Some(surf.elev_m));
+    check_invariants(world, Some(surf.elevation_m));
 
     // Optional: mass/volume budgets and per-step deltas (DL-2)
     if cfg.log_mass_budget {

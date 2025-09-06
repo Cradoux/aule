@@ -23,12 +23,12 @@ use winit::{
 };
 
 // --- Global CPU elevation snapshots (double-buffered) ---
-static mut ELEV_CURR: Option<Vec<f32>> = None;
-// Removed unused ELEV_STAGE staging buffer
+static mut ELEVATION_CURR: Option<Vec<f32>> = None;
+// Removed unused ELEVATION_STAGE staging buffer
 
 // --- Hypsometry snapshot guards (poison detection & slew) ---
-const ELEV_CAP_MIN: f32 = -11_000.0;
-const ELEV_CAP_MAX: f32 = 9_000.0;
+const ELEVATION_CAP_MIN: f32 = -11_000.0;
+const ELEVATION_CAP_MAX: f32 = 9_000.0;
 const EPS: f32 = 1e-6;
 
 use std::sync::{OnceLock, RwLock};
@@ -65,7 +65,7 @@ struct HypsStats {
     count_at_cap_min: usize,
     count_at_cap_max: usize,
 }
-fn hyps_stats(elev: &[f32]) -> HypsStats {
+fn hyps_stats(elevation: &[f32]) -> HypsStats {
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
     let mut sum = 0.0f64;
@@ -74,7 +74,7 @@ fn hyps_stats(elev: &[f32]) -> HypsStats {
     let mut below = 0usize;
     let mut cap_min = 0usize;
     let mut cap_max = 0usize;
-    for &v in elev {
+    for &v in elevation {
         if !v.is_finite() {
             bad += 1;
             continue;
@@ -90,10 +90,10 @@ fn hyps_stats(elev: &[f32]) -> HypsStats {
         if v < 0.0 {
             below += 1;
         }
-        if (v - ELEV_CAP_MIN).abs() <= 0.5 {
+        if (v - ELEVATION_CAP_MIN).abs() <= 0.5 {
             cap_min += 1;
         }
-        if (v - ELEV_CAP_MAX).abs() <= 0.5 {
+        if (v - ELEVATION_CAP_MAX).abs() <= 0.5 {
             cap_max += 1;
         }
     }
@@ -160,11 +160,11 @@ fn slew_eta(prev: f32, proposed: f32, max_step_m: f32) -> f32 {
 }
 
 fn guarded_hyps_and_eta(
-    elev: &[f32],
+    elevation: &[f32],
     proposed_eta_m: f32,
     eta_m_inout: &mut f32,
 ) -> Result<(f32, HypsStats), PoisonReason> {
-    let stats = hyps_stats(elev);
+    let stats = hyps_stats(elevation);
     // Additional hard sanity: reject absurd magnitudes even if finite (tolerate ±30 km, 60 km span)
     let too_large = stats.min.abs() > 30_000.0
         || stats.max.abs() > 30_000.0
@@ -286,7 +286,7 @@ fn run_to_t_realtime(
             let mut eta = world.sea.eta_m;
             engine::pipeline::step_full(
                 world,
-                engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
+                engine::pipeline::SurfaceFields { elevation_m: &mut elev_tmp, eta_m: &mut eta },
                 cfg,
             );
             world.sea.eta_m = eta;
@@ -1883,7 +1883,7 @@ fn main() {
                         engine::pipeline::step_full(
                             &mut sim_world,
                             engine::pipeline::SurfaceFields {
-                                elev_m: &mut elev_tmp,
+                                elevation_m: &mut elev_tmp,
                                 eta_m: &mut eta,
                             },
                             cfg,
@@ -2002,9 +2002,9 @@ fn main() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
                                     ui.separator();
-                                    // Live land fraction (area-weighted) using ELEV_CURR if available to match guard slice
+                                    // Live land fraction (area-weighted) using ELEVATION_CURR if available to match guard slice
                                     let land_pct_now: f64 = unsafe {
-                                        if let Some(curr) = ELEV_CURR.as_ref() {
+                                        if let Some(curr) = ELEVATION_CURR.as_ref() {
                                             let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
                                             for (&z, &a) in curr.iter().zip(world.area_m2.iter()) { area_sum += a as f64; if z as f64 > 0.0 { land_area += a as f64; } }
                                             if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
@@ -2050,8 +2050,8 @@ fn main() {
                             // Drain any pending simulation snapshots (non-blocking)
                             if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
                                 unsafe {
-                                    if ELEV_CURR.is_none() { ELEV_CURR = Some(vec![0.0; elev.len()]); }
-                                    if let Some(curr) = ELEV_CURR.as_mut() { *curr = elev; }
+                                    if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
+                                    if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
                                 }
                                 world.sea.eta_m = eta;
                                 world.clock.t_myr = t_myr;
@@ -2068,7 +2068,7 @@ fn main() {
                                         let mesh = globe::build_globe_mesh(&gpu.device, &world.grid);
                                         let gr = globe::GlobeRenderer::new(&gpu.device, gpu.config.format, mesh.vertex_count);
                                         // Upload initial heights and LUT (render-only clamped copy)
-                                        let heights_init: Vec<f32> = elev_curr_clone()
+                                        let heights_init: Vec<f32> = elevation_curr_clone()
                                             .unwrap_or_else(|| world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect());
                                         gr.upload_heights(&gpu.queue, &heights_init);
                                         gr.write_lut_from_overlay(&gpu.queue, &ov);
@@ -2150,7 +2150,7 @@ fn main() {
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 // Raster shader expects depth (positive down); provide depth directly
                                                 let verts: Vec<f32> = unsafe {
-                                                    if let Some(curr) = ELEV_CURR.as_ref() {
+                                                    if let Some(curr) = ELEVATION_CURR.as_ref() {
                                                         curr.iter().map(|&z| world.sea.eta_m - z).collect()
                                                     } else {
                                                         world.depth_m.clone()
@@ -2275,7 +2275,7 @@ fn main() {
                                                     rg.write_uniforms(&gpu.queue, &u);
                                                     // Raster shader expects depth (positive down); provide depth directly
                                                     let depth_now: Vec<f32> = unsafe {
-                                                        if let Some(curr) = ELEV_CURR.as_ref() {
+                                                        if let Some(curr) = ELEVATION_CURR.as_ref() {
                                                             curr.iter().map(|&z| world.sea.eta_m - z).collect()
                                                         } else {
                                                             world.depth_m.clone()
@@ -2566,7 +2566,7 @@ fn main() {
                                 gr.write_lut_from_overlay(&gpu.queue, &ov);
                                 // If world changed, refresh vertex heights using elevation (η − depth)
                                 if ov.world_dirty {
-                                    let heights_now: Vec<f32> = elev_curr_clone()
+                                    let heights_now: Vec<f32> = elevation_curr_clone()
                                         .unwrap_or_else(|| world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect());
                                     gr.upload_heights(&gpu.queue, &heights_now);
                                 }
@@ -2705,8 +2705,8 @@ fn main() {
                         // Drain any snapshot from the worker and update visible world
                         if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
                             unsafe {
-                                if ELEV_CURR.is_none() { ELEV_CURR = Some(vec![0.0; elev.len()]); }
-                                if let Some(curr) = ELEV_CURR.as_mut() { *curr = elev; }
+                                if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
+                                if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
                             }
                             world.sea.eta_m = eta;
                             world.clock.t_myr = t_myr;
@@ -2772,6 +2772,6 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
     }
 }
 
-fn elev_curr_clone() -> Option<Vec<f32>> {
-    unsafe { ELEV_CURR.clone() }
+fn elevation_curr_clone() -> Option<Vec<f32>> {
+    unsafe { ELEVATION_CURR.clone() }
 }

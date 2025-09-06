@@ -4,7 +4,7 @@
 //! Conventions:
 //! - depth_m: positive values indicate water depth below sea level; negative values indicate
 //!   land elevation above sea level with magnitude in meters. Elevation is defined as
-//!   `elev_m = -depth_m`.
+//!   `elevation_m = -depth_m`.
 //! - Erosion removes material and lowers elevation → increases `depth_m` (Δdepth > 0).
 //! - Deposition adds material and raises elevation → decreases `depth_m` (Δdepth < 0).
 
@@ -103,18 +103,18 @@ pub fn apply_surface_processes(
 
     // Elevation field (m)
     let depth_prev = depth_m.to_vec();
-    let mut elev_m: Vec<f32> = depth_m.iter().map(|&d| -d).collect();
+    let mut elevation_m: Vec<f32> = depth_m.iter().map(|&d| -d).collect();
     // Priority-flood-like depression fill (iterative, land-only). This raises local closed pits
     // to their lowest spill elevation using repeated local minima elimination.
     // Ocean cells (elev<0) act as fixed outlets and are not modified.
     // More passes to reduce isolated pits that cause spurious steep local slopes
-    fill_depressions_iterative(grid, &mut elev_m, 12);
+    fill_depressions_iterative(grid, &mut elevation_m, 12);
 
     // 1) Local slope magnitude using least-squares plane fit in local EN frame.
-    let slope = compute_slope_mag(grid, &elev_m);
+    let slope = compute_slope_mag(grid, &elevation_m);
 
     // 2) D8 steepest-descent receiver per cell; -1 indicates pit/outlet.
-    let receiver: Vec<i32> = compute_steepest_receiver(grid, &elev_m);
+    let receiver: Vec<i32> = compute_steepest_receiver(grid, &elevation_m);
 
     // 3) Flow accumulation A (m^2): start with own area then accumulate downstream.
     let mut area_acc: Vec<f32> = area_m2.to_vec();
@@ -122,7 +122,7 @@ pub fn apply_surface_processes(
         let mut order: Vec<usize> = (0..n).collect();
         // Sort by descending elevation so upstream contributes before downstream
         order.sort_unstable_by(|&a, &b| {
-            elev_m[b].partial_cmp(&elev_m[a]).unwrap_or(std::cmp::Ordering::Equal)
+            elevation_m[b].partial_cmp(&elevation_m[a]).unwrap_or(std::cmp::Ordering::Equal)
         });
         for i in order {
             let j = receiver[i];
@@ -159,7 +159,7 @@ pub fn apply_surface_processes(
     {
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_unstable_by(|&a, &b| {
-            elev_m[b].partial_cmp(&elev_m[a]).unwrap_or(std::cmp::Ordering::Equal)
+            elevation_m[b].partial_cmp(&elevation_m[a]).unwrap_or(std::cmp::Ordering::Equal)
         });
         for i in order {
             let thk = erosion_thickness_m[i];
@@ -190,7 +190,7 @@ pub fn apply_surface_processes(
         let mut order: Vec<usize> = (0..n).collect();
         // Process from high to low so upstream supply is available first
         order.sort_unstable_by(|&a, &b| {
-            elev_m[b].partial_cmp(&elev_m[a]).unwrap_or(std::cmp::Ordering::Equal)
+            elevation_m[b].partial_cmp(&elevation_m[a]).unwrap_or(std::cmp::Ordering::Equal)
         });
         let pexp = p.p_exp.max(0.0);
         let qexp = p.q_exp.max(0.0);
@@ -297,7 +297,7 @@ pub fn apply_surface_processes(
     stats
 }
 
-fn compute_slope_mag(grid: &Grid, elev_m: &[f32]) -> Vec<f32> {
+fn compute_slope_mag(grid: &Grid, elevation_m: &[f32]) -> Vec<f32> {
     // Fit plane z(x,y) via least-squares over 1-ring in local EN coordinates; slope = sqrt(gx^2+gy^2)
     const R: f64 = 6_371_000.0;
     let n = grid.cells;
@@ -305,7 +305,7 @@ fn compute_slope_mag(grid: &Grid, elev_m: &[f32]) -> Vec<f32> {
     for i in 0..n {
         let lat_i = grid.latlon[i][0] as f64;
         let lon_i = grid.latlon[i][1] as f64;
-        let zi = elev_m[i] as f64;
+        let zi = elevation_m[i] as f64;
         let cos_lat = lat_i.cos();
         let mut s_xx = 0.0;
         let mut s_xy = 0.0;
@@ -319,7 +319,7 @@ fn compute_slope_mag(grid: &Grid, elev_m: &[f32]) -> Vec<f32> {
             let lon_j = grid.latlon[j][1] as f64;
             let dx = (lon_j - lon_i) * cos_lat * R; // east (m)
             let dy = (lat_j - lat_i) * R; // north (m)
-            let dz = (elev_m[j] as f64) - zi;
+            let dz = (elevation_m[j] as f64) - zi;
             s_xx += dx * dx;
             s_xy += dx * dy;
             s_yy += dy * dy;
@@ -346,16 +346,16 @@ fn compute_slope_mag(grid: &Grid, elev_m: &[f32]) -> Vec<f32> {
     slope
 }
 
-fn compute_steepest_receiver(grid: &Grid, elev_m: &[f32]) -> Vec<i32> {
+fn compute_steepest_receiver(grid: &Grid, elevation_m: &[f32]) -> Vec<i32> {
     let n = grid.cells;
     let mut recv = vec![-1i32; n];
     for i in 0..n {
-        let zi = elev_m[i];
+        let zi = elevation_m[i];
         let mut best_j: i32 = -1;
         let mut best_dz: f32 = 0.0;
         for &nj in &grid.n1[i] {
             let j = nj as usize;
-            let dz = zi - elev_m[j]; // positive if neighbor is lower
+            let dz = zi - elevation_m[j]; // positive if neighbor is lower
             if dz > best_dz {
                 best_dz = dz;
                 best_j = j as i32;
@@ -368,25 +368,25 @@ fn compute_steepest_receiver(grid: &Grid, elev_m: &[f32]) -> Vec<i32> {
 
 /// Iteratively fill depressions on land (elev>=0) by raising local minima to the
 /// minimum neighbor elevation. Limited passes for stability; ocean (elev<0) remains unchanged.
-fn fill_depressions_iterative(grid: &Grid, elev_m: &mut [f32], max_passes: usize) {
+fn fill_depressions_iterative(grid: &Grid, elevation_m: &mut [f32], max_passes: usize) {
     let n = grid.cells;
     for _ in 0..max_passes {
         let mut changed = false;
         for i in 0..n {
-            let zi = elev_m[i];
+            let zi = elevation_m[i];
             if zi < 0.0 {
                 continue; // ocean seed
             }
             let mut min_nb = f32::INFINITY;
             for &nj in &grid.n1[i] {
                 let j = nj as usize;
-                let zj = elev_m[j];
+                let zj = elevation_m[j];
                 if zj < min_nb {
                     min_nb = zj;
                 }
             }
             if min_nb.is_finite() && zi < min_nb {
-                elev_m[i] = min_nb;
+                elevation_m[i] = min_nb;
                 changed = true;
             }
         }

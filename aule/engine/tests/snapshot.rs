@@ -36,7 +36,7 @@ fn snapshot_tiny_grid_one_step() {
     let mut w = World::new(f, plates, seed);
     let mut elev = vec![0.0f32; w.grid.cells];
     let mut eta: f32 = 0.0;
-    let surf = pipeline::SurfaceFields { elev_m: &mut elev, eta_m: &mut eta };
+    let surf = pipeline::SurfaceFields { elevation_m: &mut elev, eta_m: &mut eta };
     // Configure to run subduction/transforms each step; enable flexure off for speed
     let cfg = pipeline::PipelineCfg {
         dt_myr: 1.0,
@@ -193,7 +193,7 @@ fn snapshot_tiny_grid_one_step() {
     let mut w2 = World::new(f, plates, seed);
     let mut elev2 = vec![0.0f32; w2.grid.cells];
     let mut eta2: f32 = 0.0;
-    let surf2 = pipeline::SurfaceFields { elev_m: &mut elev2, eta_m: &mut eta2 };
+    let surf2 = pipeline::SurfaceFields { elevation_m: &mut elev2, eta_m: &mut eta2 };
     pipeline::step_full(&mut w2, surf2, cfg);
     // boundary counts
     let mut n_r2 = 0u32;

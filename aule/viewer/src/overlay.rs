@@ -1235,8 +1235,8 @@ impl OverlayState {
     #[allow(dead_code)]
     fn draw_legend_hyps(&self, painter: &egui::Painter, r: Rect) {
         let pal = crate::colormap::hyps_default_palette();
-        let elev_min = -self.depth_minmax.1;
-        let elev_max = -self.depth_minmax.0;
+        let elevation_min = -self.depth_minmax.1;
+        let elevation_max = -self.depth_minmax.0;
         let bar = Rect::from_min_size(
             Pos2::new(r.left() + 8.0, r.center().y - 8.0),
             egui::vec2(r.width() - 16.0, 16.0),
@@ -1254,8 +1254,8 @@ impl OverlayState {
             painter.rect_filled(seg, 0.0, col);
         }
         painter.rect_stroke(bar, 0.0, Stroke::new(1.0, Color32::BLACK));
-        let txt_min = format!("{:.0} m", elev_min);
-        let txt_max = format!("{:.0} m", elev_max);
+        let txt_min = format!("{:.0} m", elevation_min);
+        let txt_max = format!("{:.0} m", elevation_max);
         painter.text(
             Pos2::new(bar.left(), bar.bottom() + 4.0),
             egui::Align2::LEFT_TOP,
@@ -1270,8 +1270,8 @@ impl OverlayState {
             egui::FontId::proportional(12.0),
             Color32::WHITE,
         );
-        if elev_max > elev_min {
-            let t0 = (0.0 - elev_min) / (elev_max - elev_min);
+        if elevation_max > elevation_min {
+            let t0 = (0.0 - elevation_min) / (elevation_max - elevation_min);
             if t0.is_finite() {
                 let x = bar.left() + t0.clamp(0.0, 1.0) * bar.width();
                 painter.line_segment(
