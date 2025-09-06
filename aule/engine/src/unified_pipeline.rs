@@ -93,61 +93,71 @@ impl UnifiedPipeline {
         // Invalidate elevation cache since world will change
         self.invalidate_elevation_cache();
         
+        // UNIFIED APPROACH: Always use the same pipeline logic, but handle sea-level output differently
+        let mut elevation_temp = vec![0.0f32; world.grid.cells];
+        let mut eta_temp = world.sea.eta_m;
+        let surf = SurfaceFields {
+            elevation_m: &mut elevation_temp,
+            eta_m: &mut eta_temp,
+        };
+        
+        // Convert PhysicsConfig to PipelineCfg for the unified execution
+        let pipeline_cfg = self.config.to_pipeline_cfg();
+        
+        // Execute the unified pipeline step (always use step_full logic)
+        crate::pipeline::step_full(world, surf, pipeline_cfg);
+        
+        // Handle sea-level output based on mode
         match mode {
             PipelineMode::Realtime { preserve_depth: _ } => {
-                // Use pipeline::step_full approach but with unified config
-                let mut elevation_temp = vec![0.0f32; world.grid.cells];
-                let mut eta_temp = world.sea.eta_m;
-                let surf = SurfaceFields {
-                    elevation_m: &mut elevation_temp,
-                    eta_m: &mut eta_temp,
-                };
-                
-                // Convert PhysicsConfig to PipelineCfg for compatibility
-                let pipeline_cfg = self.config.to_pipeline_cfg();
-                
-                // Execute the pipeline step
-                crate::pipeline::step_full(world, surf, pipeline_cfg);
-                
-                // Update world's eta but preserve depth_m
+                // Realtime mode: Keep eta separate, don't modify depth_m
                 world.sea.eta_m = eta_temp;
-                
-                // Cache the computed elevation
+                // Cache the computed elevation for renderer
                 self.elevation_cache = Some(elevation_temp);
                 self.cache_valid = true;
-                
-                // Extract results (simplified for now)
-                StepResult {
-                    t_myr: world.clock.t_myr,
-                    dt_myr: self.config.dt_myr as f64,
-                    div_count: 0, // TODO: extract from boundaries
-                    conv_count: 0,
-                    trans_count: 0,
-                    c_bar: 0.0, // TODO: compute
-                    flex_residual: world.last_flex_residual,
-                    eta_m: world.sea.eta_m,
-                    timings,
-                }
             }
             
-            PipelineMode::Batch { write_back_sea_level: _ } => {
-                // Use world::step_once approach but with unified config
-                let step_params = self.config.to_step_params();
-                let step_stats = crate::world::step_once(world, &step_params);
-                
-                // Convert StepStats to StepResult
-                StepResult {
-                    t_myr: step_stats.t_myr,
-                    dt_myr: step_stats.dt_myr,
-                    div_count: step_stats.div_count,
-                    conv_count: step_stats.conv_count,
-                    trans_count: step_stats.trans_count,
-                    c_bar: step_stats.c_bar,
-                    flex_residual: step_stats.flex_residual,
-                    eta_m: world.sea.eta_m,
-                    timings, // TODO: extract from step_once
+            PipelineMode::Batch { write_back_sea_level } => {
+                // Batch mode: Write sea-level offset back into depth_m if requested
+                if write_back_sea_level {
+                    let eta_delta = eta_temp - world.sea.eta_m;
+                    for depth in world.depth_m.iter_mut() {
+                        *depth += eta_delta;
+                    }
+                    // Reset eta to 0 since offset is now in depth_m
+                    world.sea.eta_m = 0.0;
+                } else {
+                    // Just update eta without writing back
+                    world.sea.eta_m = eta_temp;
                 }
+                // Cache elevation for renderer (always eta - depth_m for consistency)
+                let elevation: Vec<f32> = world.depth_m.iter()
+                    .map(|&d| world.sea.eta_m - d)
+                    .collect();
+                self.elevation_cache = Some(elevation);
+                self.cache_valid = true;
             }
+        }
+        
+        // Extract results from world state
+        StepResult {
+            t_myr: world.clock.t_myr,
+            dt_myr: self.config.dt_myr as f64,
+            div_count: world.boundaries.stats.divergent,
+            conv_count: world.boundaries.stats.convergent,
+            trans_count: world.boundaries.stats.transform,
+            c_bar: {
+                let mut c_sum = 0.0f64;
+                let mut area_sum = 0.0f64;
+                for (c, area) in world.c.iter().zip(world.area_m2.iter()) {
+                    c_sum += (*c as f64) * (*area as f64);
+                    area_sum += *area as f64;
+                }
+                if area_sum > 0.0 { c_sum / area_sum } else { 0.0 }
+            },
+            flex_residual: world.last_flex_residual,
+            eta_m: world.sea.eta_m,
+            timings,
         }
     }
     
