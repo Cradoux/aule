@@ -42,15 +42,18 @@ pub struct SurfaceParams {
 impl Default for SurfaceParams {
     fn default() -> Self {
         Self {
-            k_stream: 3.0e-6,
+            // Soften stream-power coefficient to reduce aggressive incision
+            k_stream: 1.0e-6,
             m_exp: 0.5,
             n_exp: 1.0,
-            k_diff: 0.1,
+            // Lower hillslope diffusivity for gentler smoothing
+            k_diff: 0.05,
             k_tr: 0.1,
             p_exp: 1.3,
             q_exp: 1.0,
             rho_sed: 1800.0,
-            min_slope: 1.0e-4,
+            // Slightly higher minimum slope to avoid near-zero unstable gradients
+            min_slope: 2.0e-4,
             subcycles: 4,
             couple_flexure: false,
         }
@@ -91,13 +94,21 @@ pub fn apply_surface_processes(
     }
 
     let dt_yr = (dt_myr * 1.0e6) as f32;
+    let dt_myr_f32 = dt_myr as f32;
+    // Soft caps to prevent overly aggressive per-step changes
+    const EROSION_CAP_M_PER_MYR: f32 = 0.5; // max erosion per Myr (m)
+    const LAND_SUBMERGE_CAP_M_PER_MYR: f32 = 0.5; // max allowed land submergence per Myr (m)
+    let erosion_cap_m = (EROSION_CAP_M_PER_MYR.max(0.0)) * dt_myr_f32;
+    let land_submerge_cap_m = (LAND_SUBMERGE_CAP_M_PER_MYR.max(0.0)) * dt_myr_f32;
 
     // Elevation field (m)
+    let depth_prev = depth_m.to_vec();
     let mut elev_m: Vec<f32> = depth_m.iter().map(|&d| -d).collect();
     // Priority-flood-like depression fill (iterative, land-only). This raises local closed pits
     // to their lowest spill elevation using repeated local minima elimination.
     // Ocean cells (elev<0) act as fixed outlets and are not modified.
-    fill_depressions_iterative(grid, &mut elev_m, 8);
+    // More passes to reduce isolated pits that cause spurious steep local slopes
+    fill_depressions_iterative(grid, &mut elev_m, 12);
 
     // 1) Local slope magnitude using least-squares plane fit in local EN frame.
     let slope = compute_slope_mag(grid, &elev_m);
@@ -131,7 +142,9 @@ pub fn apply_surface_processes(
             let s = slope[i].max(p.min_slope);
             let a = area_acc[i].max(1.0);
             let rate_m_per_yr = p.k_stream * a.powf(mexp) * s.powf(nexp);
-            let de = (rate_m_per_yr * dt_yr).max(0.0);
+            let de_raw = (rate_m_per_yr * dt_yr).max(0.0);
+            // Cap per-step erosion thickness to avoid aggressive drawdown
+            let de = if erosion_cap_m > 0.0 { de_raw.min(erosion_cap_m) } else { de_raw };
             erosion_thickness_m[i] = de;
         }
     }
@@ -272,6 +285,14 @@ pub fn apply_surface_processes(
         }
     }
 
+    // Shoreline stability: if a cell was land at start, allow at most a shallow submergence per step
+    if land_submerge_cap_m >= 0.0 {
+        for i in 0..n {
+            if depth_prev[i] <= 0.0 && depth_m[i] > 0.0 {
+                depth_m[i] = depth_m[i].min(land_submerge_cap_m);
+            }
+        }
+    }
     stats.residual_m3 = stats.eroded_m3 - stats.deposited_m3;
     stats
 }

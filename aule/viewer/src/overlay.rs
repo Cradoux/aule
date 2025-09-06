@@ -436,7 +436,7 @@ impl Default for OverlayState {
             belt_uplift_secondary_m: 300.0,
             belt_diag_deg: 35.0,
 
-            sub_tau_conv_m_per_yr: 0.005,
+            sub_tau_conv_m_per_yr: 0.025,
             sub_trench_half_width_km: 40.0,
             sub_arc_offset_km: 140.0,
             sub_arc_half_width_km: 25.0,
