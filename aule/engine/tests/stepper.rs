@@ -30,4 +30,7 @@ fn determinism_and_age_growth() {
         let d0 = engine::age::depth_from_age(0.0, 2600.0, 350.0, 0.0) as f32;
         assert!(w1.depth_m[i] >= d0);
     }
+
+    // TST-2 invariant: no negative crustal thickness produced by legacy stepper path
+    assert!(w1.th_c_m.iter().all(|&t| t >= 0.0));
 }

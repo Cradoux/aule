@@ -154,9 +154,36 @@ pub fn apply_subduction(
 
     let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
 
+    // Per-seed obliquity weights and effective normal convergence (for gating)
+    // Map seed cell index -> (obliquity_weight, v_eff)
+    let mut w_obl_seed: std::collections::HashMap<u32, (f64, f64)> =
+        std::collections::HashMap::new();
+    for ek in &boundaries.edge_kin {
+        if ek.class as u8 == 2 {
+            let vn = (-ek.n_m_per_yr).max(0.0) as f64;
+            let t_abs = (ek.t_m_per_yr.abs()) as f64;
+            let hyp = (vn * vn + t_abs * t_abs).sqrt().max(1e-12);
+            let sin_theta = (t_abs / hyp).clamp(0.0, 1.0);
+            let beta = 1.5f64;
+            let w_obl = sin_theta.powf(beta);
+            let v_eff = vn * w_obl;
+            w_obl_seed.insert(ek.u, (w_obl, v_eff));
+            w_obl_seed.insert(ek.v, (w_obl, v_eff));
+        }
+    }
+
+    // Fields propagated from nearest seed
+    let mut w_obl_sub: Vec<f64> = vec![0.0; grid.cells];
+    let mut v_eff_sub: Vec<f64> = vec![0.0; grid.cells];
+    let mut w_obl_over: Vec<f64> = vec![0.0; grid.cells];
+    let mut v_eff_over: Vec<f64> = vec![0.0; grid.cells];
+
     // Subducting side
     for &s in &sub_seeds {
         dist_sub[s as usize] = 0.0;
+        let (w, ve) = w_obl_seed.get(&s).copied().unwrap_or((1.0, 0.0));
+        w_obl_sub[s as usize] = w;
+        v_eff_sub[s as usize] = ve;
         heap.push(QItem { dist_m: 0.0, cell: s });
     }
     while let Some(QItem { dist_m, cell }) = heap.pop() {
@@ -170,10 +197,24 @@ pub fn apply_subduction(
             if plate_id[v] != pid {
                 continue;
             }
-            let s_m = geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], RADIUS_M);
+            // Early exit beyond trench half-width on subducting side
+            if dist_m > (params.trench_half_width_km * KM) {
+                continue;
+            }
+            // Use precomputed angular edge length; convert to meters
+            let ang = grid
+                .lengths_n1_rad
+                .get(u)
+                .and_then(|row| {
+                    grid.n1[u].iter().position(|&w| w as usize == v).map(|k| row[k] as f64)
+                })
+                .unwrap_or_else(|| geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], 1.0));
+            let s_m = ang * RADIUS_M;
             let nd = dist_m + s_m;
-            if nd < dist_sub[v] {
+            if nd < dist_sub[v] && nd <= (params.trench_half_width_km * KM) {
                 dist_sub[v] = nd;
+                w_obl_sub[v] = w_obl_sub[u];
+                v_eff_sub[v] = v_eff_sub[u];
                 heap.push(QItem { dist_m: nd, cell: v as u32 });
             }
         }
@@ -182,6 +223,9 @@ pub fn apply_subduction(
     heap.clear();
     for &s in &over_seeds {
         dist_over[s as usize] = 0.0;
+        let (w, ve) = w_obl_seed.get(&s).copied().unwrap_or((1.0, 0.0));
+        w_obl_over[s as usize] = w;
+        v_eff_over[s as usize] = ve;
         heap.push(QItem { dist_m: 0.0, cell: s });
     }
     while let Some(QItem { dist_m, cell }) = heap.pop() {
@@ -195,10 +239,25 @@ pub fn apply_subduction(
             if plate_id[v] != pid {
                 continue;
             }
-            let s_m = geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], RADIUS_M);
+            // Early exit beyond (arc offset + backarc span + halfwidth) on overriding side
+            let hw =
+                (params.arc_half_width_km + params.backarc_width_km + params.arc_offset_km) * KM;
+            if dist_m > hw {
+                continue;
+            }
+            let ang = grid
+                .lengths_n1_rad
+                .get(u)
+                .and_then(|row| {
+                    grid.n1[u].iter().position(|&w| w as usize == v).map(|k| row[k] as f64)
+                })
+                .unwrap_or_else(|| geo::great_circle_arc_len_m(pos_unit[u], pos_unit[v], 1.0));
+            let s_m = ang * RADIUS_M;
             let nd = dist_m + s_m;
-            if nd < dist_over[v] {
+            if nd < dist_over[v] && nd <= hw {
                 dist_over[v] = nd;
+                w_obl_over[v] = w_obl_over[u];
+                v_eff_over[v] = v_eff_over[u];
                 heap.push(QItem { dist_m: nd, cell: v as u32 });
             }
         }
@@ -262,28 +321,40 @@ pub fn apply_subduction(
             // Gate trench deepening by continental fraction if provided
             let is_cont =
                 c_opt.and_then(|c| c.get(i)).map(|&v| v >= params.continent_c_min).unwrap_or(false);
-            if !is_cont {
+            // Obliquity-weighted effective convergence threshold
+            let v_eff = v_eff_sub[i];
+            let allow = v_eff >= params.tau_conv_m_per_yr;
+            if !is_cont && allow {
                 let d = dist_sub[i].clamp(0.0, trench_hw_m);
                 let t = (d / trench_hw_m) as f32; // 0 at hinge → 1 at edge
                 let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
-                delta += params.trench_deepen_m * w;
+                let f_obl = w_obl_sub[i] as f32;
+                delta += (params.trench_deepen_m * w) * f_obl;
             }
         }
         if masks.arc[i] {
             let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
             let t = ((d_eff - arc_off_m).abs() / arc_hw_m).clamp(0.0, 1.0) as f32;
             let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
-            delta += params.arc_uplift_m * w;
+            let allow = v_eff_over[i] >= params.tau_conv_m_per_yr;
+            if allow {
+                let f_obl = w_obl_over[i] as f32;
+                delta += (params.arc_uplift_m * w) * f_obl;
+            }
         }
         if masks.backarc[i] {
             let d_eff = (dist_over[i] - params.rollback_offset_m).max(0.0);
             let start = arc_off_m + arc_hw_m;
             let t = ((d_eff - start) / backarc_w_m).clamp(0.0, 1.0) as f32; // 0 at arc edge → 1 at far edge
             let w = 0.5 * (1.0 + (std::f32::consts::PI * t).cos());
-            if params.backarc_extension_mode {
-                delta += params.backarc_extension_deepen_m * w;
-            } else {
-                delta += params.backarc_uplift_m * w;
+            let allow = v_eff_over[i] >= params.tau_conv_m_per_yr;
+            if allow {
+                let f_obl = w_obl_over[i] as f32;
+                if params.backarc_extension_mode {
+                    delta += (params.backarc_extension_deepen_m * w) * f_obl;
+                } else {
+                    delta += (params.backarc_uplift_m * w) * f_obl;
+                }
             }
         }
         if delta != 0.0 {

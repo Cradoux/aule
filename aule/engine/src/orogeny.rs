@@ -6,6 +6,7 @@
 //! - No explicit mass conservation between eroded material and thickening; surface processes run
 //!   separately and may not balance orogenic addition. Consider coupling or running at cadence.
 
+use crate::plates::PlateKind;
 use crate::{
     boundaries::{Boundaries, EdgeClass},
     geo,
@@ -66,6 +67,7 @@ pub fn apply_cc_orogeny(
     depth_m: &mut [f32],
     p: &OrogenyParams,
     dt_myr: f64,
+    plates_kind: &[PlateKind],
 ) -> OrogenyStats {
     let n = grid.cells;
     if n == 0 {
@@ -88,15 +90,24 @@ pub fn apply_cc_orogeny(
         if c_l < p.c_min || c_r < p.c_min {
             continue;
         }
+        // Require both sides to be Continental by plate kind
+        let pk_l = plates_kind.get(plate_id[ul] as usize).copied().unwrap_or(PlateKind::Oceanic);
+        let pk_r = plates_kind.get(plate_id[vr] as usize).copied().unwrap_or(PlateKind::Oceanic);
+        if !(matches!(pk_l, PlateKind::Continental) && matches!(pk_r, PlateKind::Continental)) {
+            continue;
+        }
         // Normal convergence magnitude (positive converge)
         let vn = (-ek.n_m_per_yr).max(0.0) as f64;
         if vn <= 0.0 {
             continue;
         }
-        // Obliquity from edge tangential component; ϕ = atan2(|t|, Vn)
+        // Obliquity factor and width-based rate per RL-3: ḣ_c = α * v_n * sin(θ)^β / W_c
         let phi = (ek.t_m_per_yr.abs() as f64).atan2(vn);
-        let f_obl = phi.cos().powf(p.gamma_obliquity as f64);
-        let r_thick = (p.k_thick as f64) * (vn * 1.0e6) * f_obl; // m/Myr
+        let sin_theta = phi.sin().abs();
+        let f_obl = sin_theta.powf(p.gamma_obliquity as f64);
+        let w_c_m = (p.w_core_km as f64).clamp(150.0, 300.0) * 1000.0;
+        let alpha = p.k_thick as f64; // reuse k_thick as α
+        let r_thick = alpha * (vn * 1.0e6) * f_obl / w_c_m; // m/Myr
         r_thick_acc += r_thick;
         r_thick_cnt += 1;
         edges_cc += 1;
@@ -227,16 +238,14 @@ pub fn apply_cc_orogeny(
         }
         let dthc_raw = (r_mean * dt) * w_sum;
         let uplift_raw = (p.beta_uplift as f64) * dthc_raw;
-        let cap = 300.0f64;
-        let dthc_capped = dthc_raw.clamp(-cap, cap);
-        let uplift = uplift_raw.clamp(-cap, cap);
-        if dthc_raw.abs() > cap {
-            println!("[cap] orogeny: thickening capped (raw={:.1} m, cap={:.0} m)", dthc_raw, cap);
-        }
-        if uplift_raw.abs() > cap {
-            println!("[cap] orogeny: uplift capped (raw={:.1} m, cap={:.0} m)", uplift_raw, cap);
-        }
-        let dthc = dthc_capped;
+        // RL-2: apply smooth saturator on rates before integrating (convert back from per-step Δ)
+        let rate_thick = dthc_raw / dt.max(1e-12);
+        let rate_uplift = uplift_raw / dt.max(1e-12);
+        let cap_m_per_myr = 300.0f64 / dt.max(1e-12);
+        let rate_thick_soft = crate::util::soft_cap_f64(rate_thick, cap_m_per_myr);
+        let rate_uplift_soft = crate::util::soft_cap_f64(rate_uplift, cap_m_per_myr);
+        let dthc = rate_thick_soft * dt;
+        let uplift = rate_uplift_soft * dt;
         th_c_m[i] = (th_c_m[i] + dthc as f32).clamp(0.0, 70_000.0);
         depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
         dthc_mean += dthc * (area_m2[i] as f64);

@@ -5,6 +5,7 @@
 //! - `beta_arc` applies uplift proportional to thickness change directly onto `depth_m`.
 //! - Terrane docking transfers `C` locally and is highly schematic; no momentum/force coupling.
 
+use crate::plates::PlateKind;
 use crate::{
     boundaries::{Boundaries, EdgeClass},
     grid::Grid,
@@ -72,6 +73,7 @@ pub fn apply_oc_accretion(
     subduction: &SubductionMasks,
     boundaries: &Boundaries,
     _vel_m_per_yr: &[[f32; 3]],
+    plates_kind: &[PlateKind],
     c: &mut [f32],
     th_c_m: &mut [f32],
     depth_m: &mut [f32],
@@ -98,6 +100,12 @@ pub fn apply_oc_accretion(
         let is_cont_l = cl >= p.c_min_continent;
         let is_cont_r = cr >= p.c_min_continent;
         if is_cont_l == is_cont_r {
+            continue;
+        }
+        // Require at least one side to be Oceanic by plate kind to avoid CC accretion here
+        let pk_l = plates_kind.get(ek.u as usize).copied().unwrap_or(PlateKind::Oceanic);
+        let pk_r = plates_kind.get(ek.v as usize).copied().unwrap_or(PlateKind::Oceanic);
+        if matches!(pk_l, PlateKind::Continental) && matches!(pk_r, PlateKind::Continental) {
             continue;
         }
         let vn = (-ek.n_m_per_yr).max(0.0) as f64;

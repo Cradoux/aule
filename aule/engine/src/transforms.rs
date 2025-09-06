@@ -176,9 +176,22 @@ pub fn apply_transforms(
                 if plate_id[v] != pid {
                     continue;
                 }
-                let s_m = geo::great_circle_arc_len_m(rhat[u], rhat[v], RADIUS_M);
+                // Bound-limited propagation: stop beyond band half-width in meters
+                let hw_m = (params.basin_half_width_km * KM).max(0.0);
+                if d > hw_m {
+                    continue;
+                }
+                // Use precomputed angular edge lengths; convert to meters
+                let ang = grid
+                    .lengths_n1_rad
+                    .get(u)
+                    .and_then(|row| {
+                        grid.n1[u].iter().position(|&w| w as usize == v).map(|k| row[k] as f64)
+                    })
+                    .unwrap_or_else(|| geo::great_circle_arc_len_m(rhat[u], rhat[v], 1.0));
+                let s_m = ang * RADIUS_M;
                 let nd = d + s_m;
-                if nd < dist[v] {
+                if nd < dist[v] && nd <= hw_m {
                     dist[v] = nd;
                     h.push(QItem { d: nd, c: v as u32 });
                 }

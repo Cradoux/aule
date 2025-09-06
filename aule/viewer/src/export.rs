@@ -1,3 +1,4 @@
+// File exports disabled by request; keep API but no-ops when called externally.
 use std::fs::File;
 use std::io::Write;
 
@@ -10,6 +11,10 @@ pub fn export_raster_debug_csv(
     height: u32,
     path: &str,
 ) -> std::io::Result<()> {
+    // Early return to disable writing during simulation
+    if true {
+        return Ok(());
+    }
     let mut file = File::create(path)?;
     writeln!(file, "x,y,lon,lat,face,F,iu,iv,fu,fv,upper,upper_rule,agree,iu_plus_iv,domain_violation,tri_idx,id0,id1,id2,w0,w1,w2,depth_interp,elev_interp,elev_cpu_ref,diff")?;
 

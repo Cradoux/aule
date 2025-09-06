@@ -1,5 +1,6 @@
 use egui::Color32;
 use egui_plot::{Line, PlotPoints, Points};
+use std::fs;
 
 #[allow(dead_code)]
 pub struct AgeDepthPlotParams {
@@ -21,6 +22,46 @@ pub struct AgeDepthPlotData {
     pub binned: Line,
     pub reference: Line,
     pub stats: AgeDepthStats,
+}
+
+#[allow(dead_code)]
+pub struct Dl1Series {
+    pub t_myr: Vec<f64>,
+    pub land_pct: Vec<f64>,
+    pub cap_comp: Vec<f64>,
+    pub cap_thc: Vec<f64>,
+}
+
+#[allow(dead_code)]
+pub fn read_dl1_series_csv(path: &str) -> Option<Dl1Series> {
+    let s = fs::read_to_string(path).ok()?;
+    let mut t = Vec::new();
+    let mut land = Vec::new();
+    let mut capc = Vec::new();
+    let mut capth = Vec::new();
+    for line in s.lines() {
+        if line.starts_with("t_myr") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() < 9 {
+            continue;
+        }
+        let tm = cols[0].parse::<f64>().ok()?;
+        let pr_r = cols[1].parse::<f64>().unwrap_or(0.0);
+        let pr_s = cols[2].parse::<f64>().unwrap_or(0.0);
+        let pr_t = cols[3].parse::<f64>().unwrap_or(0.0);
+        let _oceanized = cols[4].parse::<f64>().unwrap_or(0.0);
+        let cc = cols[5].parse::<f64>().unwrap_or(0.0);
+        let ct = cols[6].parse::<f64>().unwrap_or(0.0);
+        // land% approx from ridge/subd/transform shares is not available; compute from world in UI if needed.
+        // For CSV we just plot caps by time; land fraction can be computed separately and appended if desired.
+        t.push(tm);
+        land.push((pr_r + pr_s + pr_t) * 0.0); // placeholder 0, UI can provide live land%
+        capc.push(cc);
+        capth.push(ct);
+    }
+    Some(Dl1Series { t_myr: t, land_pct: land, cap_comp: capc, cap_thc: capth })
 }
 
 #[allow(dead_code)]

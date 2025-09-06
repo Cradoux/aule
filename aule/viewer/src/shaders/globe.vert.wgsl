@@ -6,6 +6,7 @@ struct Globals {
 	_pad : f32,
 	d_max : f32,
 	h_max : f32,
+	height_scale : f32,
 	_pad2 : vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> G : Globals;
@@ -25,8 +26,9 @@ struct VSOut {
 fn main(input: VSIn) -> VSOut {
 	let u = normalize(input.pos_unit);
 	let h = ZBuf[input.vid];
-	// Clamp radius to avoid inward flips when exaggeration is large negative or huge positive
-	let r = G.radius + clamp(h * G.exagger, -0.2, 0.2);
+	// Convert meters to unit-sphere units and clamp relative displacement conservatively
+	let hw = h * G.height_scale;
+	let r = G.radius + clamp(hw * G.exagger, -0.05, 0.05);
 	let world = u * r;
 	var o : VSOut;
 	o.pos_clip = G.view_proj * vec4<f32>(world, 1.0);

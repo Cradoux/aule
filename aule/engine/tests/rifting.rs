@@ -20,6 +20,7 @@ fn no_divergence_no_rifting() {
             &world.plates,
             &world.plates.plate_id,
         ),
+        &world.plates.kind,
         &mut world.c,
         &mut world.th_c_m,
         &mut world.age_myr,

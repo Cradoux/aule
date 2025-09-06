@@ -192,6 +192,40 @@ pub fn apply_sea_level_offset(depth_m: &mut [f32], offset_m: f64) {
     }
 }
 
+/// Area-weighted land fraction for a given sea-level eta (meters), using elevation z = eta − depth.
+pub fn land_fraction_with_eta(depth_m: &[f32], area_m2: &[f32], eta_m: f32) -> f64 {
+    assert_eq!(depth_m.len(), area_m2.len());
+    let mut land = 0.0f64;
+    let mut tot = 0.0f64;
+    for i in 0..depth_m.len().min(area_m2.len()) {
+        let a = area_m2[i] as f64;
+        tot += a;
+        if (eta_m - depth_m[i]) > 0.0 {
+            land += a;
+        }
+    }
+    if tot > 0.0 {
+        land / tot
+    } else {
+        0.0
+    }
+}
+
+/// Solve eta (meters) so that land_fraction_with_eta(depth, area, eta) ~= target_land.
+/// Uses the existing offset solver and converts offset→eta consistently.
+pub fn solve_eta_for_land(
+    depth_m: &[f32],
+    area_m2: &[f32],
+    target_land: f64,
+    _tol_frac: f64,
+    max_iter: u32,
+) -> f64 {
+    // Existing solver finds offset `off` with elevation = -(depth + off), land if elevation>0.
+    // Relationship to eta in z = eta − depth is: off = -eta.
+    let off = solve_offset_for_land_fraction(depth_m, area_m2, target_land as f32, max_iter);
+    -off
+}
+
 /// Bisection on uniform offset (meters) so ocean-area fraction == target_ocean_frac.
 ///
 /// Convention: ocean if (depth_m[i] + off) > 0.0. Returns the offset in meters.

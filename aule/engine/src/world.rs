@@ -38,12 +38,20 @@ pub struct World {
     pub boundaries: Boundaries,
     /// Age field in Myr, length = grid.cells.
     pub age_myr: Vec<f32>,
+    /// Staging buffer for oceanic age during rigid advection
+    pub age_stage: Vec<f32>,
     /// Bathymetry depth in meters (+ down), length = grid.cells.
     pub depth_m: Vec<f32>,
+    /// Staged depth for end-of-step atomic publish (same length as depth_m)
+    pub depth_stage_m: Vec<f32>,
     /// Continental fraction (0..1). Seeded when continents are enabled.
     pub c: Vec<f32>,
+    /// Staging buffer for continental fraction during rigid advection
+    pub c_stage: Vec<f32>,
     /// Continental crust thickness in meters (≥0). Seeded alongside `C`.
     pub th_c_m: Vec<f32>,
+    /// Staging buffer for continental crust thickness during rigid advection
+    pub th_c_stage: Vec<f32>,
     /// Per-cell velocities (east,north) in m/yr.
     pub v_en: Vec<[f32; 2]>,
     /// Simulation clock.
@@ -74,6 +82,19 @@ pub struct World {
     pub last_mass_sed_kg: f64,
     /// Last-step ocean volume (m^3) for budget deltas.
     pub last_ocean_vol_m3: f64,
+    /// Persistent scratch buffers for pipeline to reduce transient allocations.
+    pub scratch: WorldScratch,
+}
+/// Reusable scratch space to avoid per-step allocations (sizes match grid.cells).
+pub struct WorldScratch {
+    /// Scratch float buffer A, length equals `grid.cells`. Caller defines semantics per stage.
+    pub f32_a: Vec<f32>,
+    /// Scratch float buffer B, length equals `grid.cells`. Caller defines semantics per stage.
+    pub f32_b: Vec<f32>,
+    /// Scratch float buffer C, length equals `grid.cells`. Caller defines semantics per stage.
+    pub f32_c: Vec<f32>,
+    /// Scratch float buffer D, length equals `grid.cells`. Caller defines semantics per stage.
+    pub f32_d: Vec<f32>,
 }
 
 /// Simple-mode preset parameters for deterministic world generation.
@@ -236,14 +257,21 @@ impl World {
     /// Construct a world with deterministic plates and zeroed ages/depths.
     pub fn new(f: u32, num_plates: u32, seed: u64) -> Self {
         let grid = Grid::new(f);
+        // Precompute local bases/edge lengths once at world creation
+        let mut grid = grid;
+        grid.precompute_local_bases_and_lengths();
         let plates = Plates::new(&grid, num_plates, seed);
         let v_en = plates.vel_en.clone();
         let boundaries =
             crate::boundaries::Boundaries::classify(&grid, &plates.plate_id, &v_en, 0.005);
         let age_myr = vec![0.0f32; grid.cells];
+        let age_stage = vec![0.0f32; grid.cells];
         let depth_m = vec![0.0f32; grid.cells];
+        let depth_stage_m = vec![0.0f32; grid.cells];
         let c = vec![0.0f32; grid.cells];
+        let c_stage = vec![0.0f32; grid.cells];
         let th_c_m = vec![35_000.0f32; grid.cells];
+        let th_c_stage = vec![35_000.0f32; grid.cells];
         let sediment_m = vec![0.0f32; grid.cells];
         let cells = grid.cells;
         let clock = Clock { t_myr: 0.0, step_idx: 0 };
@@ -259,9 +287,13 @@ impl World {
             plates,
             boundaries,
             age_myr,
+            age_stage,
             depth_m,
+            depth_stage_m,
             c,
+            c_stage,
             th_c_m,
+            th_c_stage,
             v_en,
             clock,
             sea_level_ref: None,
@@ -277,6 +309,12 @@ impl World {
             last_mass_cont_kg: 0.0,
             last_mass_sed_kg: 0.0,
             last_ocean_vol_m3: 0.0,
+            scratch: WorldScratch {
+                f32_a: vec![0.0; cells],
+                f32_b: vec![0.0; cells],
+                f32_c: vec![0.0; cells],
+                f32_d: vec![0.0; cells],
+            },
         }
     }
 
@@ -286,9 +324,12 @@ impl World {
         self.plates = crate::plates::Plates::new(&self.grid, preset.plates, seed);
         self.v_en.clone_from(&self.plates.vel_en);
         self.age_myr.fill(0.0);
+        self.age_stage.clone_from(&self.age_myr);
         self.depth_m.fill(0.0);
         self.c.fill(0.0);
+        self.c_stage.clone_from(&self.c);
         self.th_c_m.fill(35_000.0);
+        self.th_c_stage.clone_from(&self.th_c_m);
         // Enforce continental thickness bounds after init
         for t in &mut self.th_c_m {
             *t = t.clamp(25_000.0, 65_000.0);
@@ -304,6 +345,15 @@ impl World {
         self.last_ocean_vol_m3 = 0.0;
         self.boundaries =
             Boundaries::classify(&self.grid, &self.plates.plate_id, &self.v_en, 0.005);
+
+        // Derive per-plate kind from initial continental mask (C field)
+        self.plates.kind = crate::plates::derive_kinds(
+            &self.grid,
+            &self.plates.plate_id,
+            &self.c,
+            0.35, // plate is Continental if >35% of its area has C>0.5
+            0.5,
+        );
 
         // 2) Initialize ridge births then baseline bathymetry from age (ocean depths)
         {
@@ -330,6 +380,8 @@ impl World {
             }
             self.depth_m[i] = d.clamp(0.0, 6000.0);
         }
+        // Keep stage in sync after initialization
+        self.depth_stage_m.clone_from(&self.depth_m);
         // Capture reference ocean volume for constant-volume isostasy using elevation definition
         let ref_sea = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2, self.sea.eta_m);
         self.sea_level_ref = Some(ref_sea);
@@ -421,16 +473,59 @@ impl World {
             1e-4,
             48,
         );
-        for (i, &cm) in tpl.iter().enumerate() {
+        for (i, &cm) in tpl.iter().enumerate().take(self.grid.cells) {
             self.depth_m[i] -= (amp_m as f32) * cm;
         }
         self.sea.eta_m = -(off_m as f32);
 
-        // 6) Skip subduction/flexure in Simple; keep land fraction stable
+        // 6) Initialize continental fields so continents make up the target land mass
+        // Build an area-targeted binary C from the template, matching preset.target_land_frac
+        {
+            let total_area: f64 = self.area_m2.iter().map(|&a| a as f64).sum();
+            let target_area: f64 = (preset.target_land_frac as f64) * total_area;
+            // Create sortable list of (tpl, area, idx)
+            let mut cells: Vec<(f32, f32, usize)> = tpl
+                .iter()
+                .zip(self.area_m2.iter())
+                .enumerate()
+                .map(|(i, (t, a))| (*t, *a, i))
+                .collect();
+            // Sort by template strength descending
+            cells.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            // Fill C to hit target area; allow fractional fill on the boundary cell
+            let mut acc: f64 = 0.0;
+            self.c.fill(0.0);
+            for (val, a, idx) in cells {
+                if val <= 0.0 {
+                    break;
+                }
+                if acc >= target_area {
+                    break;
+                }
+                let a64 = a as f64;
+                let remaining = (target_area - acc).max(0.0);
+                if remaining >= a64 {
+                    self.c[idx] = 1.0;
+                    acc += a64;
+                } else {
+                    self.c[idx] = (remaining / a64) as f32; // partial fill to hit target exactly
+                    acc = target_area;
+                }
+            }
+            // Seed a uniform continental thickness for C>0
+            for (i, c) in self.c.iter().enumerate().take(self.grid.cells) {
+                self.th_c_m[i] = if *c > 0.0 { 40_000.0 } else { 0.0 };
+            }
+            // Re-derive plate kinds now that C exists
+            self.plates.kind =
+                crate::plates::derive_kinds(&self.grid, &self.plates.plate_id, &self.c, 0.35, 0.5);
+        }
 
-        // 7) No robustness fallback: keep the solver result deterministically
+        // 7) Skip subduction/flexure in Simple; keep land fraction stable
 
-        // 8) Final: keep η managed externally (viewer) in Simple mode; do not modify depths here
+        // 8) No robustness fallback: keep the solver result deterministically
+
+        // 9) Final: keep η managed externally (viewer) in Simple mode; do not modify depths here
         // Capture reference ocean state AFTER continents and final η using elevation definition
         let ref_after = crate::isostasy::compute_ref(&self.depth_m, &self.area_m2, self.sea.eta_m);
         self.sea_level_ref = Some(ref_after);
@@ -823,6 +918,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             sub_masks,
             &world.boundaries,
             &vel3,
+            &world.plates.kind,
             &mut world.c,
             &mut world.th_c_m,
             &mut acc_tmp,
@@ -860,6 +956,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &world.boundaries,
             &world.plates.plate_id,
             &vel3,
+            &world.plates.kind,
             &mut world.c,
             &mut world.th_c_m,
             &mut world.age_myr,
@@ -924,6 +1021,7 @@ pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
             &mut orog_tmp,
             &p_orog,
             sp.dt_myr,
+            &world.plates.kind,
         );
         for i in 0..n {
             delta_tect[i] += orog_tmp[i];

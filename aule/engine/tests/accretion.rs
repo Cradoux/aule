@@ -60,6 +60,7 @@ fn oc_no_change_when_no_convergence_or_both_oceanic() {
             &world.plates,
             &world.plates.plate_id,
         ),
+        &world.plates.kind,
         &mut world.c,
         &mut world.th_c_m,
         &mut world.depth_m,

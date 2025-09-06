@@ -12,7 +12,9 @@ struct Globals {
     _pad: f32,
     d_max: f32,
     h_max: f32,
+    height_scale: f32,
     _pad2: [f32; 2],
+    _pad3: [f32; 3],
 }
 
 pub struct GlobeRenderer {
@@ -43,7 +45,9 @@ impl GlobeRenderer {
             _pad: 0.0,
             d_max: 4000.0,
             h_max: 4000.0,
+            height_scale: 1.0 / 6_371_000.0,
             _pad2: [0.0, 0.0],
+            _pad3: [0.0, 0.0, 0.0],
         };
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globe uniforms"),
@@ -311,7 +315,13 @@ struct VSOut { @builtin(position) pos_clip : vec4<f32> };
     }
 
     pub fn upload_heights(&self, queue: &wgpu::Queue, heights: &[f32]) {
-        queue.write_buffer(&self.height_buf, 0, bytemuck::cast_slice(heights));
+        // Render-only clamping for visualization; scientific arrays remain untouched
+        let mut tmp: Vec<f32> = Vec::with_capacity(heights.len());
+        for &v in heights {
+            let z = if v.is_finite() { v } else { 0.0 };
+            tmp.push(z.clamp(-11_000.0, 9_000.0));
+        }
+        queue.write_buffer(&self.height_buf, 0, bytemuck::cast_slice(&tmp));
     }
 
     pub fn update_uniforms(
@@ -323,6 +333,7 @@ struct VSOut { @builtin(position) pos_clip : vec4<f32> };
         debug_flags: u32,
         d_max: f32,
         h_max: f32,
+        height_scale: f32,
     ) {
         let u = Globals {
             view_proj,
@@ -332,7 +343,9 @@ struct VSOut { @builtin(position) pos_clip : vec4<f32> };
             _pad: 0.0,
             d_max,
             h_max,
+            height_scale,
             _pad2: [0.0, 0.0],
+            _pad3: [0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
     }

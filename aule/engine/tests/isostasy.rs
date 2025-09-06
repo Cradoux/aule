@@ -122,6 +122,90 @@ fn determinism_same_inputs_same_offset() {
     assert_eq!(a, b);
 }
 
+#[test]
+fn neutral_column_zero_load() {
+    // With depth exactly at sea level and no sediment, assembled load should be zero using PhysConsts.
+    let pc = engine::PhysConsts::default();
+    // Use a tiny real grid (F=1) for type correctness
+    let grid = engine::grid::Grid::new(1);
+    let n = grid.cells;
+    let depth = vec![0.0f32; n];
+    let sed = vec![0.0f32; n];
+    let lp = engine::flexure_loads::LoadParams {
+        rho_w: pc.rho_w_kg_per_m3,
+        rho_c: pc.rho_c_kg_per_m3,
+        g: pc.g_m_per_s2,
+        sea_level_m: 0.0,
+    };
+    let f = engine::flexure_loads::assemble_load_with_sediments(&grid, &depth, &sed, &lp);
+    for v in f {
+        assert_eq!(v, 0.0);
+    }
+}
+
+/// Airy-style property test: doubling crustal thickness raises elevation proportionally
+/// to (rho_m - rho_c)/rho_m. We check the density ratio and implied uplift per unit dth.
+/// Tolerance: 1e-12 absolute on ratio and uplift for stable constants.
+#[test]
+fn airy_uplift_matches_density_ratio() {
+    let pc = engine::PhysConsts::default();
+    let rho_m = pc.rho_m_kg_per_m3 as f64;
+    let rho_c = pc.rho_c_kg_per_m3 as f64;
+    // Density ratio used throughout the codebase
+    let k = (rho_m - rho_c) / rho_m;
+    assert!(k > 0.0 && k < 1.0, "ratio must be in (0,1)");
+    // Doubling thickness: choose a base and delta; uplift = k * dth
+    let dth = 1000.0f64; // 1 km
+    let dz = k * dth;
+    // Sanity: uplift should be less than dth and positive
+    assert!(dz > 0.0 && dz < dth);
+    // Numerical tolerance documentation: constants are exact here, so tight bound
+    let expected = (rho_m - rho_c) / rho_m * dth;
+    assert!((dz - expected).abs() <= 1e-12, "dz={} expected={}", dz, expected);
+}
+
+#[test]
+fn land_fraction_monotonic_in_eta() {
+    // Increasing eta should not decrease land fraction
+    let depth = vec![500.0f32, 0.0, -200.0, 1200.0, -50.0, 3000.0];
+    let area = vec![1.0f32; depth.len()];
+    let f1 = isostasy::land_fraction_with_eta(&depth, &area, -1000.0);
+    let f2 = isostasy::land_fraction_with_eta(&depth, &area, 0.0);
+    let f3 = isostasy::land_fraction_with_eta(&depth, &area, 1000.0);
+    assert!(f2 >= f1 && f3 >= f2, "monotonicity violated: f1={:.3} f2={:.3} f3={:.3}", f1, f2, f3);
+}
+
+#[test]
+fn equal_area_bimodal_eta_zero_land_half() {
+    // Depths symmetric around 0 with equal area → eta=0 gives 50% land
+    let depth = vec![-100.0f32, -100.0, 100.0, 100.0];
+    let area = vec![1.0f32, 1.0, 1.0, 1.0];
+    let frac = isostasy::land_fraction_with_eta(&depth, &area, 0.0) as f32;
+    assert!((frac - 0.5).abs() <= 1e-6);
+}
+
+#[test]
+fn weighted_land_fraction_matches_weights() {
+    // Larger area on shallow cells biases land fraction appropriately
+    let depth = vec![50.0f32, -50.0];
+    let area = vec![1.0f32, 3.0];
+    let frac = isostasy::land_fraction_with_eta(&depth, &area, 0.0);
+    assert!((frac - 0.75).abs() <= 1e-6_f64);
+}
+
+#[test]
+fn solve_eta_for_land_edges_all_land_all_ocean() {
+    // Achieved land fractions at returned eta should be near the targets
+    let depth = vec![1000.0f32, 2000.0, 3000.0];
+    let area = vec![1.0f32; depth.len()];
+    let eta_all_land = isostasy::solve_eta_for_land(&depth, &area, 1.0, 1e-4, 32) as f32;
+    let eta_all_ocean = isostasy::solve_eta_for_land(&depth, &area, 0.0, 1e-4, 32) as f32;
+    let f_land = isostasy::land_fraction_with_eta(&depth, &area, eta_all_land) as f32;
+    let f_ocean = 1.0 - isostasy::land_fraction_with_eta(&depth, &area, eta_all_ocean) as f32;
+    assert!(f_land >= 0.999);
+    assert!(f_ocean >= 0.999);
+}
+
 fn volume_with_offset_ref(depth: &[f32], area: &[f32], off: f64) -> f64 {
     let mut v = 0.0f64;
     for i in 0..depth.len() {

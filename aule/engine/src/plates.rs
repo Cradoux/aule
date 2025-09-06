@@ -8,6 +8,15 @@ const RADIUS_M: f64 = 6_371_000.0;
 /// Sentinel used to denote an invalid/missing plate id.
 pub const INVALID_PLATE_ID: u16 = u16::MAX;
 
+/// Categorical plate type used to gate boundary physics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateKind {
+    /// Plate whose interior area has a majority of high-`C` cells (continent-dominated)
+    Continental,
+    /// Plate whose interior area is mostly low-`C` cells (ocean-dominated)
+    Oceanic,
+}
+
 /// Plate model results computed from a deterministic seed.
 pub struct Plates {
     /// Plate seed unit vectors (f64)
@@ -20,6 +29,8 @@ pub struct Plates {
     pub omega_rad_yr: Vec<f32>,
     /// Per-cell velocity components (east, north) in m/yr
     pub vel_en: Vec<[f32; 2]>,
+    /// Per-plate kind derived from initial continental mask
+    pub kind: Vec<PlateKind>,
 }
 
 impl Plates {
@@ -27,9 +38,51 @@ impl Plates {
     pub fn new(grid: &Grid, num_plates: u32, seed: u64) -> Self {
         let seeds = farthest_point_seeds(grid, num_plates, seed ^ 0x0070_6c61_7465);
         let plate_id = assign_voronoi(grid, &seeds);
-        let (pole_axis, omega_rad_yr) = euler_poles(seeds.len(), seed ^ 0xFACE_CAFE);
+        let (pole_axis, mut omega_rad_yr) = euler_poles(seeds.len(), seed ^ 0xFACE_CAFE);
+        // Clamp angular speeds to a reasonable max linear speed (e.g., 100 mm/yr)
+        let vmax_m_per_yr: f64 = 100.0e-3; // 100 mm/yr in m/yr
+        let omega_max = (vmax_m_per_yr / RADIUS_M) as f32; // rad/yr
+        for w in &mut omega_rad_yr {
+            let s = (*w).abs().min(omega_max);
+            *w = (*w).signum() * s;
+        }
         let vel_en = velocities(grid, &plate_id, &pole_axis, &omega_rad_yr);
-        Self { seeds, plate_id, pole_axis, omega_rad_yr, vel_en }
+        Self { seeds, plate_id, pole_axis, omega_rad_yr, vel_en, kind: Vec::new() }
+    }
+
+    /// Advance rigid plate mosaics by rotating Voronoi seeds around each plate's Euler pole.
+    /// Seeds are rotated by theta = omega * dt_years (radians). After rotation, rebuild
+    /// `plate_id` and `vel_en` to keep the mosaic and velocities consistent.
+    pub fn advance_rigid(&mut self, grid: &Grid, dt_years: f64) {
+        let nplates = self.pole_axis.len().min(self.omega_rad_yr.len());
+        for p in 0..nplates {
+            // Convert axis to f64
+            let axis = [
+                self.pole_axis[p][0] as f64,
+                self.pole_axis[p][1] as f64,
+                self.pole_axis[p][2] as f64,
+            ];
+            let theta = (self.omega_rad_yr[p] as f64) * dt_years;
+            // Rotate each seed assigned to this plate: seeds are one per plate by construction
+            if p < self.seeds.len() {
+                self.seeds[p] = rotate_about_axis_f64(self.seeds[p], axis, theta);
+            }
+        }
+        // Rebuild mosaic and velocities
+        self.plate_id = assign_voronoi(grid, &self.seeds);
+        self.vel_en = velocities(grid, &self.plate_id, &self.pole_axis, &self.omega_rad_yr);
+    }
+
+    /// Maximum absolute angular speed (rad/yr) among plates.
+    pub fn max_abs_omega_rad_yr(&self) -> f64 {
+        let mut m = 0.0_f64;
+        for &w in &self.omega_rad_yr {
+            let a = (w as f64).abs();
+            if a > m {
+                m = a;
+            }
+        }
+        m
     }
 
     /// Spawn a new plate near `cell` by adding a seed/pole and reassigning a small local patch.
@@ -99,45 +152,96 @@ impl Plates {
 
 /// Compute per-cell 3D surface velocities (m/yr) using current `plate_id` and plate kinematics.
 pub fn velocity_field_m_per_yr(grid: &Grid, plates: &Plates, plate_id: &[u16]) -> Vec<[f32; 3]> {
-    let mut vel = vec![[0.0f32, 0.0f32, 0.0f32]; grid.cells];
-    for i in 0..grid.cells {
-        let r = [grid.pos_xyz[i][0] as f64, grid.pos_xyz[i][1] as f64, grid.pos_xyz[i][2] as f64];
-        let pid = plate_id[i] as usize;
-        let a = [
-            plates.pole_axis[pid][0] as f64,
-            plates.pole_axis[pid][1] as f64,
-            plates.pole_axis[pid][2] as f64,
-        ];
-        let omega = plates.omega_rad_yr[pid] as f64;
-        // linear velocity v = (omega * axis) × (R * r)
-        let w = [a[0] * omega, a[1] * omega, a[2] * omega];
-        let rp = [r[0] * RADIUS_M, r[1] * RADIUS_M, r[2] * RADIUS_M];
-        let v = cross(w, rp);
-        vel[i] = [v[0] as f32, v[1] as f32, v[2] as f32];
-    }
-    vel
+    let n = grid.cells;
+    // Precompute per-plate angular velocity vectors w = omega * axis (f64)
+    let wvec: Vec<[f64; 3]> = plates
+        .pole_axis
+        .iter()
+        .zip(plates.omega_rad_yr.iter())
+        .map(|(a, &w)| {
+            let ww = w as f64;
+            [a[0] as f64 * ww, a[1] as f64 * ww, a[2] as f64 * ww]
+        })
+        .collect();
+    let threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).clamp(1, 16);
+    let chunk = ((n + threads - 1) / threads).max(1);
+    let mut out = vec![[0.0f32; 3]; n];
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let start = t * chunk;
+            if start >= n {
+                break;
+            }
+            let end = (start + chunk).min(n);
+            let pos = grid.pos_xyz[start..end].to_vec();
+            let pid_slice = plate_id[start..end].to_vec();
+            let wvec = wvec.clone();
+            let handle = scope.spawn(move || {
+                let mut loc = vec![[0.0f32; 3]; pos.len()];
+                for k in 0..pos.len() {
+                    let r = [pos[k][0] as f64, pos[k][1] as f64, pos[k][2] as f64];
+                    let pid = pid_slice[k] as usize;
+                    let w = wvec[pid];
+                    let rp = [r[0] * RADIUS_M, r[1] * RADIUS_M, r[2] * RADIUS_M];
+                    let v = cross(w, rp);
+                    loc[k] = [v[0] as f32, v[1] as f32, v[2] as f32];
+                }
+                (start, loc)
+            });
+            let (s0, loc) = handle.join().unwrap();
+            out[s0..s0 + loc.len()].copy_from_slice(&loc);
+        }
+    });
+    out
 }
 
 /// Compute per-cell local east/north velocity components (m/yr) for the given `plate_id`.
 pub fn velocity_en_m_per_yr(grid: &Grid, plates: &Plates, plate_id: &[u16]) -> Vec<[f32; 2]> {
-    let mut vel_en = vec![[0.0f32, 0.0f32]; grid.cells];
-    for i in 0..grid.cells {
-        let p = [grid.pos_xyz[i][0] as f64, grid.pos_xyz[i][1] as f64, grid.pos_xyz[i][2] as f64];
-        let pid = plate_id[i] as usize;
-        let a = [
-            plates.pole_axis[pid][0] as f64,
-            plates.pole_axis[pid][1] as f64,
-            plates.pole_axis[pid][2] as f64,
-        ];
-        let omega = plates.omega_rad_yr[pid] as f64;
-        let w = [a[0] * omega, a[1] * omega, a[2] * omega];
-        let rp = [p[0] * RADIUS_M, p[1] * RADIUS_M, p[2] * RADIUS_M];
-        let v = cross(w, rp);
-        let east = normalize(cross([0.0, 0.0, 1.0], p));
-        let north = normalize(cross(p, east));
-        vel_en[i] = [dot(v, east) as f32, dot(v, north) as f32];
-    }
-    vel_en
+    let n = grid.cells;
+    // Precompute per-plate angular velocity vectors w = omega * axis (f64)
+    let wvec: Vec<[f64; 3]> = plates
+        .pole_axis
+        .iter()
+        .zip(plates.omega_rad_yr.iter())
+        .map(|(a, &w)| {
+            let ww = w as f64;
+            [a[0] as f64 * ww, a[1] as f64 * ww, a[2] as f64 * ww]
+        })
+        .collect();
+    let threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).clamp(1, 16);
+    let chunk = ((n + threads - 1) / threads).max(1);
+    let mut out = vec![[0.0f32; 2]; n];
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let start = t * chunk;
+            if start >= n {
+                break;
+            }
+            let end = (start + chunk).min(n);
+            let pos = grid.pos_xyz[start..end].to_vec();
+            let east = grid.east_hat[start..end].to_vec();
+            let north = grid.north_hat[start..end].to_vec();
+            let pid_slice = plate_id[start..end].to_vec();
+            let wvec = wvec.clone();
+            let handle = scope.spawn(move || {
+                let mut loc = vec![[0.0f32; 2]; pos.len()];
+                for k in 0..pos.len() {
+                    let p = [pos[k][0] as f64, pos[k][1] as f64, pos[k][2] as f64];
+                    let pid = pid_slice[k] as usize;
+                    let w = wvec[pid];
+                    let rp = [p[0] * RADIUS_M, p[1] * RADIUS_M, p[2] * RADIUS_M];
+                    let v = cross(w, rp);
+                    let eh = [east[k][0] as f64, east[k][1] as f64, east[k][2] as f64];
+                    let nh = [north[k][0] as f64, north[k][1] as f64, north[k][2] as f64];
+                    loc[k] = [dot(v, eh) as f32, dot(v, nh) as f32];
+                }
+                (start, loc)
+            });
+            let (s0, loc) = handle.join().unwrap();
+            out[s0..s0 + loc.len()].copy_from_slice(&loc);
+        }
+    });
+    out
 }
 
 /// Rotate a unit vector `r` about `axis` (unit) by angle `theta` (radians) using Rodrigues formula.
@@ -309,9 +413,8 @@ fn velocities(
         // Linear velocity v = w × (R * p)
         let rp = [p[0] * RADIUS_M, p[1] * RADIUS_M, p[2] * RADIUS_M];
         let v = cross(w, rp);
-        // Project to local east/north basis at p
-        let east = normalize(cross([0.0, 0.0, 1.0], p));
-        let north = normalize(cross(p, east));
+        // Project to local east/north basis at p via geo::local_basis
+        let (east, north) = crate::geo::local_basis(p);
         let ve = dot(v, east) as f32;
         let vn = dot(v, north) as f32;
         vel[i] = [ve, vn];
@@ -334,4 +437,50 @@ fn normalize(v: [f64; 3]) -> [f64; 3] {
         return [0.0, 0.0, 0.0];
     }
     [v[0] / n, v[1] / n, v[2] / n]
+}
+
+/// Derive per-plate kinds from area-weighted continental fraction.
+pub fn derive_kinds(
+    grid: &Grid,
+    plate_id: &[u16],
+    c: &[f32],
+    frac_thresh: f32,
+    c_thresh: f32,
+) -> Vec<PlateKind> {
+    let nplates = plate_id.iter().copied().map(|p| p as usize).max().unwrap_or(0) + 1;
+    let mut a_tot = vec![0.0f64; nplates];
+    let mut a_con = vec![0.0f64; nplates];
+    for i in 0..grid.cells.min(plate_id.len()).min(c.len()) {
+        let pid = plate_id[i] as usize;
+        let a = grid.area[i] as f64;
+        a_tot[pid] += a;
+        if c[i] > c_thresh {
+            a_con[pid] += a;
+        }
+    }
+    let mut kinds = vec![PlateKind::Oceanic; nplates];
+    for pid in 0..nplates {
+        let frac = if a_tot[pid] > 0.0 { a_con[pid] / a_tot[pid] } else { 0.0 } as f32;
+        kinds[pid] = if frac > frac_thresh { PlateKind::Continental } else { PlateKind::Oceanic };
+    }
+    kinds
+}
+
+/// Rodrigues rotation of a unit vector `u` about unit `axis` by `theta` radians (f64).
+pub(crate) fn rotate_about_axis_f64(u: [f64; 3], axis: [f64; 3], theta: f64) -> [f64; 3] {
+    // Normalize axis defensively
+    let a = normalize(axis);
+    let (s, c) = theta.sin_cos();
+    // a*(a·u)*(1-c) + u*c + (a×u)*s
+    let adotu = a[0] * u[0] + a[1] * u[1] + a[2] * u[2];
+    let axu = cross(a, u);
+    let term1 = [a[0] * adotu * (1.0 - c), a[1] * adotu * (1.0 - c), a[2] * adotu * (1.0 - c)];
+    let term2 = [u[0] * c, u[1] * c, u[2] * c];
+    let term3 = [axu[0] * s, axu[1] * s, axu[2] * s];
+    let out = [
+        term1[0] + term2[0] + term3[0],
+        term1[1] + term2[1] + term3[1],
+        term1[2] + term2[2] + term3[2],
+    ];
+    normalize(out)
 }

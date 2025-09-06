@@ -262,6 +262,12 @@ pub struct OverlayState {
     pub simple_palette: u8, // 0=Hyps, 1=Biomes
     pub simple_f: u32,
 
+    // Simulation parameter profile & dt (UI-2)
+    pub sim_dt_myr: f32,
+    pub profile_idx: u8, // 0=Conservative,1=Standard,2=Aggressive
+    pub show_profile_confirm: bool,
+    pub pending_profile: u8,
+
     // Simple-mode realtime run (T-505)
     pub run_active: bool,
     pub run_target_myr: f64,
@@ -530,6 +536,11 @@ impl Default for OverlayState {
             simple_t_end_myr: 500.0,
             simple_palette: 0,
             simple_f: 64,
+
+            sim_dt_myr: 1.0,
+            profile_idx: 1,
+            show_profile_confirm: false,
+            pending_profile: 1,
 
             run_active: false,
             run_target_myr: 0.0,
@@ -1724,6 +1735,84 @@ pub fn draw_advanced_layers(
                 painter.add(s);
             }
         }
+    }
+    // On-screen diagnostics block (UI-1)
+    if ov.legend_on {
+        let pad = 8.0;
+        let w = 260.0;
+        let h = 88.0;
+        let r =
+            Rect::from_min_size(Pos2::new(rect.left() + pad, rect.top() + pad), egui::vec2(w, h));
+        // Compute boundary percentages by class (edge count proxy)
+        let mut n_r = 0u32;
+        let mut n_s = 0u32;
+        let mut n_t = 0u32;
+        for &(_u, _v, cls) in &world.boundaries.edges {
+            match cls {
+                1 => n_r += 1,
+                2 => n_s += 1,
+                3 => n_t += 1,
+                _ => {}
+            }
+        }
+        let tot = (n_r + n_s + n_t).max(1) as f64;
+        let pr = 100.0 * (n_r as f64) / tot;
+        let ps = 100.0 * (n_s as f64) / tot;
+        let pt = 100.0 * (n_t as f64) / tot;
+        // Land fraction (from elevation)
+        let mut land_area = 0.0f64;
+        let mut area_sum = 0.0f64;
+        for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) {
+            area_sum += a as f64;
+            if (-d + world.sea.eta_m) > 0.0 {
+                land_area += a as f64;
+            }
+        }
+        let land_pct = if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 };
+        // Oceanized cores proxy: C below threshold
+        let mut oceanized = 0u32;
+        for &c in &world.c {
+            if c < 0.15 {
+                oceanized += 1;
+            }
+        }
+        // Cap-hit %: read last DL-1 CSV if any (optional)
+        let (cap_comp, cap_thc) = if let Ok(s) = std::fs::read_to_string("out/dl1_metrics.csv") {
+            let mut last = None;
+            for line in s.lines() {
+                if line.starts_with("t_myr") {
+                    continue;
+                }
+                if !line.trim().is_empty() {
+                    last = Some(line);
+                }
+            }
+            if let Some(line) = last {
+                let cols: Vec<&str> = line.split(',').collect();
+                if cols.len() >= 7 {
+                    (cols[5].parse::<u32>().unwrap_or(0), cols[6].parse::<u32>().unwrap_or(0))
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        // Panel
+        painter.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_gray(200)));
+        let text = format!(
+            "bndry: R={:.0}% S={:.0}% T={:.0}%  |  land={:.1}%  |  oceanized={}  |  caps: comp={} thc={}",
+            pr, ps, pt, land_pct, oceanized, cap_comp, cap_thc
+        );
+        painter.text(
+            Pos2::new(r.left() + 8.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(14.0),
+            Color32::WHITE,
+        );
     }
 }
 

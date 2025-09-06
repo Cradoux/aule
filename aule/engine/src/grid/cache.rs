@@ -124,7 +124,7 @@ impl Grid {
             n2.push(v);
         }
 
-        Ok(Self {
+        let mut grid = Self {
             cells,
             pos_xyz,
             latlon,
@@ -132,10 +132,16 @@ impl Grid {
             n1,
             n2,
             frequency,
+            east_hat: Vec::new(),
+            north_hat: Vec::new(),
+            lengths_n1_rad: Vec::new(),
             face_offsets: Vec::new(),
             face_vert_ids: Vec::new(),
             face_corners: Vec::new(),
-        })
+        };
+        // Populate precomputed bases/lengths after load
+        grid.precompute_local_bases_and_lengths();
+        Ok(grid)
     }
 }
 

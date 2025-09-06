@@ -8,6 +8,7 @@
 //! - Oceanization reduces C inside core bands toward an `ocean_thresh`; this is a crude proxy for
 //!   continental breakup and does not conserve crustal mass.
 
+use crate::plates::PlateKind;
 use crate::{
     boundaries::{Boundaries, EdgeClass},
     geo,
@@ -73,6 +74,10 @@ pub struct RiftingStats {
     pub oceanized_cells: usize,
     /// Cells with age reset due to core oceanization
     pub age_reset_cells: usize,
+    /// Cells within bands where thinning rate was softened by RL-2
+    pub cells_rate_softened: usize,
+    /// Cells within shoulder uplift where uplift rate was softened
+    pub cells_uplift_softened: usize,
 }
 
 /// Apply rifting to continental divergent zones.
@@ -82,6 +87,7 @@ pub fn apply_rifting(
     boundaries: &Boundaries,
     plate_id: &[u16],
     _vel_m_per_yr: &[[f32; 3]],
+    _plates_kind: &[PlateKind],
     c: &mut [f32],
     th_c_m: &mut [f32],
     age_ocean_myr: &mut [f32],
@@ -204,17 +210,21 @@ pub fn apply_rifting(
     let w_core_m = (p.w_core_km as f64) * KM;
     let w_taper_m = (p.w_taper_km as f64) * KM;
     let w_bulge_m = (p.w_bulge_km as f64) * KM;
-    let mut r_thin = (p.k_thin as f64) * (vd_mean * 1.0e6);
-    // Safety: clamp thinning rate to realistic maximum (m/Myr)
-    // With 35 mm/yr opening and k_thin=0.0025 → ~87.5 m/Myr; allow up to 150 m/Myr
+    // RL-3: derive thinning rate from extension and characteristic width W_r
+    let w_r_km = (p.w_core_km as f64).max(1.0).clamp(60.0, 120.0);
+    let w_r_m = w_r_km * KM;
+    let mut r_thin = (vd_mean * 1.0e6) / w_r_m; // m/Myr
+                                                // RL-2: Apply smooth saturator to rate (m/Myr)
     let r_thin_cap_m_per_myr: f64 = 150.0;
-    if r_thin.abs() > r_thin_cap_m_per_myr {
+    let r_thin_soft = crate::util::soft_cap_f64(r_thin, r_thin_cap_m_per_myr);
+    let rate_softened_glob = (r_thin_soft.abs() + 1e-9) < r_thin.abs();
+    if r_thin.abs() > r_thin_cap_m_per_myr * 0.99 {
         println!(
-            "[cap] rifting: thinning rate capped (raw={:.1} m/Myr, cap={:.0} m/Myr)",
-            r_thin, r_thin_cap_m_per_myr
+            "[softcap] rifting: rate softened raw={:.1} → {:.1} m/Myr (cap={:.0})",
+            r_thin, r_thin_soft, r_thin_cap_m_per_myr
         );
-        r_thin = r_thin.signum() * r_thin_cap_m_per_myr;
     }
+    r_thin = r_thin_soft;
     let dt = dt_myr.max(0.0);
 
     let mut dthc_area = 0.0f64;
@@ -225,6 +235,8 @@ pub fn apply_rifting(
     let mut cells_margin = 0usize;
     let mut oceanized_cells = 0usize;
     let mut age_reset_cells = 0usize;
+    let mut cells_rate_softened = 0usize;
+    let mut cells_uplift_softened = 0usize;
 
     for i in 0..n {
         let dl = dist_left[i];
@@ -261,41 +273,34 @@ pub fn apply_rifting(
         if w_sum > 0.0 {
             // thinning distributed by side weights
             let w_side = w_sum; // symmetric application
-                                // Per-step cap on crustal thickness change (|Δth_c| ≤ 75 m)
-            let dthc_raw = -r_thin * dt * w_side;
-            let dthc_cap = 300.0f64;
-            let dthc_step = dthc_raw.clamp(-dthc_cap, dthc_cap);
-            if dthc_raw.abs() > dthc_cap {
-                println!(
-                    "[cap] rifting: crustal thinning capped (raw={:.1} m, cap={:.0} m)",
-                    dthc_raw, dthc_cap
-                );
+                                // RL-2+RL-3: integrate softened width-derived rate; scale by local thickness factor
+            let thickness_factor = (th_c_m[i] as f64 / 35_000.0).clamp(0.5, 2.0);
+            let dthc_raw = -(r_thin * thickness_factor) * dt * w_side;
+            dthc += dthc_raw;
+            if rate_softened_glob && w_side > 0.0 {
+                cells_rate_softened += 1;
             }
-            dthc += dthc_step;
-            let th_new =
-                (th_c_m[i] as f64 + dthc_step).clamp(p.thc_min_m as f64, p.thc_max_m as f64);
+            // Always allow minimum 0 m to avoid instantaneous +25 km jumps when C increases
+            let th_new = (th_c_m[i] as f64 + dthc_raw).clamp(0.0, p.thc_max_m as f64);
             // Use step-local removal only, not absolute difference when clamped, to avoid runaway subsidence
-            let removed_step = (-dthc_step).max(0.0);
+            let removed_step = (-dthc_raw).max(0.0);
             th_c_m[i] = th_new as f32;
             // Airy-like subsidence; positive down
             let subs_raw = (p.alpha_subs as f64) * removed_step;
-            let subs_cap = 200.0f64;
-            let subs_capped = subs_raw.clamp(-subs_cap, subs_cap);
-            if subs_raw.abs() > subs_cap {
-                println!(
-                    "[cap] rifting: subsidence capped (raw={:.1} m, cap={:.0} m)",
-                    subs_raw, subs_cap
-                );
-            }
-            subs += subs_capped;
+            // RL-2: soften subsidence rate as well (map to per-step Δ via dt)
+            let subs_cap_m_per_myr = 200.0f64 / dt.max(1e-12);
+            let subs_rate_soft =
+                crate::util::soft_cap_f64(subs_raw / dt.max(1e-12), subs_cap_m_per_myr);
+            let subs_step = subs_rate_soft * dt;
+            subs += subs_step;
             depth_m[i] = (depth_m[i] + subs as f32).clamp(-8000.0, 8000.0);
             dthc_area += dthc * (area_m2[i] as f64);
             subs_area += subs * (area_m2[i] as f64);
             dthc_min = dthc_min.min(dthc);
             subs_max = subs_max.max(subs);
 
-            // Oceanization at core
-            if w_sum >= 0.9 {
+            // Oceanization at core only when both sides are within core (true boundary-spanning rift)
+            if in_core_l && in_core_r {
                 let c_before = c[i] as f64;
                 let c_after = (c_before - (p.k_c_oceanize as f64) * dt).max(0.0);
                 c[i] = c_after as f32;
@@ -312,14 +317,12 @@ pub fn apply_rifting(
         if p.enable_shoulder && (in_bulge_l || in_bulge_r) {
             let w_b: f64 =
                 (if in_bulge_l { 1.0 } else { 0.0 }) + (if in_bulge_r { 1.0 } else { 0.0 });
-            let uplift_raw = (p.beta_shoulder as f64) * r_thin * dt * w_b.min(1.0);
-            let uplift_cap = 200.0f64;
-            let uplift = uplift_raw.clamp(-uplift_cap, uplift_cap);
-            if uplift_raw.abs() > uplift_cap {
-                println!(
-                    "[cap] rifting: shoulder uplift capped (raw={:.1} m, cap={:.0} m)",
-                    uplift_raw, uplift_cap
-                );
+            let uplift_raw = (p.beta_shoulder as f64) * (r_thin) * dt * w_b.min(1.0);
+            let uplift_rate = uplift_raw / dt.max(1e-12);
+            let uplift_rate_soft = crate::util::soft_cap_f64(uplift_rate, 200.0f64 / dt.max(1e-12));
+            let uplift = uplift_rate_soft * dt;
+            if (uplift_rate_soft.abs() + 1e-9) < uplift_rate.abs() {
+                cells_uplift_softened += 1;
             }
             depth_m[i] = (depth_m[i] - uplift as f32).clamp(-8000.0, 8000.0);
         }
@@ -336,6 +339,8 @@ pub fn apply_rifting(
         subs_max_m: subs_max as f32,
         oceanized_cells,
         age_reset_cells,
+        cells_rate_softened,
+        cells_uplift_softened,
     };
     println!(
         "[rifting] edges={} core={} margin={} oceanized={} age0={} | dthc mean/min={:.1}/{:.1} m subs mean/max={:.1}/{:.1} m (dt={:.1} Myr)",

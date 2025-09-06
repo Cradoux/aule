@@ -37,6 +37,7 @@ fn cc_gates_by_cmin() {
         &mut world.depth_m,
         &p,
         1.0,
+        &world.plates.kind,
     );
     // Oceanic side suppresses effect => most cells unchanged in this crude test
     let mut changed = 0usize;

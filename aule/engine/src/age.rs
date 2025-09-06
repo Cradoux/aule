@@ -5,6 +5,7 @@ use std::collections::BinaryHeap;
 
 use crate::boundaries::Boundaries;
 use crate::geo;
+use crate::geo::dot;
 use crate::grid::Grid;
 
 const RADIUS_M: f64 = 6_371_000.0;
@@ -208,4 +209,177 @@ pub fn compute_age_and_bathymetry(
     }
 
     AgeOutputs { age_myr, depth_m, min_max_age: (amin, amax), min_max_depth: (dmin, dmax) }
+}
+
+/// Exact rigid advection of the age field under plate rotation.
+/// Back-rotate current cell centers and sample nearest source into stage, then publish.
+pub fn rigid_advect_age(
+    grid: &Grid,
+    plates: &crate::plates::Plates,
+    dt_years: f64,
+    age_myr: &mut [f32],
+    age_stage: &mut [f32],
+) {
+    let n = grid.cells.min(age_myr.len()).min(age_stage.len());
+    let src = age_myr.to_vec();
+    let threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).clamp(1, 16);
+    let chunk = ((n + threads - 1) / threads).max(1);
+    let mut assembled: Vec<f32> = vec![0.0; n];
+    let src_ref = &src;
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let start = t * chunk;
+            if start >= n {
+                break;
+            }
+            let end = (start + chunk).min(n);
+            let src_ref = src_ref;
+            let handle = scope.spawn(move || {
+                let mut loc: Vec<f32> = vec![0.0; end - start];
+                for k in 0..(end - start) {
+                    let i = start + k;
+                    let pid = plates.plate_id.get(i).copied().unwrap_or(0) as usize;
+                    let axis = [
+                        plates.pole_axis[pid][0] as f64,
+                        plates.pole_axis[pid][1] as f64,
+                        plates.pole_axis[pid][2] as f64,
+                    ];
+                    let theta = -(plates.omega_rad_yr[pid] as f64) * dt_years;
+                    let r = [
+                        grid.pos_xyz[i][0] as f64,
+                        grid.pos_xyz[i][1] as f64,
+                        grid.pos_xyz[i][2] as f64,
+                    ];
+                    let src_pos = crate::plates::rotate_about_axis_f64(r, axis, theta);
+                    let mut idx = i;
+                    let mut best = dot(
+                        [
+                            grid.pos_xyz[idx][0] as f64,
+                            grid.pos_xyz[idx][1] as f64,
+                            grid.pos_xyz[idx][2] as f64,
+                        ],
+                        src_pos,
+                    );
+                    loop {
+                        let mut improved = false;
+                        for &vn in &grid.n1[idx] {
+                            let j = vn as usize;
+                            let d = dot(
+                                [
+                                    grid.pos_xyz[j][0] as f64,
+                                    grid.pos_xyz[j][1] as f64,
+                                    grid.pos_xyz[j][2] as f64,
+                                ],
+                                src_pos,
+                            );
+                            if d > best || ((d - best).abs() <= f64::EPSILON && j < idx) {
+                                best = d;
+                                idx = j;
+                                improved = true;
+                            }
+                        }
+                        if !improved {
+                            break;
+                        }
+                    }
+                    loc[k] = src_ref[idx];
+                }
+                (start, loc)
+            });
+            let (s0, loc) = handle.join().unwrap();
+            assembled[s0..s0 + loc.len()].copy_from_slice(&loc);
+        }
+    });
+    age_stage[..n].copy_from_slice(&assembled[..n]);
+    age_myr[..n].copy_from_slice(&assembled[..n]);
+}
+
+/// One-shot rigid advection from a snapshot slice into the output age array.
+pub fn rigid_advect_age_from(
+    grid: &Grid,
+    plates: &crate::plates::Plates,
+    dt_years: f64,
+    age_src: &[f32],
+    age_out: &mut [f32],
+) {
+    let n = grid.cells.min(age_src.len()).min(age_out.len());
+    let threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).clamp(1, 16);
+    let chunk = ((n + threads - 1) / threads).max(1);
+    let mut assembled: Vec<f32> = vec![0.0; n];
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let start = t * chunk;
+            if start >= n {
+                break;
+            }
+            let end = (start + chunk).min(n);
+            let age_src_ref = age_src;
+            let handle = scope.spawn(move || {
+                let mut loc: Vec<f32> = vec![0.0; end - start];
+                for k in 0..(end - start) {
+                    let i = start + k;
+                    let pid = plates.plate_id.get(i).copied().unwrap_or(0) as usize;
+                    let axis = [
+                        plates.pole_axis[pid][0] as f64,
+                        plates.pole_axis[pid][1] as f64,
+                        plates.pole_axis[pid][2] as f64,
+                    ];
+                    let theta = -(plates.omega_rad_yr[pid] as f64) * dt_years;
+                    let r = [
+                        grid.pos_xyz[i][0] as f64,
+                        grid.pos_xyz[i][1] as f64,
+                        grid.pos_xyz[i][2] as f64,
+                    ];
+                    let src_pos = crate::plates::rotate_about_axis_f64(r, axis, theta);
+                    let mut idx = i;
+                    let mut best = dot(
+                        [
+                            grid.pos_xyz[idx][0] as f64,
+                            grid.pos_xyz[idx][1] as f64,
+                            grid.pos_xyz[idx][2] as f64,
+                        ],
+                        src_pos,
+                    );
+                    loop {
+                        let mut improved = false;
+                        for &vn in &grid.n1[idx] {
+                            let j = vn as usize;
+                            let d = dot(
+                                [
+                                    grid.pos_xyz[j][0] as f64,
+                                    grid.pos_xyz[j][1] as f64,
+                                    grid.pos_xyz[j][2] as f64,
+                                ],
+                                src_pos,
+                            );
+                            if d > best || ((d - best).abs() <= f64::EPSILON && j < idx) {
+                                best = d;
+                                idx = j;
+                                improved = true;
+                            }
+                        }
+                        if !improved {
+                            break;
+                        }
+                    }
+                    loc[k] = age_src_ref[idx];
+                }
+                (start, loc)
+            });
+            let (s0, loc) = handle.join().unwrap();
+            assembled[s0..s0 + loc.len()].copy_from_slice(&loc);
+        }
+    });
+    age_out[..n].copy_from_slice(&assembled[..n]);
+}
+
+/// Increment age on oceanic cells only (C below threshold), and clamp to non-negative.
+pub fn increment_oceanic_age(c: &[f32], age_myr: &mut [f32], dt_myr: f64) {
+    let n = c.len().min(age_myr.len());
+    for i in 0..n {
+        let is_oceanic = c[i] < 0.15;
+        if is_oceanic {
+            age_myr[i] = (age_myr[i] as f64 + dt_myr).max(0.0) as f32;
+        }
+    }
 }

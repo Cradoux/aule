@@ -8,6 +8,8 @@ pub mod age;
 /// Plate boundary classification.
 pub mod boundaries;
 pub use boundaries::{Boundaries, BoundaryStats, EdgeClass, EdgeKin};
+/// CFL (Courant-Friedrichs-Lewy) limiter for numerical stability.
+pub mod cfl;
 /// Flexure load assembly helpers.
 pub mod flexure_loads;
 
@@ -68,10 +70,39 @@ pub use world::{SimplePreset, SimpleReport};
 pub mod pipeline;
 /// Transform pull-apart/restraining bands (CPU pass).
 pub mod transforms;
+/// Units-of-measure lightweight wrappers.
+pub mod units;
 /// Small utilities.
 pub mod util;
 /// World state.
 pub mod world;
+
+/// Centralized physical constants (SI units) for densities and gravity.
+#[derive(Clone, Copy, Debug)]
+pub struct PhysConsts {
+    /// Water density (kg/m^3)
+    pub rho_w_kg_per_m3: f32,
+    /// Continental crust density (kg/m^3)
+    pub rho_c_kg_per_m3: f32,
+    /// Mantle density (kg/m^3)
+    pub rho_m_kg_per_m3: f32,
+    /// Air density (kg/m^3)
+    pub rho_air_kg_per_m3: f32,
+    /// Gravity (m/s^2)
+    pub g_m_per_s2: f32,
+}
+
+impl Default for PhysConsts {
+    fn default() -> Self {
+        Self {
+            rho_w_kg_per_m3: 1030.0,
+            rho_c_kg_per_m3: 2850.0,
+            rho_m_kg_per_m3: 3300.0,
+            rho_air_kg_per_m3: 1.2,
+            g_m_per_s2: 9.81,
+        }
+    }
+}
 
 /// Returns the engine version string from Cargo metadata.
 pub fn version() -> &'static str {

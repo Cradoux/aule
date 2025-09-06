@@ -1,8 +1,4 @@
-use engine::{
-    boundaries::Boundaries,
-    geo::{cross, dot, normalize},
-    grid::Grid,
-};
+use engine::{boundaries::Boundaries, geo, grid::Grid};
 
 #[test]
 fn determinism_symmetry_basic() {
@@ -72,17 +68,16 @@ fn edge_kin_consistency_spotcheck() {
             g.pos_xyz[v as usize][1] as f64,
             g.pos_xyz[v as usize][2] as f64,
         ];
-        let rm = normalize([ru[0] + rv[0], ru[1] + rv[1], ru[2] + rv[2]]);
-        let ggc = normalize(cross(ru, rv));
-        let t_hat = normalize(cross(ggc, rm));
-        let mut n_hat = normalize(cross(rm, t_hat));
-        if dot(n_hat, [rv[0] - ru[0], rv[1] - ru[1], rv[2] - ru[2]]) < 0.0 {
+        let rm = geo::normalize([ru[0] + rv[0], ru[1] + rv[1], ru[2] + rv[2]]);
+        let ggc = geo::normalize(geo::cross(ru, rv));
+        let t_hat = geo::normalize(geo::cross(ggc, rm));
+        let mut n_hat = geo::normalize(geo::cross(rm, t_hat));
+        if geo::dot(n_hat, [rv[0] - ru[0], rv[1] - ru[1], rv[2] - ru[2]]) < 0.0 {
             n_hat = [-n_hat[0], -n_hat[1], -n_hat[2]];
         }
         let en_to_w = |idx: usize| {
             let r = [g.pos_xyz[idx][0] as f64, g.pos_xyz[idx][1] as f64, g.pos_xyz[idx][2] as f64];
-            let e = normalize(cross([0.0, 0.0, 1.0], r));
-            let n = normalize(cross(r, e));
+            let (e, n) = geo::local_basis(r);
             [
                 (plates.vel_en[idx][0] as f64) * e[0] + (plates.vel_en[idx][1] as f64) * n[0],
                 (plates.vel_en[idx][0] as f64) * e[1] + (plates.vel_en[idx][1] as f64) * n[1],
@@ -92,8 +87,8 @@ fn edge_kin_consistency_spotcheck() {
         let vu = en_to_w(u as usize);
         let vv = en_to_w(v as usize);
         let dv = [vu[0] - vv[0], vu[1] - vv[1], vu[2] - vv[2]];
-        let n = dot(dv, n_hat) as f32;
-        let t = dot(dv, t_hat) as f32;
+        let n = geo::dot(dv, n_hat) as f32;
+        let t = geo::dot(dv, t_hat) as f32;
         assert!((n - ek.n_m_per_yr).abs() < 1e-9);
         assert!((t - ek.t_m_per_yr).abs() < 1e-9);
     }

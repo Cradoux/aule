@@ -24,6 +24,13 @@ pub struct Grid {
     pub n2: Vec<SmallVec<[u32; 12]>>,
     /// Icosphere subdivision frequency
     pub frequency: u32,
+    /// Precomputed local east unit vectors per cell (f64→f32)
+    pub east_hat: Vec<[f32; 3]>,
+    /// Precomputed local north unit vectors per cell (f64→f32)
+    pub north_hat: Vec<[f32; 3]>,
+    /// Precomputed great-circle edge lengths (meters on unit sphere → radians) for each n1 neighbor.
+    /// Parallel to `n1`: for each cell i, lengths_n1[i][k] matches neighbor n1[i][k].
+    pub lengths_n1_rad: Vec<SmallVec<[f32; 6]>>,
     // T-902A: flattened per-face vertex id tables and offsets for Class-I lattice
     face_offsets: Vec<u32>,
     face_vert_ids: Vec<u32>,
@@ -363,6 +370,9 @@ impl Grid {
             n1,
             n2,
             frequency,
+            east_hat: Vec::new(),
+            north_hat: Vec::new(),
+            lengths_n1_rad: Vec::new(),
             face_offsets,
             face_vert_ids,
             face_corners,
@@ -395,6 +405,70 @@ impl Grid {
         let row_base = |ii: u32| -> u32 { ii * (f + 1) - (ii * (ii - 1)) / 2 };
         let base = self.face_offsets[face] + row_base(i) + j;
         self.face_vert_ids[base as usize] as usize
+    }
+
+    /// Mean cell "angle scale" on the unit sphere (radians).
+    ///
+    /// Approximates a typical edge length by sqrt(mean area per cell in steradians).
+    pub fn mean_cell_angle_rad(&self) -> f64 {
+        if self.cells == 0 {
+            return 0.0;
+        }
+        let sum_area: f64 = self.area.iter().map(|&a| a as f64).sum(); // steradians
+        (sum_area / (self.cells as f64)).sqrt()
+    }
+
+    /// Populate per-cell local bases (east,north) and n1 edge lengths (in radians on unit sphere).
+    /// Idempotent and deterministic; safe to call multiple times. Heavy compute done once at startup.
+    pub fn precompute_local_bases_and_lengths(&mut self) {
+        if !self.east_hat.is_empty()
+            && !self.north_hat.is_empty()
+            && !self.lengths_n1_rad.is_empty()
+        {
+            return;
+        }
+        let n = self.cells;
+        let mut east: Vec<[f32; 3]> = Vec::with_capacity(n);
+        let mut north: Vec<[f32; 3]> = Vec::with_capacity(n);
+        for i in 0..n {
+            let r =
+                [self.pos_xyz[i][0] as f64, self.pos_xyz[i][1] as f64, self.pos_xyz[i][2] as f64];
+            // Local basis via a single geo utility (same as crate::geo::local_basis)
+            // e = normalize(ẑ × r), n = r × e (ensures right-handed and unit)
+            let z = [0.0f64, 0.0f64, 1.0f64];
+            let ez = cross(z, r);
+            let mut ehat = normalize3(ez);
+            // If near poles where ez≈0, pick x̂×r as fallback
+            if (ehat[0] * ehat[0] + ehat[1] * ehat[1] + ehat[2] * ehat[2]) < 1e-24 {
+                ehat = normalize3(cross([1.0, 0.0, 0.0], r));
+            }
+            let nh = cross(r, ehat);
+            let nh = normalize3(nh);
+            east.push([ehat[0] as f32, ehat[1] as f32, ehat[2] as f32]);
+            north.push([nh[0] as f32, nh[1] as f32, nh[2] as f32]);
+        }
+        let mut lengths: Vec<SmallVec<[f32; 6]>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut row: SmallVec<[f32; 6]> = SmallVec::new();
+            let pi =
+                [self.pos_xyz[i][0] as f64, self.pos_xyz[i][1] as f64, self.pos_xyz[i][2] as f64];
+            for &nj in &self.n1[i] {
+                let j = nj as usize;
+                let pj = [
+                    self.pos_xyz[j][0] as f64,
+                    self.pos_xyz[j][1] as f64,
+                    self.pos_xyz[j][2] as f64,
+                ];
+                // Great-circle arc length on unit sphere = acos(clamp(r_i·r_j,-1,1))
+                let dotv = (pi[0] * pj[0] + pi[1] * pj[1] + pi[2] * pj[2]).clamp(-1.0, 1.0);
+                let ang = dotv.acos().max(0.0);
+                row.push(ang as f32);
+            }
+            lengths.push(row);
+        }
+        self.east_hat = east;
+        self.north_hat = north;
+        self.lengths_n1_rad = lengths;
     }
 }
 
