@@ -10,6 +10,8 @@ pub mod boundaries;
 pub use boundaries::{Boundaries, BoundaryStats, EdgeClass, EdgeKin};
 /// CFL (Courant-Friedrichs-Lewy) limiter for numerical stability.
 pub mod cfl;
+/// Configuration types shared between pipeline and world modules.
+pub mod config;
 /// Flexure load assembly helpers.
 pub mod flexure_loads;
 

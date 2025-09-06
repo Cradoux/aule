@@ -49,7 +49,7 @@ struct WorldSnapshot {
 
 #[derive(Clone, Debug)]
 enum SimCommand {
-    Step(engine::pipeline::PipelineCfg),
+    Step(engine::config::PipelineCfg),
     SyncWorld(WorldSnapshot),
     Stop,
 }
@@ -214,7 +214,7 @@ fn run_to_t_realtime(
     ctx: &egui::Context,
     world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
-    sp: &engine::world::StepParams,
+    sp: &engine::config::StepParams,
     t_end_myr: f64,
     max_steps_per_yield: u32,
 ) {
@@ -225,7 +225,7 @@ fn run_to_t_realtime(
                 break;
             }
             // Centralized pipeline step: solves eta to target land fraction
-            let cfg = engine::pipeline::PipelineCfg {
+            let cfg = engine::config::PipelineCfg {
                 dt_myr: ov.sim_dt_myr.max(0.0),
                 steps_per_frame: 1,
                 enable_flexure: sp.do_flexure,
@@ -2185,7 +2185,7 @@ fn main() {
                                                 // Frame-driven stepping (non-blocking)
                                                 if ov.stepper.playing && (world.clock.t_myr as f32) < ov.stepper.t_target_myr {
                                                     if !sim_busy.load(Ordering::SeqCst) {
-                                                        let cfg = engine::pipeline::PipelineCfg {
+                                                        let cfg = engine::config::PipelineCfg {
                                                             dt_myr: ov.sim_dt_myr.max(0.0),
                                                             steps_per_frame: 1,
                                                             enable_flexure: !ov.disable_flexure,
@@ -2642,7 +2642,7 @@ fn main() {
                         // Playback ticking
                         if ov.stepper.playing {
                             if !sim_busy.load(Ordering::SeqCst) {
-                                let cfg = engine::pipeline::PipelineCfg {
+                                let cfg = engine::config::PipelineCfg {
                                     dt_myr: ov.sim_dt_myr.max(0.0),
                                     steps_per_frame: 1,
                                     enable_flexure: !ov.disable_flexure,

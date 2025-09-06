@@ -14,7 +14,7 @@
 //!   `elev = -depth - eta` to get consistent coastlines.
 
 use crate::{
-    boundaries::Boundaries, continent, flexure_loads, grid::Grid, isostasy, plates::Plates, ridge,
+    boundaries::Boundaries, config::StepParams, continent, flexure_loads, grid::Grid, isostasy, plates::Plates, ridge,
     subduction, transforms,
 };
 use std::time::Instant;
@@ -571,52 +571,6 @@ impl World {
     }
 }
 
-/// Parameters that control a single evolution step.
-#[derive(Clone, Copy, Debug)]
-pub struct StepParams {
-    /// Time step in Myr
-    pub dt_myr: f64,
-    /// Apply elastic flexure response to current loads
-    pub do_flexure: bool,
-    /// Adjust global sea level to maintain reference ocean volume
-    pub do_isostasy: bool,
-    /// Apply transform pull-apart/restraining bands
-    pub do_transforms: bool,
-    /// Apply subduction trench/arc/backarc edits
-    pub do_subduction: bool,
-    /// Advect C/th_c and apply continental uplift to depth
-    pub do_continents: bool,
-    /// Reset age along divergent boundaries (ridge births)
-    pub do_ridge_birth: bool,
-    /// If true, auto re-baseline sea level after continents change.
-    pub auto_rebaseline_after_continents: bool,
-    /// Enable rigid plate motion (advect plate_id and update velocities)
-    pub do_rigid_motion: bool,
-    /// Enable collision orogeny (C–C sutures)
-    pub do_orogeny: bool,
-    /// Enable O–C accretion (arc/forearc growth)
-    pub do_accretion: bool,
-    /// Enable continental rifting and passive margins
-    pub do_rifting: bool,
-    /// Enable surface processes (erosion, diffusion, sediment transport/deposition)
-    pub do_surface: bool,
-    /// Parameter set for surface processes.
-    pub surface_params: crate::surface::SurfaceParams,
-    /// Cadence: run advection every N steps (>=1). When 1, runs each step.
-    pub advection_every: u32,
-    /// Cadence for transforms
-    pub transforms_every: u32,
-    /// Cadence for subduction
-    pub subduction_every: u32,
-    /// Cadence for flexure
-    pub flexure_every: u32,
-    /// Cadence for sea-level/isostasy
-    pub sea_every: u32,
-    /// Gate advection explicitly (combined with cadence)
-    pub do_advection: bool,
-    /// Gate sea-level explicitly (combined with cadence)
-    pub do_sea: bool,
-}
 
 /// Result summary for one step.
 #[derive(Clone, Copy, Debug)]

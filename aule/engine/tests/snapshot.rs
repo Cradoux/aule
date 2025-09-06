@@ -1,4 +1,4 @@
-use engine::{pipeline, world::World};
+use engine::{self, pipeline, world::World};
 
 fn read_last_dl1_record() -> Option<(u32, u32, u32, u32)> {
     let path = std::path::Path::new("out/dl1_metrics.csv");
@@ -38,7 +38,7 @@ fn snapshot_tiny_grid_one_step() {
     let mut eta: f32 = 0.0;
     let surf = pipeline::SurfaceFields { elevation_m: &mut elev, eta_m: &mut eta };
     // Configure to run subduction/transforms each step; enable flexure off for speed
-    let cfg = pipeline::PipelineCfg {
+    let cfg = engine::config::PipelineCfg {
         dt_myr: 1.0,
         steps_per_frame: 1,
         enable_flexure: false,
