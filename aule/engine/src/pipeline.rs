@@ -260,13 +260,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-6 } else { cfg.fb_gain }, // Use much larger default
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-3 } else { cfg.fb_gain }, // Use MUCH larger default (1000x)
         damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: if cfg.fb_max_domega == 0.0 { 5.0e-9 } else { cfg.fb_max_domega },
-        max_omega: if cfg.fb_max_omega == 0.0 { 2.0e-7 } else { cfg.fb_max_omega },
+        max_domega: if cfg.fb_max_domega == 0.0 { 1.0e-6 } else { cfg.fb_max_domega }, // Allow larger omega changes
+        max_omega: if cfg.fb_max_omega == 0.0 { 1.0e-5 } else { cfg.fb_max_omega }, // Allow much larger omega values
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
