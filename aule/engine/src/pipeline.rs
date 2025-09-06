@@ -195,6 +195,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
                 world.th_c_m[i] = 0.0;
             }
         }
+        
+        // CRITICAL FIX: Apply continental uplift to elevation field!
+        // This was the missing link - continental data was advected but never converted to elevation
+        let t_uplift0 = std::time::Instant::now();
+        crate::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+        let ms_continental_uplift = t_uplift0.elapsed().as_secs_f64() * 1000.0;
+        println!("[continental_uplift] Applied continental thickness to depth_m field ({:.2} ms)", ms_continental_uplift);
 
         // Rebuild velocities and kinds after motion
         world.v_en =
@@ -260,13 +267,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-3 } else { cfg.fb_gain }, // Use MUCH larger default (1000x)
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-7 } else { cfg.fb_gain }, // Use moderate default
         damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 1.0e-6, // Force larger omega changes (override config)
-        max_omega: 1.0e-5, // Force much larger omega values (override config)
+        max_domega: 1.0e-7, // Allow reasonable omega changes per step
+        max_omega: 1.0e-6, // Allow reasonable maximum omega values
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
