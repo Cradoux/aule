@@ -130,9 +130,10 @@ impl Boundaries {
                             if v <= u {
                                 continue;
                             }
-                            if pid_t[u as usize] == pid_t[v as usize] {
-                                continue;
-                            }
+                            // CRITICAL FIX: Don't skip intra-plate boundaries!
+                            // Geological processes happen based on stress, not plate IDs.
+                            // We need to detect ALL boundaries where significant geological activity occurs.
+                            let same_plate = pid_t[u as usize] == pid_t[v as usize];
                             let ru = pos_t[u as usize];
                             let rv = pos_t[v as usize];
                             let rm = crate::geo::normalize([
@@ -188,16 +189,27 @@ impl Boundaries {
                             let n = crate::geo::dot(dv, n_hat);
                             let t_signed = crate::geo::dot(dv, t_hat);
                             let t_abs = t_signed.abs();
+                            // Classify boundary type based on velocity gradients
                             let class = if n > tau {
-                                1u8
+                                1u8 // Divergent (opening/rifting)
                             } else if n < -tau {
-                                2u8
+                                2u8 // Convergent (closing/subduction)
                             } else if t_abs > n.abs() {
-                                3u8
+                                3u8 // Transform (shearing)
                             } else {
-                                0u8
+                                0u8 // No significant activity
                             };
-                            if class != 0 {
+                            
+                            // CRITICAL FIX: Only include boundaries with significant geological activity
+                            // For inter-plate boundaries: always include if different plates
+                            // For intra-plate boundaries: only include if significant stress (class != 0)
+                            let include_boundary = if same_plate {
+                                class != 0 && (n.abs() > tau * 2.0 || t_abs > tau * 2.0) // Higher threshold for intra-plate
+                            } else {
+                                true // Always include inter-plate boundaries
+                            };
+                            // Only add boundaries that meet our inclusion criteria
+                            if include_boundary && class != 0 {
                                 match class {
                                     1 => {
                                         st.divergent += 1;
