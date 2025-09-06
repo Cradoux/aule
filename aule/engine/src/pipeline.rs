@@ -163,9 +163,8 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         
         // CRITICAL FIX: Enforce mass conservation to prevent continental loss
         let mass_loss = c_sum_before - c_sum_after;
-        if mass_loss.abs() > 0.1 {
-            // Silently correct mass loss - this is normal due to interpolation
-            // Redistribute lost mass proportionally to existing continents
+        if mass_loss.abs() > 0.01 { // Be much more aggressive about mass conservation
+            // Aggressively correct mass loss - preserve continental material
             let total_existing = c_sum_after;
             if total_existing > 0.0 {
                 let correction_factor = c_sum_before / total_existing;
@@ -175,7 +174,9 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
                         *c_val = c_val.clamp(0.0, 1.0); // Keep in valid range
                     }
                 }
-                // Mass conservation correction applied
+                let final_sum = world.c.iter().sum::<f32>();
+                println!("[continental_conservation] MASS CORRECTED: loss={:.3}%, {:.1} -> {:.1}", 
+                         (mass_loss / c_sum_before) * 100.0, c_sum_before, final_sum);
             }
         }
         crate::age::rigid_advect_age_from(
@@ -187,10 +188,14 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         );
         crate::age::increment_oceanic_age(&world.c, &mut world.age_myr, cfg.dt_myr as f64);
         // Keep ridges wet: enforce ocean only where very young seafloor AND previously oceanic
-        // CRITICAL FIX: Protect continents from ridge destruction
+        // CRITICAL FIX: Protect continents from ridge destruction - be much more conservative
         for i in 0..world.grid.cells {
-            if world.age_myr[i] < 2.0 && c_src.get(i).copied().unwrap_or(0.0) < 0.1 && world.c[i] < 0.1 {
-                // Only destroy oceanic areas (both before AND after advection must be oceanic)
+            // Only destroy if ALL conditions met: young ridge + was oceanic + still oceanic + thin
+            if world.age_myr[i] < 1.0 && 
+               c_src.get(i).copied().unwrap_or(0.0) < 0.05 && 
+               world.c[i] < 0.05 &&
+               world.th_c_m[i] < 1000.0 {
+                // Only destroy truly oceanic areas with very strict criteria
                 world.c[i] = 0.0;
                 world.th_c_m[i] = 0.0;
             }
@@ -262,17 +267,21 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-8 } else { cfg.fb_gain }, // Increase gain to restore motion
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 5.0e-9 } else { cfg.fb_gain }, // Reduce gain to prevent saturation
         damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 1.0e-7, // Allow reasonable omega changes per step  
-        max_omega: 1.0e-6, // Allow reasonable maximum omega values for visible motion
+        max_domega: 5.0e-8, // Reduce omega changes to prevent saturation  
+        max_omega: 5.0e-7, // Reduce maximum omega to prevent runaway speeds
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
              fb_params.gain, fb_params.damp_per_myr, fb_params.k_conv, fb_params.k_div, fb_params.k_trans, fb_params.max_domega, fb_params.max_omega);
+    
+    // Debug: Monitor plate speed saturation
+    let pre_fb_max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let pre_fb_max_velocity = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
     // Store plate_id to avoid borrow checker issues
     let plate_id = world.plates.plate_id.clone();
     crate::force_balance::apply_force_balance(
@@ -288,10 +297,16 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     world.v_en = crate::plates::velocity_en_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
     let ms_force_balance = t_fb0.elapsed().as_secs_f64() * 1000.0;
     
-    // Debug: Check if force balance updated omega values
+    // Debug: Check if force balance updated omega values and detect saturation
     let max_omega_after = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
     let max_velocity_after = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
-    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr", max_omega_after, max_velocity_after);
+    
+    // Check for force balance saturation
+    let omega_saturated = (max_omega_after >= fb_params.max_omega * 0.95);
+    
+    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}", 
+             max_omega_after, max_velocity_after,
+             if omega_saturated { " [SATURATED - plates at speed limit]" } else { "" });
     // Plate-id diagnostics and healing
     {
         let mut invalid = 0usize;
