@@ -265,8 +265,8 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: if cfg.fb_max_domega == 0.0 { 1.0e-6 } else { cfg.fb_max_domega }, // Allow larger omega changes
-        max_omega: if cfg.fb_max_omega == 0.0 { 1.0e-5 } else { cfg.fb_max_omega }, // Allow much larger omega values
+        max_domega: 1.0e-6, // Force larger omega changes (override config)
+        max_omega: 1.0e-5, // Force much larger omega values (override config)
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
