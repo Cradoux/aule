@@ -262,13 +262,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-9 } else { cfg.fb_gain }, // Use realistic default (100x smaller)
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-8 } else { cfg.fb_gain }, // Increase gain to restore motion
         damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 1.0e-8, // Allow smaller omega changes per step  
-        max_omega: 1.0e-7, // Allow smaller maximum omega values (realistic plate speeds)
+        max_domega: 1.0e-7, // Allow reasonable omega changes per step  
+        max_omega: 1.0e-6, // Allow reasonable maximum omega values for visible motion
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
