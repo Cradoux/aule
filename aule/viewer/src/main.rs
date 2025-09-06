@@ -284,14 +284,21 @@ fn run_to_t_realtime(
                 fb_max_domega: 5.0e-9,
                 fb_max_omega: 2.0e-7,
             };
-            let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
-            let mut eta = world.sea.eta_m;
-            engine::pipeline::step_full(
-                world,
-                engine::pipeline::SurfaceFields { elevation_m: &mut elev_tmp, eta_m: &mut eta },
-                cfg,
-            );
-            world.sea.eta_m = eta;
+            // Convert PipelineCfg to PhysicsConfig for unified pipeline
+            let mut config = engine::config::PhysicsConfig::simple_mode();
+            config.dt_myr = cfg.dt_myr;
+            config.enable_flexure = cfg.enable_flexure;
+            config.enable_surface_processes = cfg.enable_erosion;
+            config.enable_continental_buoyancy = true; // Now independent of erosion
+            config.target_land_frac = cfg.target_land_frac;
+            config.freeze_eta = cfg.freeze_eta;
+            config.enable_subduction = cfg.enable_subduction;
+            config.enable_rigid_motion = cfg.enable_rigid_motion;
+            
+            // Use unified pipeline
+            let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
+            let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
+            let _result = pipeline.step(world, mode);
             ov.world_dirty = true;
             ov.color_dirty = true;
             ov.bathy_cache = None;
@@ -1880,20 +1887,23 @@ fn main() {
                 match cmd {
                     SimCommand::Step(cfg) => {
                         sim_busy_bg.store(true, Ordering::SeqCst);
-                        let mut elev_tmp: Vec<f32> = vec![0.0; sim_world.depth_m.len()];
-                        let mut eta = sim_world.sea.eta_m;
-                        engine::pipeline::step_full(
-                            &mut sim_world,
-                            engine::pipeline::SurfaceFields {
-                                elevation_m: &mut elev_tmp,
-                                eta_m: &mut eta,
-                            },
-                            cfg,
-                        );
-                        sim_world.sea.eta_m = eta;
-                        // Compute elevation as z = eta - depth
-                        let elev_now: Vec<f32> =
-                            sim_world.depth_m.iter().map(|&d| sim_world.sea.eta_m - d).collect();
+                        // Convert PipelineCfg to PhysicsConfig for unified pipeline
+                        let mut config = engine::config::PhysicsConfig::simple_mode();
+                        config.dt_myr = cfg.dt_myr;
+                        config.enable_flexure = cfg.enable_flexure;
+                        config.enable_surface_processes = cfg.enable_erosion;
+                        config.enable_continental_buoyancy = true; // Independent of erosion
+                        config.target_land_frac = cfg.target_land_frac;
+                        config.freeze_eta = cfg.freeze_eta;
+                        config.enable_subduction = cfg.enable_subduction;
+                        config.enable_rigid_motion = cfg.enable_rigid_motion;
+                        
+                        // Use unified pipeline
+                        let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
+                        let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
+                        let _result = pipeline.step(&mut sim_world, mode);
+                        // Get elevation from unified pipeline (already computed correctly)
+                        let elev_now: Vec<f32> = pipeline.elevation(&sim_world).to_vec();
                         let _ =
                             tx_snap_bg.send((elev_now, sim_world.sea.eta_m, sim_world.clock.t_myr));
                         sim_busy_bg.store(false, Ordering::SeqCst);
