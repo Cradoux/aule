@@ -74,6 +74,8 @@ pub mod pipeline;
 pub mod transforms;
 /// Units-of-measure lightweight wrappers.
 pub mod units;
+/// Unified pipeline that replaces both world::step_once and pipeline::step_full.
+pub mod unified_pipeline;
 /// Small utilities.
 pub mod util;
 /// World state.

@@ -3,6 +3,369 @@
 //! This module contains shared configuration structures used by both
 //! the pipeline and world modules, breaking circular dependencies.
 
+/// Pipeline execution mode that determines output behavior.
+#[derive(Clone, Copy, Debug)]
+pub enum PipelineMode {
+    /// Realtime mode: solve eta separately, don't modify depth_m
+    /// Renderer uses: elevation = eta - depth_m  
+    Realtime { 
+        /// If true, preserve depth_m buffer unchanged
+        preserve_depth: bool 
+    },
+    /// Batch mode: write sea-level offset back into depth_m
+    /// Renderer uses: elevation = -depth_m
+    Batch { 
+        /// If true, write sea-level offset back to depth_m
+        write_back_sea_level: bool 
+    },
+}
+
+impl Default for PipelineMode {
+    fn default() -> Self {
+        PipelineMode::Realtime { preserve_depth: true }
+    }
+}
+
+/// Unified physics configuration that replaces both StepParams and PipelineCfg.
+/// Simple and Advanced modes will use different presets of this configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicsConfig {
+    /// Time step in Myr
+    pub dt_myr: f32,
+    /// Number of steps to run per frame (viewer may loop externally as well)
+    pub steps_per_frame: u32,
+    
+    // Process enables (independent flags)
+    /// Enable rigid plate motion (advect plate_id, refresh velocities)
+    pub enable_rigid_motion: bool,
+    /// Enable subduction band edits
+    pub enable_subduction: bool,
+    /// Enable transform pull-apart/restraining bands  
+    pub enable_transforms: bool,
+    /// Enable elastic flexure response to current loads
+    pub enable_flexure: bool,
+    /// Enable surface processes (erosion, diffusion, sediment transport/deposition)
+    pub enable_surface_processes: bool,
+    /// Enable global sea level regulation to maintain reference ocean volume
+    pub enable_isostasy: bool,
+    /// Enable continental buoyancy response (separate from erosion)
+    pub enable_continental_buoyancy: bool,
+    /// Enable collision orogeny (C–C sutures)
+    pub enable_orogeny: bool,
+    /// Enable O–C accretion (arc/forearc growth)
+    pub enable_accretion: bool,
+    /// Enable continental rifting and passive margins
+    pub enable_rifting: bool,
+    /// Reset age along divergent boundaries (ridge births)
+    pub enable_ridge_birth: bool,
+    
+    // Cadence controls (>=1); a stage runs when (step_idx+1) % cadence == 0
+    /// Cadence for rigid motion updates
+    pub cadence_rigid_motion: u32,
+    /// Cadence for transform processing
+    pub cadence_transforms: u32,
+    /// Cadence for subduction processing
+    pub cadence_subduction: u32,
+    /// Cadence for flexure solving
+    pub cadence_flexure: u32,
+    /// Cadence for surface processes
+    pub cadence_surface_processes: u32,
+    /// Cadence for isostasy/sea-level regulation
+    pub cadence_isostasy: u32,
+    /// Cadence for continental buoyancy updates
+    pub cadence_continental_buoyancy: u32,
+    
+    // Sea-level regulation
+    /// Target land fraction (0..1) used by sea-level solve
+    pub target_land_frac: f32,
+    /// If true, keep eta fixed (skip sea-level regulation this tick)
+    pub freeze_eta: bool,
+    /// If true, auto re-baseline sea level after continents change
+    pub auto_rebaseline_after_continents: bool,
+    
+    // Flexure backend selection
+    /// If true, attempt GPU flexure (experimental). Fallback to Winkler if unavailable
+    pub use_gpu_flexure: bool,
+    /// GPU flexure: number of multigrid levels
+    pub gpu_flex_levels: u32,
+    /// GPU flexure: V-cycles per cadence
+    pub gpu_flex_cycles: u32,
+    /// GPU flexure: weighted-Jacobi omega
+    pub gpu_wj_omega: f32,
+    /// Subtract mean load before solving (stability, removes rigid-body mode)
+    pub subtract_mean_load: bool,
+    
+    // Performance and stability
+    /// Sub-steps for transforms per cadence (narrow operator stability)
+    pub substeps_transforms: u32,
+    /// Sub-steps for subduction band deltas per cadence
+    pub substeps_subduction: u32,
+    /// Surface processes sub-cycling count
+    pub surf_subcycles: u32,
+    
+    // Logging and diagnostics
+    /// If true, append a one-line mass budget log each step
+    pub log_mass_budget: bool,
+    
+    // Surface processes parameters
+    /// Parameters for surface processes (erosion, diffusion, sediment transport)
+    pub surface_params: crate::surface::SurfaceParams,
+    
+    // Subduction parameters (viewer-controlled)
+    /// Convergence threshold in m/yr used for band detection
+    pub sub_tau_conv_m_per_yr: f32,
+    /// Trench band half-width in km on subducting side
+    pub sub_trench_half_width_km: f32,
+    /// Arc band peak offset from trench hinge in km (overriding side)
+    pub sub_arc_offset_km: f32,
+    /// Arc band half-width in km
+    pub sub_arc_half_width_km: f32,
+    /// Back-arc band width in km (behind arc)
+    pub sub_backarc_width_km: f32,
+    /// Trench deepening magnitude in meters (positive deepens)
+    pub sub_trench_deepen_m: f32,
+    /// Arc uplift magnitude in meters (negative uplifts/shallows)
+    pub sub_arc_uplift_m: f32,
+    /// Back-arc uplift magnitude in meters (negative uplifts/shallows)
+    pub sub_backarc_uplift_m: f32,
+    /// Absolute rollback offset applied to overriding distances in meters
+    pub sub_rollback_offset_m: f32,
+    /// Rollback rate in km/Myr for time-progression (applied by viewer logic)
+    pub sub_rollback_rate_km_per_myr: f32,
+    /// If true, back-arc is deepened (extension mode) instead of uplifted
+    pub sub_backarc_extension_mode: bool,
+    /// Back-arc deepening magnitude in meters when in extension mode
+    pub sub_backarc_extension_deepen_m: f32,
+    /// Continental fraction threshold [0,1] for gating trench deepening
+    pub sub_continent_c_min: f32,
+}
+
+impl PhysicsConfig {
+    /// Configuration preset for Simple mode
+    pub fn simple_mode() -> Self {
+        Self {
+            dt_myr: 1.0,
+            steps_per_frame: 1,
+            
+            // Enable all processes every step
+            enable_rigid_motion: true,
+            enable_subduction: true,
+            enable_transforms: true,
+            enable_flexure: true,
+            enable_surface_processes: false, // typically off in simple mode
+            enable_isostasy: true,
+            enable_continental_buoyancy: true,
+            enable_orogeny: false,
+            enable_accretion: false,
+            enable_rifting: false,
+            enable_ridge_birth: true,
+            
+            // Run every step (cadence = 1)
+            cadence_rigid_motion: 1,
+            cadence_transforms: 1,
+            cadence_subduction: 1,
+            cadence_flexure: 1,
+            cadence_surface_processes: 1,
+            cadence_isostasy: 1,
+            cadence_continental_buoyancy: 1,
+            
+            // Sea-level
+            target_land_frac: 0.3,
+            freeze_eta: false,
+            auto_rebaseline_after_continents: true,
+            
+            // Use GPU flexure in simple mode
+            use_gpu_flexure: true,
+            gpu_flex_levels: 3,
+            gpu_flex_cycles: 2,
+            gpu_wj_omega: 0.8,
+            subtract_mean_load: true,
+            
+            // Stability
+            substeps_transforms: 4,
+            substeps_subduction: 4,
+            surf_subcycles: 1,
+            
+            // Logging
+            log_mass_budget: false,
+            
+            // Default surface params (mostly unused in simple mode)
+            surface_params: crate::surface::SurfaceParams::default(),
+            
+            // Default subduction parameters  
+            sub_tau_conv_m_per_yr: 0.02,
+            sub_trench_half_width_km: 50.0,
+            sub_arc_offset_km: 150.0,
+            sub_arc_half_width_km: 100.0,
+            sub_backarc_width_km: 200.0,
+            sub_trench_deepen_m: 1000.0,
+            sub_arc_uplift_m: -500.0,
+            sub_backarc_uplift_m: -200.0,
+            sub_rollback_offset_m: 0.0,
+            sub_rollback_rate_km_per_myr: 0.0,
+            sub_backarc_extension_mode: false,
+            sub_backarc_extension_deepen_m: 300.0,
+            sub_continent_c_min: 0.5,
+        }
+    }
+    
+    /// Configuration preset for Advanced mode  
+    pub fn advanced_mode() -> Self {
+        Self {
+            dt_myr: 0.5,
+            steps_per_frame: 1,
+            
+            // Enable processes based on user toggles
+            enable_rigid_motion: true,
+            enable_subduction: true,
+            enable_transforms: true,
+            enable_flexure: true,
+            enable_surface_processes: true,
+            enable_isostasy: true,
+            enable_continental_buoyancy: true,
+            enable_orogeny: true,
+            enable_accretion: true,
+            enable_rifting: true,
+            enable_ridge_birth: true,
+            
+            // Advanced mode uses different cadences for performance
+            cadence_rigid_motion: 1,
+            cadence_transforms: 2,
+            cadence_subduction: 4,
+            cadence_flexure: 1,
+            cadence_surface_processes: 1,
+            cadence_isostasy: 1,
+            cadence_continental_buoyancy: 1,
+            
+            // Sea-level  
+            target_land_frac: 0.3,
+            freeze_eta: false,
+            auto_rebaseline_after_continents: true,
+            
+            // Use CPU flexure in advanced mode (for now)
+            use_gpu_flexure: false,
+            gpu_flex_levels: 3,
+            gpu_flex_cycles: 2,
+            gpu_wj_omega: 0.8,
+            subtract_mean_load: true,
+            
+            // Stability
+            substeps_transforms: 4,
+            substeps_subduction: 4,
+            surf_subcycles: 1,
+            
+            // Logging
+            log_mass_budget: false,
+            
+            // Default surface params
+            surface_params: crate::surface::SurfaceParams::default(),
+            
+            // Default subduction parameters
+            sub_tau_conv_m_per_yr: 0.02,
+            sub_trench_half_width_km: 50.0,
+            sub_arc_offset_km: 150.0,
+            sub_arc_half_width_km: 100.0,
+            sub_backarc_width_km: 200.0,
+            sub_trench_deepen_m: 1000.0,
+            sub_arc_uplift_m: -500.0,
+            sub_backarc_uplift_m: -200.0,
+            sub_rollback_offset_m: 0.0,
+            sub_rollback_rate_km_per_myr: 0.0,
+            sub_backarc_extension_mode: false,
+            sub_backarc_extension_deepen_m: 300.0,
+            sub_continent_c_min: 0.5,
+        }
+    }
+    
+    /// Convert to legacy PipelineCfg format for compatibility
+    pub fn to_pipeline_cfg(&self) -> PipelineCfg {
+        PipelineCfg {
+            dt_myr: self.dt_myr,
+            steps_per_frame: self.steps_per_frame,
+            enable_flexure: self.enable_flexure,
+            enable_erosion: self.enable_surface_processes,
+            target_land_frac: self.target_land_frac,
+            freeze_eta: self.freeze_eta,
+            log_mass_budget: self.log_mass_budget,
+            enable_subduction: self.enable_subduction,
+            enable_rigid_motion: self.enable_rigid_motion,
+            cadence_trf_every: self.cadence_transforms,
+            cadence_sub_every: self.cadence_subduction,
+            cadence_flx_every: self.cadence_flexure,
+            cadence_sea_every: self.cadence_isostasy,
+            cadence_surf_every: self.cadence_surface_processes,
+            substeps_transforms: self.substeps_transforms,
+            substeps_subduction: self.substeps_subduction,
+            use_gpu_flexure: self.use_gpu_flexure,
+            gpu_flex_levels: self.gpu_flex_levels,
+            gpu_flex_cycles: self.gpu_flex_cycles,
+            gpu_wj_omega: self.gpu_wj_omega,
+            subtract_mean_load: self.subtract_mean_load,
+            sub_tau_conv_m_per_yr: self.sub_tau_conv_m_per_yr,
+            sub_trench_half_width_km: self.sub_trench_half_width_km,
+            sub_arc_offset_km: self.sub_arc_offset_km,
+            sub_arc_half_width_km: self.sub_arc_half_width_km,
+            sub_backarc_width_km: self.sub_backarc_width_km,
+            sub_trench_deepen_m: self.sub_trench_deepen_m,
+            sub_arc_uplift_m: self.sub_arc_uplift_m,
+            sub_backarc_uplift_m: self.sub_backarc_uplift_m,
+            sub_rollback_offset_m: self.sub_rollback_offset_m,
+            sub_rollback_rate_km_per_myr: self.sub_rollback_rate_km_per_myr,
+            sub_backarc_extension_mode: self.sub_backarc_extension_mode,
+            sub_backarc_extension_deepen_m: self.sub_backarc_extension_deepen_m,
+            sub_continent_c_min: self.sub_continent_c_min,
+            surf_k_stream: self.surface_params.k_stream,
+            surf_m_exp: self.surface_params.m_exp,
+            surf_n_exp: self.surface_params.n_exp,
+            surf_k_diff: self.surface_params.k_diff,
+            surf_k_tr: self.surface_params.k_tr,
+            surf_p_exp: self.surface_params.p_exp,
+            surf_q_exp: self.surface_params.q_exp,
+            surf_rho_sed: self.surface_params.rho_sed,
+            surf_min_slope: self.surface_params.min_slope,
+            surf_subcycles: self.surf_subcycles,
+            surf_couple_flexure: self.surface_params.couple_flexure,
+            cadence_spawn_plate_every: 0, // disabled by default
+            cadence_retire_plate_every: 0, // disabled by default  
+            cadence_force_balance_every: 0, // disabled by default
+            fb_gain: 1.0e-12,
+            fb_damp_per_myr: 0.2,
+            fb_k_conv: 1.0,
+            fb_k_div: 0.5,
+            fb_k_trans: 0.1,
+            fb_max_domega: 5.0e-9,
+            fb_max_omega: 2.0e-7,
+        }
+    }
+    
+    /// Convert to legacy StepParams format for compatibility
+    pub fn to_step_params(&self) -> StepParams {
+        StepParams {
+            dt_myr: self.dt_myr as f64,
+            do_flexure: self.enable_flexure,
+            do_isostasy: self.enable_isostasy,
+            do_transforms: self.enable_transforms,
+            do_subduction: self.enable_subduction,
+            do_continents: self.enable_continental_buoyancy,
+            do_ridge_birth: self.enable_ridge_birth,
+            auto_rebaseline_after_continents: self.auto_rebaseline_after_continents,
+            do_rigid_motion: self.enable_rigid_motion,
+            do_orogeny: self.enable_orogeny,
+            do_accretion: self.enable_accretion,
+            do_rifting: self.enable_rifting,
+            do_surface: self.enable_surface_processes,
+            surface_params: self.surface_params,
+            advection_every: self.cadence_rigid_motion,
+            transforms_every: self.cadence_transforms,
+            subduction_every: self.cadence_subduction,
+            flexure_every: self.cadence_flexure,
+            sea_every: self.cadence_isostasy,
+            do_advection: self.enable_rigid_motion,
+            do_sea: self.enable_isostasy,
+        }
+    }
+}
+
 /// Parameters that control a single evolution step (legacy world::step_once).
 #[derive(Clone, Copy, Debug)]
 pub struct StepParams {
