@@ -367,8 +367,10 @@ pub fn apply_continents(
 /// semi-Lagrangian nearest-neighbour backtrace on the lat/lon grid.
 ///
 /// This is a lightweight, deterministic CPU MVP intended to make motion visible.
+/// DEPRECATED: Use rigid_advect_c_thc_from for better plate motion handling.
 /// It backtraces from each cell center by `v * dt` on a spherical lat/lon chart
 /// and samples from the nearest of the 1-ring neighbours (including self).
+#[deprecated(note = "Use rigid_advect_c_thc_from for consistent plate motion")]
 pub fn advect_c_thc(
     grid: &Grid,
     vel_en_m_per_yr: &[[f32; 2]],

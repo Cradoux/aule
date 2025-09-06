@@ -295,6 +295,34 @@ fn run_to_t_realtime(
             config.enable_subduction = cfg.enable_subduction;
             config.enable_rigid_motion = cfg.enable_rigid_motion;
             
+            // Copy all the detailed surface process parameters
+            config.surface_params.k_stream = cfg.surf_k_stream;
+            config.surface_params.m_exp = cfg.surf_m_exp;
+            config.surface_params.n_exp = cfg.surf_n_exp;
+            config.surface_params.k_diff = cfg.surf_k_diff;
+            config.surface_params.k_tr = cfg.surf_k_tr;
+            config.surface_params.p_exp = cfg.surf_p_exp;
+            config.surface_params.q_exp = cfg.surf_q_exp;
+            config.surface_params.rho_sed = cfg.surf_rho_sed;
+            config.surface_params.min_slope = cfg.surf_min_slope;
+            config.surface_params.subcycles = cfg.surf_subcycles;
+            config.surface_params.couple_flexure = cfg.surf_couple_flexure;
+            
+            // Copy subduction parameters
+            config.sub_tau_conv_m_per_yr = cfg.sub_tau_conv_m_per_yr;
+            config.sub_trench_half_width_km = cfg.sub_trench_half_width_km;
+            config.sub_arc_offset_km = cfg.sub_arc_offset_km;
+            config.sub_arc_half_width_km = cfg.sub_arc_half_width_km;
+            config.sub_backarc_width_km = cfg.sub_backarc_width_km;
+            config.sub_trench_deepen_m = cfg.sub_trench_deepen_m;
+            config.sub_arc_uplift_m = cfg.sub_arc_uplift_m;
+            config.sub_backarc_uplift_m = cfg.sub_backarc_uplift_m;
+            config.sub_rollback_offset_m = cfg.sub_rollback_offset_m;
+            config.sub_rollback_rate_km_per_myr = cfg.sub_rollback_rate_km_per_myr;
+            config.sub_backarc_extension_mode = cfg.sub_backarc_extension_mode;
+            config.sub_backarc_extension_deepen_m = cfg.sub_backarc_extension_deepen_m;
+            config.sub_continent_c_min = cfg.sub_continent_c_min;
+            
             // Use unified pipeline
             let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
             let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
@@ -818,39 +846,19 @@ fn render_simple_panels(
             ov.simple_palette = 1;
             changed = true;
         }
-        ui.separator();
-        ui.label("GPU raster debug:");
-        changed |= ui.checkbox(&mut ov.gpu_dbg_wire, "Wireframe").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_face_tint, "Face tint").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_tri_index, "Tri index").changed();
-        // Simple-mode physics isolation toggles (T-646)
-        ui.separator();
-        ui.checkbox(&mut ov.freeze_eta, "Freeze sea level");
-        ui.checkbox(&mut ov.disable_erosion, "Disable erosion");
-        ui.checkbox(&mut ov.disable_flexure, "Disable flexure");
-        ui.checkbox(&mut ov.disable_subduction, "Disable subduction");
-        if changed {
-            apply_simple_palette(ov, world, ctx);
-        }
-        changed |=
-            ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
-        changed |=
-            ui.checkbox(&mut ov.dbg_gpu_face_cpu_lattice, "GPU face+bary -> CPU lattice").changed();
-        changed |= ui.checkbox(&mut ov.show_parity_heat, "Parity heat").changed();
-        changed |=
-            ui.checkbox(&mut ov.force_cpu_face_pick, "Force CPU face pick (debug)").changed();
-        changed |=
-            ui.checkbox(&mut ov.dbg_rollover_probe, "Log rollover probe CSV (ROI)").changed();
-        if changed {
-            ov.raster_dirty = true;
-        }
         if changed {
             apply_simple_palette(ov, world, ctx);
         }
         ui.separator();
         changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
+        
+        // Overlay controls in Simple mode
+        ui.separator();
+        ui.label("Overlays (1-3 keys):");
+        ui.checkbox(&mut ov.show_plates, "1: Plate boundaries");
+        ui.checkbox(&mut ov.show_vel, "2: Velocity arrows");  
+        ui.checkbox(&mut ov.show_bounds, "3: Boundary types");
+        ui.checkbox(&mut ov.show_continents, "C: Continental crust");
         if ov.show_plate_type {
             // Compute simple legend: counts per class and area shares
             let mut n_cont = 0usize;
@@ -1835,6 +1843,7 @@ fn main() {
     use std::sync::{mpsc, Arc, Mutex};
     // Removed unused SimCtrl
     let (tx_snap, rx_snap) = mpsc::channel::<(Vec<f32>, f32, f64)>();
+    let (tx_world, rx_world) = mpsc::channel::<WorldSnapshot>();
     // Simulation thread command channel and busy flag
     let (tx_cmd, rx_cmd) = mpsc::channel::<SimCommand>();
     let sim_busy = Arc::new(AtomicBool::new(false));
@@ -1854,6 +1863,7 @@ fn main() {
     };
     {
         let tx_snap_bg = tx_snap.clone();
+        let tx_world_bg = tx_world.clone();
         let sim_busy_bg = sim_busy.clone();
         let rx_cmd_bg = rx_cmd;
         let init_ws = init_snapshot;
@@ -1898,14 +1908,55 @@ fn main() {
                         config.enable_subduction = cfg.enable_subduction;
                         config.enable_rigid_motion = cfg.enable_rigid_motion;
                         
+                        // Copy surface process parameters
+                        config.surface_params.k_stream = cfg.surf_k_stream;
+                        config.surface_params.m_exp = cfg.surf_m_exp;
+                        config.surface_params.n_exp = cfg.surf_n_exp;
+                        config.surface_params.k_diff = cfg.surf_k_diff;
+                        config.surface_params.k_tr = cfg.surf_k_tr;
+                        config.surface_params.p_exp = cfg.surf_p_exp;
+                        config.surface_params.q_exp = cfg.surf_q_exp;
+                        config.surface_params.rho_sed = cfg.surf_rho_sed;
+                        config.surface_params.min_slope = cfg.surf_min_slope;
+                        config.surface_params.subcycles = cfg.surf_subcycles;
+                        config.surface_params.couple_flexure = cfg.surf_couple_flexure;
+                        
+                        // Copy subduction parameters
+                        config.sub_tau_conv_m_per_yr = cfg.sub_tau_conv_m_per_yr;
+                        config.sub_trench_half_width_km = cfg.sub_trench_half_width_km;
+                        config.sub_arc_offset_km = cfg.sub_arc_offset_km;
+                        config.sub_arc_half_width_km = cfg.sub_arc_half_width_km;
+                        config.sub_backarc_width_km = cfg.sub_backarc_width_km;
+                        config.sub_trench_deepen_m = cfg.sub_trench_deepen_m;
+                        config.sub_arc_uplift_m = cfg.sub_arc_uplift_m;
+                        config.sub_backarc_uplift_m = cfg.sub_backarc_uplift_m;
+                        config.sub_rollback_offset_m = cfg.sub_rollback_offset_m;
+                        config.sub_rollback_rate_km_per_myr = cfg.sub_rollback_rate_km_per_myr;
+                        config.sub_backarc_extension_mode = cfg.sub_backarc_extension_mode;
+                        config.sub_backarc_extension_deepen_m = cfg.sub_backarc_extension_deepen_m;
+                        config.sub_continent_c_min = cfg.sub_continent_c_min;
+                        
                         // Use unified pipeline
                         let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
                         let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
                         let _result = pipeline.step(&mut sim_world, mode);
                         // Get elevation from unified pipeline (already computed correctly)
                         let elev_now: Vec<f32> = pipeline.elevation(&sim_world).to_vec();
-                        let _ =
-                            tx_snap_bg.send((elev_now, sim_world.sea.eta_m, sim_world.clock.t_myr));
+                        let _ = tx_snap_bg.send((elev_now, sim_world.sea.eta_m, sim_world.clock.t_myr));
+                        
+                        // Send complete world state for overlay updates (less frequently to avoid overwhelming UI)
+                        let ws = WorldSnapshot {
+                            depth_m: sim_world.depth_m.clone(),
+                            c: sim_world.c.clone(),
+                            th_c_m: sim_world.th_c_m.clone(),
+                            sea_eta_m: sim_world.sea.eta_m,
+                            plate_id: sim_world.plates.plate_id.clone(),
+                            pole_axis: sim_world.plates.pole_axis.clone(),
+                            omega_rad_yr: sim_world.plates.omega_rad_yr.clone(),
+                            v_en: sim_world.v_en.clone(),
+                            age_myr: sim_world.age_myr.clone(),
+                        };
+                        let _ = tx_world_bg.send(ws); // Send world snapshot
                         sim_busy_bg.store(false, Ordering::SeqCst);
                     }
                     SimCommand::SyncWorld(ws) => {
@@ -1970,30 +2021,31 @@ fn main() {
                                     println!("[ui] T-505 done | drawer={} | mode={}", ov.drawer_open, if ov.mode_simple { "simple" } else { "advanced" });
                                     ov.t505_logged = true;
                                 }
+                            // Unified overlay shortcuts available in both Simple and Advanced modes
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { _continents_dirty = true; } }
+                            if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
+                            
+                            // Advanced-only shortcuts (complex overlays and debug features)
                             if !ov.mode_simple {
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_plate_adjacency = !ov.show_plate_adjacency; ov.net_adj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_triple_junctions = !ov.show_triple_junctions; ov.net_tj_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::A)) { age_plot.show = !age_plot.show; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::M)) { ov.show_map_color_panel = !ov.show_map_color_panel; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::S)) { ov.surface_enable = !ov.surface_enable; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { _continents_dirty = true; } }
                                 if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                                 if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; _flex_dirty = true; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Y)) { ov.show_hypsometry = !ov.show_hypsometry; }
-                            } else {
-                                // In Simple mode, force color layer on and ignore hide-map hotkeys
-                                ov.show_bathy = true;
                             }
+                            
+                            // Always show color layer as base map
+                            ov.show_bathy = true;
 
                             egui::TopBottomPanel::top("hud").show(ctx, |ui| {
                                 ui.horizontal_wrapped(|ui| {
@@ -2060,7 +2112,7 @@ fn main() {
                                 });
                             }
                             // Drain any pending simulation snapshots (non-blocking)
-                            if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
+                            while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
                                 unsafe {
                                     if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
                                     if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
@@ -2068,6 +2120,30 @@ fn main() {
                                 world.sea.eta_m = eta;
                                 world.clock.t_myr = t_myr;
                                 ov.world_dirty = true; ov.color_dirty = true;
+                            }
+                            
+                            // Drain any world snapshots and update complete world state for overlays
+                            while let Ok(ws) = rx_world.try_recv() {
+                                if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
+                                if world.c.len() == ws.c.len() { world.c = ws.c; }
+                                if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
+                                world.sea.eta_m = ws.sea_eta_m;
+                                if world.plates.plate_id.len() == ws.plate_id.len() { world.plates.plate_id = ws.plate_id; }
+                                if world.plates.pole_axis.len() == ws.pole_axis.len() { world.plates.pole_axis = ws.pole_axis; }
+                                if world.plates.omega_rad_yr.len() == ws.omega_rad_yr.len() { world.plates.omega_rad_yr = ws.omega_rad_yr; }
+                                if world.v_en.len() == ws.v_en.len() { world.v_en = ws.v_en; }
+                                if world.age_myr.len() == ws.age_myr.len() { world.age_myr = ws.age_myr; }
+                                // Recompute boundaries with updated state
+                                world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                ov.world_dirty = true; ov.color_dirty = true;
+                                // Invalidate overlay caches so they update with new world state
+                                ov.plates_cache = None;
+                                ov.vel_cache = None;
+                                ov.bounds_cache = None;
+                                ov.age_cache = None;
+                                ov.bathy_cache = None;
+                                ov.net_adj_cache = None;
+                                ov.net_tj_cache = None;
                             }
                             // Central canvas (draw only, no controls) — make transparent so 3D pass remains visible
                             egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
@@ -2512,10 +2588,10 @@ fn main() {
                                                     painter.add(egui::Shape::mesh(mesh));
                                                 }
                                             }
-                                            // Draw overlays on top when paused (skip during playback for responsiveness)
-                                            if !ov.run_active {
-                                                let saved = ov.show_bathy; ov.show_bathy = false; overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); ov.show_bathy = saved;
-                                            }
+                                            // Draw overlays on top in both modes (unified overlay system)
+                                            let saved = ov.show_bathy; ov.show_bathy = false; 
+                                            overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); 
+                                            ov.show_bathy = saved;
                                         }
                                     } else {
                                         // CPU fallback raster
@@ -2715,7 +2791,7 @@ fn main() {
                             }
                         }
                         // Drain any snapshot from the worker and update visible world
-                        if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
+                        while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
                             unsafe {
                                 if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
                                 if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
@@ -2723,6 +2799,30 @@ fn main() {
                             world.sea.eta_m = eta;
                             world.clock.t_myr = t_myr;
                             ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true;
+                        }
+                        
+                        // Drain any world snapshots and update complete world state for overlays
+                        while let Ok(ws) = rx_world.try_recv() {
+                            if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
+                            if world.c.len() == ws.c.len() { world.c = ws.c; }
+                            if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
+                            world.sea.eta_m = ws.sea_eta_m;
+                            if world.plates.plate_id.len() == ws.plate_id.len() { world.plates.plate_id = ws.plate_id; }
+                            if world.plates.pole_axis.len() == ws.pole_axis.len() { world.plates.pole_axis = ws.pole_axis; }
+                            if world.plates.omega_rad_yr.len() == ws.omega_rad_yr.len() { world.plates.omega_rad_yr = ws.omega_rad_yr; }
+                            if world.v_en.len() == ws.v_en.len() { world.v_en = ws.v_en; }
+                            if world.age_myr.len() == ws.age_myr.len() { world.age_myr = ws.age_myr; }
+                            // Recompute boundaries with updated state
+                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                            ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true;
+                            // Invalidate overlay caches so they update with new world state
+                            ov.plates_cache = None;
+                            ov.vel_cache = None;
+                            ov.bounds_cache = None;
+                            ov.age_cache = None;
+                            ov.bathy_cache = None;
+                            ov.net_adj_cache = None;
+                            ov.net_tj_cache = None;
                         }
                     }
                     _ => {}

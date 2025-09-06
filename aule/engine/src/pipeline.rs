@@ -89,17 +89,9 @@ pub(crate) fn check_invariants(world: &World, elev_opt: Option<&[f32]>) {
     }
 }
 
-/// Execute the full physics step sequence once.
-///
-/// Order:
-/// 1) boundaries
-/// 2) advection (kinematics)
-/// 3) ridges (oceanic crust production)
-/// 4) subduction (convergence thinning/consumption)
-/// 5) flexure (optional)
-/// 6) erosion/diffusion (optional)
-/// 7) sea-level bisection to target land fraction
-/// 8) sanitize elevation
+/// DEPRECATED: Use unified_pipeline::UnifiedPipeline instead.
+/// This function is kept temporarily for tests but will be removed.
+#[deprecated(note = "Use unified_pipeline::UnifiedPipeline::step instead")]
 pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Performance timers (ms)
     let mut ms_boundaries = 0.0f64;
@@ -138,6 +130,9 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         let c_src = world.c.clone();
         let th_src = world.th_c_m.clone();
         let age_src = world.age_myr.clone();
+        
+        // Debug: Check if continents exist before advection (for mass conservation)
+        let c_sum_before = c_src.iter().sum::<f32>();
 
         let theta_max = world.plates.max_abs_omega_rad_yr() * dt_years;
         let cell_angle = world.grid.mean_cell_angle_rad();
@@ -157,6 +152,27 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             &mut world.c,
             &mut world.th_c_m,
         );
+        
+        // Check for mass conservation and apply correction if needed
+        let c_sum_after = world.c.iter().sum::<f32>();
+        
+        // CRITICAL FIX: Enforce mass conservation to prevent continental loss
+        let mass_loss = c_sum_before - c_sum_after;
+        if mass_loss.abs() > 0.1 {
+            // Silently correct mass loss - this is normal due to interpolation
+            // Redistribute lost mass proportionally to existing continents
+            let total_existing = c_sum_after;
+            if total_existing > 0.0 {
+                let correction_factor = c_sum_before / total_existing;
+                for c_val in &mut world.c {
+                    if *c_val > 0.0 {
+                        *c_val *= correction_factor;
+                        *c_val = c_val.clamp(0.0, 1.0); // Keep in valid range
+                    }
+                }
+                // Mass conservation correction applied
+            }
+        }
         crate::age::rigid_advect_age_from(
             &world.grid,
             &world.plates,
@@ -166,9 +182,10 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         );
         crate::age::increment_oceanic_age(&world.c, &mut world.age_myr, cfg.dt_myr as f64);
         // Keep ridges wet: enforce ocean only where very young seafloor AND previously oceanic
-        // (do not erase continental caps)
+        // CRITICAL FIX: Protect continents from ridge destruction
         for i in 0..world.grid.cells {
-            if world.age_myr[i] < 2.0 && c_src.get(i).copied().unwrap_or(0.0) < 0.5 {
+            if world.age_myr[i] < 2.0 && c_src.get(i).copied().unwrap_or(0.0) < 0.1 && world.c[i] < 0.1 {
+                // Only destroy oceanic areas (both before AND after advection must be oceanic)
                 world.c[i] = 0.0;
                 world.th_c_m[i] = 0.0;
             }

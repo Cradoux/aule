@@ -105,6 +105,7 @@ impl UnifiedPipeline {
         let pipeline_cfg = self.config.to_pipeline_cfg();
         
         // Execute the unified pipeline step (always use step_full logic)
+        #[allow(deprecated)]
         crate::pipeline::step_full(world, surf, pipeline_cfg);
         
         // Handle sea-level output based on mode

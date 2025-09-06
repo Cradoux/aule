@@ -174,8 +174,8 @@ impl PhysicsConfig {
             freeze_eta: false,
             auto_rebaseline_after_continents: true,
             
-            // Use GPU flexure in simple mode
-            use_gpu_flexure: true,
+            // Use CPU flexure in simple mode (GPU flexure causing validation errors)
+            use_gpu_flexure: false,
             gpu_flex_levels: 3,
             gpu_flex_cycles: 2,
             gpu_wj_omega: 0.8,
@@ -532,4 +532,67 @@ pub struct PipelineCfg {
     pub fb_max_domega: f32,
     /// Max absolute |ω| clamp.
     pub fb_max_omega: f32,
+}
+
+impl PhysicsConfig {
+    /// Convert from legacy PipelineCfg for backward compatibility during migration.
+    pub fn from_pipeline_cfg(cfg: PipelineCfg) -> Self {
+        Self {
+            dt_myr: cfg.dt_myr,
+            enable_rigid_motion: cfg.enable_rigid_motion,
+            enable_flexure: cfg.enable_flexure,
+            enable_surface_processes: cfg.enable_erosion,
+            enable_continental_buoyancy: true, // Always enabled in unified pipeline
+            enable_subduction: cfg.enable_subduction,
+            target_land_frac: cfg.target_land_frac,
+            freeze_eta: cfg.freeze_eta,
+            steps_per_frame: cfg.steps_per_frame,
+            log_mass_budget: cfg.log_mass_budget,
+            
+            // Flexure settings
+            use_gpu_flexure: cfg.use_gpu_flexure,
+            gpu_flex_levels: cfg.gpu_flex_levels,
+            gpu_flex_cycles: cfg.gpu_flex_cycles,
+            gpu_wj_omega: cfg.gpu_wj_omega,
+            subtract_mean_load: cfg.subtract_mean_load,
+            
+            // Stability
+            substeps_transforms: cfg.substeps_transforms,
+            substeps_subduction: cfg.substeps_subduction,
+            surf_subcycles: cfg.surf_subcycles,
+            
+            // Copy surface params
+            surface_params: crate::surface::SurfaceParams {
+                k_stream: cfg.surf_k_stream,
+                m_exp: cfg.surf_m_exp,
+                n_exp: cfg.surf_n_exp,
+                k_diff: cfg.surf_k_diff,
+                k_tr: cfg.surf_k_tr,
+                p_exp: cfg.surf_p_exp,
+                q_exp: cfg.surf_q_exp,
+                rho_sed: cfg.surf_rho_sed,
+                min_slope: cfg.surf_min_slope,
+                subcycles: cfg.surf_subcycles,
+                couple_flexure: cfg.surf_couple_flexure,
+            },
+            
+            // Copy subduction params  
+            sub_tau_conv_m_per_yr: cfg.sub_tau_conv_m_per_yr,
+            sub_trench_half_width_km: cfg.sub_trench_half_width_km,
+            sub_arc_offset_km: cfg.sub_arc_offset_km,
+            sub_arc_half_width_km: cfg.sub_arc_half_width_km,
+            sub_backarc_width_km: cfg.sub_backarc_width_km,
+            sub_trench_deepen_m: cfg.sub_trench_deepen_m,
+            sub_arc_uplift_m: cfg.sub_arc_uplift_m,
+            sub_backarc_uplift_m: cfg.sub_backarc_uplift_m,
+            sub_rollback_offset_m: cfg.sub_rollback_offset_m,
+            sub_rollback_rate_km_per_myr: cfg.sub_rollback_rate_km_per_myr,
+            sub_backarc_extension_mode: cfg.sub_backarc_extension_mode,
+            sub_backarc_extension_deepen_m: cfg.sub_backarc_extension_deepen_m,
+            sub_continent_c_min: cfg.sub_continent_c_min,
+            
+            // Force balance - not directly available in PipelineCfg, use defaults
+            ..Self::simple_mode()
+        }
+    }
 }

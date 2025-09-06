@@ -95,8 +95,11 @@ fn snapshot_tiny_grid_one_step() {
         fb_max_domega: 1.0,
         fb_max_omega: 1.0,
     };
-    // One step
-    pipeline::step_full(&mut w, surf, cfg);
+    // One step using unified pipeline
+    let physics_cfg = engine::config::PhysicsConfig::from_pipeline_cfg(cfg);
+    let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(physics_cfg);
+    let mode = engine::config::PipelineMode::Batch { write_back_sea_level: false };
+    let _result = pipeline.step(&mut w, mode);
 
     // Snapshot metrics
     // Boundary counts by class
@@ -189,12 +192,12 @@ fn snapshot_tiny_grid_one_step() {
     if let Some((_cap_comp, _cap_thc, _rs, _ru)) = caps { /* present and parsed */ }
     assert!(cfl.max_cfl.is_finite() && cfl.mean_cfl.is_finite());
 
-    // Re-run and compare within tight tolerance
+    // Re-run and compare within tight tolerance using unified pipeline
     let mut w2 = World::new(f, plates, seed);
-    let mut elev2 = vec![0.0f32; w2.grid.cells];
-    let mut eta2: f32 = 0.0;
-    let surf2 = pipeline::SurfaceFields { elevation_m: &mut elev2, eta_m: &mut eta2 };
-    pipeline::step_full(&mut w2, surf2, cfg);
+    let physics_cfg2 = engine::config::PhysicsConfig::from_pipeline_cfg(cfg);
+    let mut pipeline2 = engine::unified_pipeline::UnifiedPipeline::new(physics_cfg2);
+    let mode2 = engine::config::PipelineMode::Batch { write_back_sea_level: false };
+    let _result2 = pipeline2.step(&mut w2, mode2);
     // boundary counts
     let mut n_r2 = 0u32;
     let mut n_s2 = 0u32;
