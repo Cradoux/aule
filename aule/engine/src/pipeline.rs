@@ -267,13 +267,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 5.0e-9 } else { cfg.fb_gain }, // Reduce gain to prevent saturation
-        damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-6 } else { cfg.fb_gain }, // Increase gain to overcome damping
+        damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.01 } else { cfg.fb_damp_per_myr }, // Reduce damping significantly
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 5.0e-8, // Reduce omega changes to prevent saturation  
-        max_omega: 5.0e-7, // Reduce maximum omega to prevent runaway speeds
+        max_domega: 1.0e-7, // Allow reasonable omega changes
+        max_omega: 1.0e-6, // Allow reasonable maximum omega
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
@@ -303,10 +303,12 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     
     // Check for force balance saturation
     let omega_saturated = (max_omega_after >= fb_params.max_omega * 0.95);
+    let zero_rotation = (max_omega_after < 1.0e-9);
     
-    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}", 
+    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}{}", 
              max_omega_after, max_velocity_after,
-             if omega_saturated { " [SATURATED - plates at speed limit]" } else { "" });
+             if omega_saturated { " [SATURATED - plates at speed limit]" } else { "" },
+             if zero_rotation { " [WARNING: Zero rotation - check gain vs damping]" } else { "" });
     // Plate-id diagnostics and healing
     {
         let mut invalid = 0usize;
