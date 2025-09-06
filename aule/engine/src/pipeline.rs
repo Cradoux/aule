@@ -262,13 +262,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // This was missing and is why landmasses don't follow plates!
     let t_fb0 = std::time::Instant::now();
     let fb_params = crate::force_balance::FbParams {
-        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-7 } else { cfg.fb_gain }, // Use moderate default
+        gain: if cfg.fb_gain == 0.0 || cfg.fb_gain < 1.0e-9 { 1.0e-9 } else { cfg.fb_gain }, // Use realistic default (100x smaller)
         damp_per_myr: if cfg.fb_damp_per_myr == 0.0 { 0.2 } else { cfg.fb_damp_per_myr },
         k_conv: if cfg.fb_k_conv == 0.0 { 1.0 } else { cfg.fb_k_conv },
         k_div: if cfg.fb_k_div == 0.0 { 0.5 } else { cfg.fb_k_div },
         k_trans: if cfg.fb_k_trans == 0.0 { 0.1 } else { cfg.fb_k_trans },
-        max_domega: 1.0e-7, // Allow reasonable omega changes per step
-        max_omega: 1.0e-6, // Allow reasonable maximum omega values
+        max_domega: 1.0e-8, // Allow smaller omega changes per step  
+        max_omega: 1.0e-7, // Allow smaller maximum omega values (realistic plate speeds)
     };
     // Debug: Show force balance parameters to diagnose the issue
     println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
@@ -535,9 +535,28 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     }
     ms_ridge += t_r0.elapsed().as_secs_f64() * 1000.0;
 
-    // Compose tectonic edits as a single delta added to baseline
+    // CRITICAL FIX: Compute baseline bathymetry from age (missing from unified pipeline!)
+    // This was causing geological processes to overwrite each other instead of being additive
     let n = world.grid.cells;
-    let base_depth = world.depth_m.clone(); // previous full depth (for dv_struct)
+    let previous_depth = world.depth_m.clone(); // Store for structural volume change calculation
+    
+    // Recompute baseline bathymetry from age (like world.rs does)
+    for i in 0..n {
+        let mut d = crate::age::depth_from_age_plate(
+            world.age_myr[i] as f64,
+            2600.0,
+            world.clock.t_myr,
+            6000.0,
+            1.0e-6,
+        ) as f32;
+        if !d.is_finite() {
+            d = 6000.0;
+        }
+        world.depth_m[i] = d.clamp(0.0, 6000.0);
+    }
+    
+    // Now prepare additive tectonic edits on top of this baseline
+    let base_depth = world.depth_m.clone();
     let th_before = world.th_c_m.clone();
     // Prepare persistent scratch buffers
     if world.scratch.f32_a.len() != n {
@@ -1772,7 +1791,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         }
         let mut dv_struct_m3: f64 = 0.0;
         for (i, &a) in world.area_m2.iter().enumerate().take(n) {
-            let dd = (world.depth_m[i] as f64) - (base_depth[i] as f64);
+            let dd = (world.depth_m[i] as f64) - (previous_depth[i] as f64);
             dv_struct_m3 += (a as f64) * dd;
         }
         let pc = crate::PhysConsts::default();
