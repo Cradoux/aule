@@ -180,6 +180,11 @@ pub struct OverlayState {
     pub e_gpa: f32,
     pub nu: f32,
     pub te_km: f32,
+    
+    // Flexure backend selection
+    pub flexure_backend_cpu: bool, // true = CPU, false = GPU
+    pub flexure_gpu_levels: u32,
+    pub flexure_gpu_cycles: u32,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -475,11 +480,16 @@ impl Default for OverlayState {
             e_gpa: 70.0,
             nu: 0.25,
             te_km: 25.0,
+            
+            // Flexure backend defaults
+            flexure_backend_cpu: true, // Default to CPU for reliability
+            flexure_gpu_levels: 3,
+            flexure_gpu_cycles: 2,
             k_winkler: 3.0e8f32,
-            wj_omega: 0.7,
+            wj_omega: 0.8,
             nu1: 1,
             nu2: 1,
-            levels: 2,
+            levels: 3,
             max_points_flex: 10_000,
             last_residual: 0.0,
             flex_mesh: None,

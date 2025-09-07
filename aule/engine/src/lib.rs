@@ -31,6 +31,8 @@ pub mod fields;
 pub mod flexure;
 /// GPU flexure multigrid scaffold (WGSL).
 pub mod flexure_gpu;
+/// Flexible flexure backend management with CPU/GPU selection.
+pub mod flexure_manager;
 /// Force-balance update for Euler poles.
 pub mod force_balance;
 /// Geometric utilities used by solvers.

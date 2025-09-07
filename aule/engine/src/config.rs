@@ -84,16 +84,20 @@ pub struct PhysicsConfig {
     pub auto_rebaseline_after_continents: bool,
     
     // Flexure backend selection
+    /// Flexure computation backend
+    pub flexure_backend: crate::flexure_manager::FlexureBackend,
+    /// GPU flexure: weighted-Jacobi omega
+    pub gpu_wj_omega: f32,
+    /// Subtract mean load before solving (stability, removes rigid-body mode)
+    pub subtract_mean_load: bool,
+    
+    // Legacy flexure configuration (deprecated, kept for compatibility)
     /// If true, attempt GPU flexure (experimental). Fallback to Winkler if unavailable
     pub use_gpu_flexure: bool,
     /// GPU flexure: number of multigrid levels
     pub gpu_flex_levels: u32,
     /// GPU flexure: V-cycles per cadence
     pub gpu_flex_cycles: u32,
-    /// GPU flexure: weighted-Jacobi omega
-    pub gpu_wj_omega: f32,
-    /// Subtract mean load before solving (stability, removes rigid-body mode)
-    pub subtract_mean_load: bool,
     
     // Performance and stability
     /// Sub-steps for transforms per cadence (narrow operator stability)
@@ -174,12 +178,15 @@ impl PhysicsConfig {
             freeze_eta: false,
             auto_rebaseline_after_continents: true,
             
-            // Use CPU flexure in simple mode (GPU flexure causing validation errors)
+            // Flexure backend settings
+            flexure_backend: crate::flexure_manager::FlexureBackend::CpuWinkler,
+            gpu_wj_omega: 0.8,
+            subtract_mean_load: true,
+            
+            // Legacy GPU flexure settings (deprecated)
             use_gpu_flexure: false,
             gpu_flex_levels: 3,
             gpu_flex_cycles: 2,
-            gpu_wj_omega: 0.8,
-            subtract_mean_load: true,
             
             // Stability
             substeps_transforms: 4,
@@ -242,12 +249,15 @@ impl PhysicsConfig {
             freeze_eta: false,
             auto_rebaseline_after_continents: true,
             
-            // Use CPU flexure in advanced mode (for now)
-            use_gpu_flexure: false,
-            gpu_flex_levels: 3,
-            gpu_flex_cycles: 2,
+            // Flexure backend settings (advanced mode can use GPU)
+            flexure_backend: crate::flexure_manager::FlexureBackend::GpuMultigrid { levels: 3, cycles: 2 },
             gpu_wj_omega: 0.8,
             subtract_mean_load: true,
+            
+            // Legacy GPU flexure settings (deprecated)
+            use_gpu_flexure: true, // Advanced mode tries GPU by default
+            gpu_flex_levels: 3,
+            gpu_flex_cycles: 2,
             
             // Stability
             substeps_transforms: 4,

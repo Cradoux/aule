@@ -97,6 +97,11 @@ struct ProcessFlags {
     pub enable_accretion: bool,
     pub enable_rifting: bool,
     pub enable_ridge_birth: bool,
+    
+    // Flexure backend configuration
+    pub flexure_backend_cpu: bool,
+    pub flexure_gpu_levels: u32,
+    pub flexure_gpu_cycles: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1147,6 +1152,27 @@ fn render_advanced_panels(
         changed |= ui.checkbox(&mut ov.enable_flexure, "Enable flexure (apply to depth)").changed();
         changed |= ui.checkbox(&mut ov.show_flexure, "Show w overlay").changed();
         changed |= ui.checkbox(&mut ov.subtract_mean_load, "Subtract mean load").changed();
+        
+        ui.separator();
+        ui.label("Backend Selection:");
+        ui.horizontal(|ui| {
+            if ui.selectable_label(ov.flexure_backend_cpu, "CPU (Winkler)").clicked() {
+                ov.flexure_backend_cpu = true;
+                changed = true;
+            }
+            if ui.selectable_label(!ov.flexure_backend_cpu, "GPU (Multigrid)").clicked() {
+                ov.flexure_backend_cpu = false;
+                changed = true;
+            }
+        });
+        
+        if !ov.flexure_backend_cpu {
+            ui.label("GPU Parameters:");
+            changed |= ui.add(egui::Slider::new(&mut ov.flexure_gpu_levels, 1..=5).text("Levels")).changed();
+            changed |= ui.add(egui::Slider::new(&mut ov.flexure_gpu_cycles, 1..=8).text("V-cycles")).changed();
+        }
+        
+        ui.separator();
         changed |= ui.add(egui::Slider::new(&mut ov.e_gpa, 20.0..=120.0).text("E (GPa)")).changed();
         changed |= ui.add(egui::Slider::new(&mut ov.nu, 0.15..=0.30).text("nu")).changed();
         changed |= ui.add(egui::Slider::new(&mut ov.te_km, 5.0..=50.0).text("Te (km)")).changed();
@@ -2007,6 +2033,16 @@ fn main() {
                         config.enable_rifting = process_flags.enable_rifting;
                         config.enable_ridge_birth = process_flags.enable_ridge_birth;
                         
+                        // Apply flexure backend selection from UI
+                        config.flexure_backend = if process_flags.flexure_backend_cpu {
+                            engine::flexure_manager::FlexureBackend::CpuWinkler
+                        } else {
+                            engine::flexure_manager::FlexureBackend::GpuMultigrid {
+                                levels: process_flags.flexure_gpu_levels,
+                                cycles: process_flags.flexure_gpu_cycles,
+                            }
+                        };
+                        
                         // Legacy compatibility (sync old flags if needed)
                         if !cfg.enable_flexure { config.enable_flexure = false; }
                         if cfg.enable_erosion { config.enable_surface_processes = true; }
@@ -2447,6 +2483,11 @@ fn main() {
                                             enable_accretion: ov.enable_accretion,
                                             enable_rifting: ov.enable_rifting,
                                             enable_ridge_birth: ov.enable_ridge_birth,
+                                            
+                                            // Flexure backend configuration
+                                            flexure_backend_cpu: ov.flexure_backend_cpu,
+                                            flexure_gpu_levels: ov.flexure_gpu_levels,
+                                            flexure_gpu_cycles: ov.flexure_gpu_cycles,
                                         };
                                         let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                                                     }
@@ -2910,6 +2951,11 @@ fn main() {
                                     enable_accretion: ov.enable_accretion,
                                     enable_rifting: ov.enable_rifting,
                                     enable_ridge_birth: ov.enable_ridge_birth,
+                                    
+                                    // Flexure backend configuration
+                                    flexure_backend_cpu: ov.flexure_backend_cpu,
+                                    flexure_gpu_levels: ov.flexure_gpu_levels,
+                                    flexure_gpu_cycles: ov.flexure_gpu_cycles,
                                 };
                                 let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                             }
