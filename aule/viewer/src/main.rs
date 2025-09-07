@@ -3,6 +3,7 @@
 
 mod colormap;
 mod globe;
+mod gpu_buffer_manager;
 mod overlay;
 mod plot;
 mod plot_age_depth;
@@ -11,6 +12,7 @@ mod raster;
 mod raster_gpu;
 use viewer::cpu_picker::{GeoPicker, Vec3};
 use viewer::pixel_map::{pixel_to_lon_lat, sph_to_unit as sph_to_unit_px};
+use gpu_buffer_manager::GpuBufferManager;
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
@@ -1830,6 +1832,8 @@ fn main() {
         globe_cam: None,
     };
     let mut ov = overlay::OverlayState::default();
+    // GPU buffer manager for consistent elevation data
+    let mut gpu_buf_mgr = GpuBufferManager::new();
     // Edge-triggered snapshots state
     let next_snapshot_t: f64 = f64::INFINITY;
     let mut flex = plot_flexure::FlexureUI::default();
@@ -2155,6 +2159,8 @@ fn main() {
                                 world.sea.eta_m = eta;
                                 world.clock.t_myr = t_myr;
                                 ov.world_dirty = true; ov.color_dirty = true;
+                                // Invalidate GPU buffer cache when world changes
+                                gpu_buf_mgr.invalidate_cache();
                             }
                             
                             // Drain any world snapshots and update complete world state for overlays
@@ -2179,6 +2185,8 @@ fn main() {
                                 ov.bathy_cache = None;
                                 ov.net_adj_cache = None;
                                 ov.net_tj_cache = None;
+                                // Invalidate GPU buffer cache when world changes
+                                gpu_buf_mgr.invalidate_cache();
                             }
                             // Central canvas (draw only, no controls) — make transparent so 3D pass remains visible
                             egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
@@ -2271,12 +2279,8 @@ fn main() {
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                // Raster shader expects depth (positive down); provide depth directly
-                                let verts: Vec<f32> = if let Some(elevation) = get_elevation_state().get_clone() {
-                                    elevation.iter().map(|&z| world.sea.eta_m - z).collect()
-                                } else {
-                                    world.depth_m.clone()
-                                };
+                                                // Raster shader expects depth (positive down); use GPU buffer manager for consistency
+                                                let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
@@ -2394,12 +2398,8 @@ fn main() {
                                                         rg.write_cpu_face_pick(&gpu.queue, &cpu_faces);
                                                     }
                                                     rg.write_uniforms(&gpu.queue, &u);
-                                                    // Raster shader expects depth (positive down); provide depth directly
-                                                    let depth_now: Vec<f32> = if let Some(elevation) = get_elevation_state().get_clone() {
-                                                        elevation.iter().map(|&z| world.sea.eta_m - z).collect()
-                                                    } else {
-                                                        world.depth_m.clone()
-                                                    };
+                                                    // Raster shader expects depth (positive down); use GPU buffer manager for consistency
+                                                    let depth_now = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                     rg.write_vertex_values(&gpu.queue, &depth_now);
                                                     rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                     rg.dispatch(&gpu.device, &gpu.queue);
@@ -2685,8 +2685,7 @@ fn main() {
                                 gr.write_lut_from_overlay(&gpu.queue, &ov);
                                 // If world changed, refresh vertex heights using elevation (η − depth)
                                 if ov.world_dirty {
-                                    let heights_now: Vec<f32> = elevation_curr_clone()
-                                        .unwrap_or_else(|| world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect());
+                                    let heights_now = gpu_buf_mgr.get_elevation_for_comparison(&world);
                                     gr.upload_heights(&gpu.queue, &heights_now);
                                 }
                                 gr.update_uniforms(
