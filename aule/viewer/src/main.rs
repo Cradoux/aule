@@ -22,17 +22,51 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-// --- Global CPU elevation snapshots (double-buffered) ---
-static mut ELEVATION_CURR: Option<Vec<f32>> = None;
-// Removed unused ELEVATION_STAGE staging buffer
-
 // --- Hypsometry snapshot guards (poison detection & slew) ---
 // Physical constants - use centralized values from engine
 fn get_phys_consts() -> engine::PhysConsts {
     engine::PhysConsts::default()
 }
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+
+// --- Thread-safe elevation state management ---
+#[derive(Clone)]
+struct ElevationState {
+    data: Arc<RwLock<Option<Vec<f32>>>>,
+}
+
+impl ElevationState {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(None)),
+        }
+    }
+    
+    fn update(&self, new_elevation: Vec<f32>) {
+        if let Ok(mut data) = self.data.write() {
+            match data.as_mut() {
+                Some(existing) => *existing = new_elevation,
+                None => *data = Some(new_elevation),
+            }
+        }
+    }
+    
+    fn get_clone(&self) -> Option<Vec<f32>> {
+        if let Ok(data) = self.data.read() {
+            data.clone()
+        } else {
+            None
+        }
+    }
+}
+
+// Global thread-safe elevation state
+static ELEVATION_STATE: OnceLock<ElevationState> = OnceLock::new();
+
+fn get_elevation_state() -> &'static ElevationState {
+    ELEVATION_STATE.get_or_init(|| ElevationState::new())
+}
 
 // --- Simulation thread messages and snapshot types ---
 #[derive(Clone, Debug)]
@@ -2067,16 +2101,20 @@ fn main() {
                                     }
                                     ui.separator();
                                     // Live land fraction (area-weighted) using ELEVATION_CURR if available to match guard slice
-                                    let land_pct_now: f64 = unsafe {
-                                        if let Some(curr) = ELEVATION_CURR.as_ref() {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
-                                            for (&z, &a) in curr.iter().zip(world.area_m2.iter()) { area_sum += a as f64; if z as f64 > 0.0 { land_area += a as f64; } }
-                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
-                                        } else {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
-                                            for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { area_sum += a as f64; if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } }
-                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
+                                    let land_pct_now: f64 = if let Some(elevation) = get_elevation_state().get_clone() {
+                                        let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
+                                        for (&z, &a) in elevation.iter().zip(world.area_m2.iter()) { 
+                                            area_sum += a as f64; 
+                                            if z as f64 > 0.0 { land_area += a as f64; } 
                                         }
+                                        if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
+                                    } else {
+                                        let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
+                                        for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { 
+                                            area_sum += a as f64; 
+                                            if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } 
+                                        }
+                                        if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
                                     };
                                     ui.label(format!("Land: {:.1}%", land_pct_now));
                                 });
@@ -2113,10 +2151,7 @@ fn main() {
                             }
                             // Drain any pending simulation snapshots (non-blocking)
                             while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                                unsafe {
-                                    if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
-                                    if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
-                                }
+                                get_elevation_state().update(elev);
                                 world.sea.eta_m = eta;
                                 world.clock.t_myr = t_myr;
                                 ov.world_dirty = true; ov.color_dirty = true;
@@ -2237,13 +2272,11 @@ fn main() {
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 // Raster shader expects depth (positive down); provide depth directly
-                                                let verts: Vec<f32> = unsafe {
-                                                    if let Some(curr) = ELEVATION_CURR.as_ref() {
-                                                        curr.iter().map(|&z| world.sea.eta_m - z).collect()
-                                                    } else {
-                                                        world.depth_m.clone()
-                                                    }
-                                                };
+                                let verts: Vec<f32> = if let Some(elevation) = get_elevation_state().get_clone() {
+                                    elevation.iter().map(|&z| world.sea.eta_m - z).collect()
+                                } else {
+                                    world.depth_m.clone()
+                                };
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
@@ -2362,12 +2395,10 @@ fn main() {
                                                     }
                                                     rg.write_uniforms(&gpu.queue, &u);
                                                     // Raster shader expects depth (positive down); provide depth directly
-                                                    let depth_now: Vec<f32> = unsafe {
-                                                        if let Some(curr) = ELEVATION_CURR.as_ref() {
-                                                            curr.iter().map(|&z| world.sea.eta_m - z).collect()
-                                                        } else {
-                                                            world.depth_m.clone()
-                                                        }
+                                                    let depth_now: Vec<f32> = if let Some(elevation) = get_elevation_state().get_clone() {
+                                                        elevation.iter().map(|&z| world.sea.eta_m - z).collect()
+                                                    } else {
+                                                        world.depth_m.clone()
                                                     };
                                                     rg.write_vertex_values(&gpu.queue, &depth_now);
                                                     rg.write_lut_from_overlay(&gpu.queue, &ov);
@@ -2792,10 +2823,7 @@ fn main() {
                         }
                         // Drain any snapshot from the worker and update visible world
                         while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                            unsafe {
-                                if ELEVATION_CURR.is_none() { ELEVATION_CURR = Some(vec![0.0; elev.len()]); }
-                                if let Some(curr) = ELEVATION_CURR.as_mut() { *curr = elev; }
-                            }
+                            get_elevation_state().update(elev);
                             world.sea.eta_m = eta;
                             world.clock.t_myr = t_myr;
                             ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true;
@@ -2885,5 +2913,5 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
 }
 
 fn elevation_curr_clone() -> Option<Vec<f32>> {
-    unsafe { ELEVATION_CURR.clone() }
+    get_elevation_state().get_clone()
 }
