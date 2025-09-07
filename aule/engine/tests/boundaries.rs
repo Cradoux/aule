@@ -3,7 +3,8 @@ use engine::{boundaries::Boundaries, geo, grid::Grid};
 #[test]
 fn determinism_symmetry_basic() {
     let f = 16u32;
-    let g = Grid::new(f);
+    let mut g = Grid::new(f);
+    g.precompute_local_bases_and_lengths(); // Required for boundary classification
     // Build a deterministic plate/velocity field using Plates module
     let plates = engine::plates::Plates::new(&g, 8, 42);
     let b1 = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.005);
@@ -31,7 +32,8 @@ fn determinism_symmetry_basic() {
 #[test]
 fn threshold_monotonicity() {
     let f = 16u32;
-    let g = Grid::new(f);
+    let mut g = Grid::new(f);
+    g.precompute_local_bases_and_lengths(); // Required for boundary classification
     let plates = engine::plates::Plates::new(&g, 8, 123);
     let hi = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.02);
     let lo = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.002);
@@ -47,7 +49,8 @@ fn threshold_monotonicity() {
 #[test]
 fn edge_kin_consistency_spotcheck() {
     let f = 16u32;
-    let g = Grid::new(f);
+    let mut g = Grid::new(f);
+    g.precompute_local_bases_and_lengths(); // Required for boundary classification
     let plates = engine::plates::Plates::new(&g, 8, 7);
     let b = Boundaries::classify(&g, &plates.plate_id, &plates.vel_en, 0.005);
     assert_eq!(b.edge_kin.len(), b.edges.len());
