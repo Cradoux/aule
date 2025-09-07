@@ -12,6 +12,8 @@ pub use boundaries::{Boundaries, BoundaryStats, EdgeClass, EdgeKin};
 pub mod cfl;
 /// Configuration types shared between pipeline and world modules.
 pub mod config;
+/// Centralized elevation buffer management with caching.
+pub mod elevation_manager;
 /// Flexure load assembly helpers.
 pub mod flexure_loads;
 

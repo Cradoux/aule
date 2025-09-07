@@ -4,7 +4,9 @@
 //! use, with mode differences expressed as configuration rather than separate code paths.
 
 use crate::{
-    config::{PhysicsConfig, PipelineMode}, pipeline::SurfaceFields, world::World
+    config::{PhysicsConfig, PipelineMode}, 
+    elevation_manager::ElevationManager, 
+    pipeline::SurfaceFields, world::World
 };
 
 /// Result of a unified pipeline step.
@@ -58,10 +60,8 @@ pub struct StepTimings {
 /// Unified pipeline executor that handles both Simple and Advanced mode behavior.
 pub struct UnifiedPipeline {
     config: PhysicsConfig,
-    /// Cached elevation buffer for efficiency
-    elevation_cache: Option<Vec<f32>>,
-    /// Whether elevation cache is valid
-    cache_valid: bool,
+    /// Centralized elevation management with intelligent caching
+    elevation_mgr: Option<ElevationManager>,
 }
 
 impl UnifiedPipeline {
@@ -69,8 +69,7 @@ impl UnifiedPipeline {
     pub fn new(config: PhysicsConfig) -> Self {
         Self {
             config,
-            elevation_cache: None,
-            cache_valid: false,
+            elevation_mgr: None,
         }
     }
     
@@ -113,9 +112,7 @@ impl UnifiedPipeline {
             PipelineMode::Realtime { preserve_depth: _ } => {
                 // Realtime mode: Keep eta separate, don't modify depth_m
                 world.sea.eta_m = eta_temp;
-                // Cache the computed elevation for renderer
-                self.elevation_cache = Some(elevation_temp);
-                self.cache_valid = true;
+                // Elevation manager will handle caching automatically
             }
             
             PipelineMode::Batch { write_back_sea_level } => {
@@ -132,11 +129,7 @@ impl UnifiedPipeline {
                     world.sea.eta_m = eta_temp;
                 }
                 // Cache elevation for renderer (always eta - depth_m for consistency)
-                let elevation: Vec<f32> = world.depth_m.iter()
-                    .map(|&d| world.sea.eta_m - d)
-                    .collect();
-                self.elevation_cache = Some(elevation);
-                self.cache_valid = true;
+                // Elevation manager will compute elevation on demand
             }
         }
         
@@ -165,34 +158,40 @@ impl UnifiedPipeline {
     /// Get current elevation field (positive up).
     /// Returns cached elevation if valid, otherwise computes from depth_m and eta_m.
     pub fn elevation(&mut self, world: &World) -> &[f32] {
-        if !self.cache_valid || self.elevation_cache.is_none() {
-            let elevation = world.depth_m.iter()
-                .map(|&d| world.sea.eta_m - d)
-                .collect();
-            self.elevation_cache = Some(elevation);
-            self.cache_valid = true;
+        // Initialize elevation manager if needed
+        if self.elevation_mgr.is_none() {
+            self.elevation_mgr = Some(ElevationManager::new(
+                world.depth_m.clone(),
+                world.sea.eta_m
+            ));
         }
         
-        self.elevation_cache.as_ref().unwrap()
+        // Update elevation manager with current world state and get elevation
+        if let Some(ref mut mgr) = self.elevation_mgr {
+            mgr.update_depth_and_eta(world.depth_m.clone(), world.sea.eta_m);
+            mgr.get_elevation()
+        } else {
+            unreachable!("Elevation manager should be initialized above")
+        }
     }
     
     /// Check if elevation data has changed since last access.
     pub fn is_elevation_dirty(&self) -> bool {
-        !self.cache_valid
+        self.elevation_mgr.as_ref()
+            .map(|mgr| !mgr.is_cache_valid())
+            .unwrap_or(true)
     }
     
     /// Mark elevation as needing recomputation.
     pub fn invalidate_elevation_cache(&mut self) {
-        self.cache_valid = false;
+        if let Some(ref mut mgr) = self.elevation_mgr {
+            mgr.invalidate();
+        }
     }
     
-    /// Get a reference to the cached elevation if available.
-    pub fn cached_elevation(&self) -> Option<&[f32]> {
-        if self.cache_valid {
-            self.elevation_cache.as_ref().map(|v| v.as_slice())
-        } else {
-            None
-        }
+    /// Get a cloned copy of the elevation field.
+    pub fn elevation_clone(&mut self, world: &World) -> Vec<f32> {
+        self.elevation(world).to_vec()
     }
 }
 

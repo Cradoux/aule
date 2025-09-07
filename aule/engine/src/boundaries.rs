@@ -130,10 +130,9 @@ impl Boundaries {
                             if v <= u {
                                 continue;
                             }
-                            // CRITICAL FIX: Don't skip intra-plate boundaries!
-                            // Geological processes happen based on stress, not plate IDs.
-                            // We need to detect ALL boundaries where significant geological activity occurs.
-                            let same_plate = pid_t[u as usize] == pid_t[v as usize];
+                            if pid_t[u as usize] == pid_t[v as usize] {
+                                continue;
+                            }
                             let ru = pos_t[u as usize];
                             let rv = pos_t[v as usize];
                             let rm = crate::geo::normalize([
@@ -200,16 +199,7 @@ impl Boundaries {
                                 0u8 // No significant activity
                             };
                             
-                            // CRITICAL FIX: Only include boundaries with significant geological activity
-                            // For inter-plate boundaries: always include if different plates
-                            // For intra-plate boundaries: only include if significant stress (class != 0)
-                            let include_boundary = if same_plate {
-                                class != 0 && (n.abs() > tau * 2.0 || t_abs > tau * 2.0) // Higher threshold for intra-plate
-                            } else {
-                                true // Always include inter-plate boundaries
-                            };
-                            // Only add boundaries that meet our inclusion criteria
-                            if include_boundary && class != 0 {
+                            if class != 0 {
                                 match class {
                                     1 => {
                                         st.divergent += 1;

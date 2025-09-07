@@ -213,7 +213,8 @@ fn snapshot_tiny_grid_one_step() {
     assert_eq!(n_r, n_r2);
     assert_eq!(n_s, n_s2);
     assert_eq!(n_t, n_t2);
-    // land fraction
+    // land fraction - get elevation from unified pipeline
+    let elev2 = pipeline2.elevation_clone(&w2);
     let mut land2 = 0.0f64;
     let mut tot2 = 0.0f64;
     for (a, &z) in w2.area_m2.iter().zip(elev2.iter()) {
