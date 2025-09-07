@@ -85,8 +85,23 @@ struct WorldSnapshot {
 }
 
 #[derive(Clone, Debug)]
+struct ProcessFlags {
+    pub enable_rigid_motion: bool,
+    pub enable_subduction: bool,
+    pub enable_transforms: bool,
+    pub enable_flexure: bool,
+    pub enable_surface_processes: bool,
+    pub enable_isostasy: bool,
+    pub enable_continental_buoyancy: bool,
+    pub enable_orogeny: bool,
+    pub enable_accretion: bool,
+    pub enable_rifting: bool,
+    pub enable_ridge_birth: bool,
+}
+
+#[derive(Clone, Debug)]
 enum SimCommand {
-    Step(engine::config::PipelineCfg),
+    Step(engine::config::PipelineCfg, ProcessFlags),
     SyncWorld(WorldSnapshot),
     Stop,
 }
@@ -980,11 +995,51 @@ fn render_advanced_panels(
     world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
 ) {
+    egui::CollapsingHeader::new("Physics Processes")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            ui.label("Enable/disable individual physics processes:");
+            ui.separator();
+            
+            // Core processes
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut ov.enable_rigid_motion, "Rigid motion").changed();
+                changed |= ui.checkbox(&mut ov.enable_subduction, "Subduction").changed();
+                changed |= ui.checkbox(&mut ov.enable_transforms, "Transforms").changed();
+            });
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut ov.enable_flexure, "Flexure").changed();
+                changed |= ui.checkbox(&mut ov.enable_isostasy, "Sea level").changed();
+                changed |= ui.checkbox(&mut ov.enable_ridge_birth, "Ridge birth").changed();
+            });
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut ov.enable_surface_processes, "Surface processes").changed();
+                changed |= ui.checkbox(&mut ov.enable_continental_buoyancy, "Continental buoyancy").changed();
+            });
+            
+            // Advanced processes
+            ui.separator();
+            ui.label("Advanced processes:");
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut ov.enable_orogeny, "Orogeny (C-C collision)").changed();
+                changed |= ui.checkbox(&mut ov.enable_accretion, "Accretion (O-C)").changed();
+                changed |= ui.checkbox(&mut ov.enable_rifting, "Continental rifting").changed();
+            });
+            
+            if changed {
+                ov.bounds_cache = None;
+                ov.plates_cache = None;
+                ov.world_dirty = true;
+            }
+        });
+
     egui::CollapsingHeader::new("Kinematics & Boundaries")
         .default_open(ov.adv_open_kinematics)
         .show(ui, |ui| {
             let mut changed = false;
-            changed |= ui.checkbox(&mut ov.kin_enable, "Enable rigid motion").changed();
+            // Sync legacy flag with unified flag
+            ov.kin_enable = ov.enable_rigid_motion;
             changed |= ui
                 .add(egui::Slider::new(&mut ov.kin_trail_steps, 0..=5).text("Trail steps"))
                 .changed();
@@ -1933,18 +1988,31 @@ fn main() {
             );
             while let Ok(cmd) = rx_cmd_bg.recv() {
                 match cmd {
-                    SimCommand::Step(cfg) => {
+                    SimCommand::Step(cfg, process_flags) => {
                         sim_busy_bg.store(true, Ordering::SeqCst);
                         // Convert PipelineCfg to PhysicsConfig for unified pipeline
                         let mut config = engine::config::PhysicsConfig::simple_mode();
                         config.dt_myr = cfg.dt_myr;
-                        config.enable_flexure = cfg.enable_flexure;
-                        config.enable_surface_processes = cfg.enable_erosion;
-                        config.enable_continental_buoyancy = true; // Independent of erosion
+                        
+                        // Apply unified process enable flags from UI
+                        config.enable_rigid_motion = process_flags.enable_rigid_motion;
+                        config.enable_subduction = process_flags.enable_subduction;
+                        config.enable_transforms = process_flags.enable_transforms;
+                        config.enable_flexure = process_flags.enable_flexure;
+                        config.enable_surface_processes = process_flags.enable_surface_processes;
+                        config.enable_isostasy = process_flags.enable_isostasy;
+                        config.enable_continental_buoyancy = process_flags.enable_continental_buoyancy;
+                        config.enable_orogeny = process_flags.enable_orogeny;
+                        config.enable_accretion = process_flags.enable_accretion;
+                        config.enable_rifting = process_flags.enable_rifting;
+                        config.enable_ridge_birth = process_flags.enable_ridge_birth;
+                        
+                        // Legacy compatibility (sync old flags if needed)
+                        if !cfg.enable_flexure { config.enable_flexure = false; }
+                        if cfg.enable_erosion { config.enable_surface_processes = true; }
+                        
                         config.target_land_frac = cfg.target_land_frac;
                         config.freeze_eta = cfg.freeze_eta;
-                        config.enable_subduction = cfg.enable_subduction;
-                        config.enable_rigid_motion = cfg.enable_rigid_motion;
                         
                         // Copy surface process parameters
                         config.surface_params.k_stream = cfg.surf_k_stream;
@@ -2367,7 +2435,20 @@ fn main() {
                                                             fb_max_domega: 5.0e-9,
                                                             fb_max_omega: 2.0e-7,
                                                         };
-                                                        let _ = tx_cmd.send(SimCommand::Step(cfg));
+                                                        let process_flags = ProcessFlags {
+                                            enable_rigid_motion: ov.enable_rigid_motion,
+                                            enable_subduction: ov.enable_subduction,
+                                            enable_transforms: ov.enable_transforms,
+                                            enable_flexure: ov.enable_flexure,
+                                            enable_surface_processes: ov.enable_surface_processes,
+                                            enable_isostasy: ov.enable_isostasy,
+                                            enable_continental_buoyancy: ov.enable_continental_buoyancy,
+                                            enable_orogeny: ov.enable_orogeny,
+                                            enable_accretion: ov.enable_accretion,
+                                            enable_rifting: ov.enable_rifting,
+                                            enable_ridge_birth: ov.enable_ridge_birth,
+                                        };
+                                        let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                                                     }
                                                     ctx.request_repaint();
                                                 }
@@ -2817,7 +2898,20 @@ fn main() {
                                     fb_max_domega: 5.0e-9,
                                     fb_max_omega: 2.0e-7,
                                 };
-                                let _ = tx_cmd.send(SimCommand::Step(cfg));
+                                let process_flags = ProcessFlags {
+                                    enable_rigid_motion: ov.enable_rigid_motion,
+                                    enable_subduction: ov.enable_subduction,
+                                    enable_transforms: ov.enable_transforms,
+                                    enable_flexure: ov.enable_flexure,
+                                    enable_surface_processes: ov.enable_surface_processes,
+                                    enable_isostasy: ov.enable_isostasy,
+                                    enable_continental_buoyancy: ov.enable_continental_buoyancy,
+                                    enable_orogeny: ov.enable_orogeny,
+                                    enable_accretion: ov.enable_accretion,
+                                    enable_rifting: ov.enable_rifting,
+                                    enable_ridge_birth: ov.enable_ridge_birth,
+                                };
+                                let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                             }
                         }
                         // Drain any snapshot from the worker and update visible world

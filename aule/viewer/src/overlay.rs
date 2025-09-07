@@ -306,6 +306,19 @@ pub struct OverlayState {
     pub disable_flexure: bool,
     pub disable_subduction: bool,
 
+    // Unified physics process enable flags (T-unify-16)
+    pub enable_rigid_motion: bool,
+    pub enable_subduction: bool,
+    pub enable_transforms: bool,
+    // enable_flexure already exists above (line 179)
+    pub enable_surface_processes: bool,
+    pub enable_isostasy: bool,
+    pub enable_continental_buoyancy: bool,
+    pub enable_orogeny: bool,
+    pub enable_accretion: bool,
+    pub enable_rifting: bool,
+    pub enable_ridge_birth: bool,
+
     // Parity heat overlay (CPU vs GPU)
     pub show_parity_heat: bool,
     pub parity_points: Option<Vec<[u32; 2]>>, // pixel coords in raster space
@@ -584,6 +597,19 @@ impl Default for OverlayState {
             disable_erosion: false,
             disable_flexure: false,
             disable_subduction: false,
+
+            // Unified physics process enable flags (default: all enabled for advanced mode)
+            enable_rigid_motion: true,
+            enable_subduction: true,
+            enable_transforms: true,
+            // enable_flexure: true, (already initialized above)
+            enable_surface_processes: false, // Off by default (heavy computation)
+            enable_isostasy: true,
+            enable_continental_buoyancy: true,
+            enable_orogeny: false, // Advanced feature, off by default
+            enable_accretion: false, // Advanced feature, off by default  
+            enable_rifting: false, // Advanced feature, off by default
+            enable_ridge_birth: true,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,
