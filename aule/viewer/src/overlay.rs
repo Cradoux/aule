@@ -271,8 +271,9 @@ pub struct OverlayState {
     pub tile_halo_rings: u32,
     pub high_f_available: bool,
 
-    // Simple/Advanced UI (T-500)
-    pub mode_simple: bool,
+    // Unified UI mode (T-500 unified)
+    pub ui_mode: engine::config::UiMode,
+    pub mode_simple: bool, // Legacy field for compatibility
     pub mode_was_simple: bool,
     pub drawer_open: bool,
     pub simple_seed: u64,
@@ -580,6 +581,7 @@ impl Default for OverlayState {
             tile_halo_rings: 1,
             high_f_available: false,
 
+            ui_mode: engine::config::UiMode::Simple,
             mode_simple: true,
             mode_was_simple: true,
             drawer_open: true,

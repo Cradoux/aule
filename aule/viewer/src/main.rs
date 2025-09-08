@@ -394,6 +394,8 @@ fn run_to_t_realtime(
         std::thread::yield_now();
     }
 }
+
+
 fn render_simple_panels(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -2269,7 +2271,7 @@ fn main() {
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
                             
                             // Advanced-only shortcuts (complex overlays and debug features)
-                            if !ov.mode_simple {
+                            if ov.ui_mode.show_advanced_overlays() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_plate_adjacency = !ov.show_plate_adjacency; ov.net_adj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_triple_junctions = !ov.show_triple_junctions; ov.net_tj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
@@ -2292,7 +2294,16 @@ fn main() {
                                     ui.label(format!("Aulé Viewer v{}", env!("CARGO_PKG_VERSION")));
                                     ui.separator();
                                     ui.label("Mode:");
-                                    ui.checkbox(&mut ov.mode_simple, "Simple mode");
+                                    ui.horizontal(|ui| {
+                                        if ui.selectable_label(matches!(ov.ui_mode, engine::config::UiMode::Simple), "Simple").clicked() {
+                                            ov.ui_mode = engine::config::UiMode::Simple;
+                                            ov.mode_simple = true; // Legacy sync
+                                        }
+                                        if ui.selectable_label(matches!(ov.ui_mode, engine::config::UiMode::Advanced), "Advanced").clicked() {
+                                            ov.ui_mode = engine::config::UiMode::Advanced;
+                                            ov.mode_simple = false; // Legacy sync
+                                        }
+                                    });
                                     ui.separator();
                                     ui.label("View:");
                                     ui.selectable_value(&mut ov.view_mode, overlay::ViewMode::Map, "Map 2D");
@@ -2335,7 +2346,10 @@ fn main() {
                                     egui::ScrollArea::vertical()
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
-                                                if ov.mode_simple {
+                                                // Synchronize legacy mode_simple with ui_mode
+                                                ov.mode_simple = matches!(ov.ui_mode, engine::config::UiMode::Simple);
+                                                
+                                                if ov.ui_mode == engine::config::UiMode::Simple {
                                                     render_simple_panels(ui, ctx, &mut world, &mut ov, &tx_cmd);
                                                 } else {
                                                     render_advanced_panels(ui, ctx, &mut world, &mut ov);
@@ -2417,7 +2431,7 @@ fn main() {
                                         let ui_hijacked = ctx.is_using_pointer() || ctx.is_pointer_over_area();
                                         cam.update_from_input(&egui_ctx, ui_hijacked);
                                     }
-                                } else if ov.mode_simple {
+                                } else if ov.ui_mode == engine::config::UiMode::Simple {
                                     // T-902A-GPU: compute raster path
                                     if ov.use_gpu_raster {
                                         // Resolution policy: HQ when paused, LQ when running

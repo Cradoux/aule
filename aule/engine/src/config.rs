@@ -20,6 +20,46 @@ pub enum PipelineMode {
     },
 }
 
+/// UI mode configuration - Simple vs Advanced as parameter sets
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiMode {
+    /// Simple mode: streamlined interface with sensible defaults
+    Simple,
+    /// Advanced mode: full control over all parameters  
+    Advanced,
+}
+
+impl UiMode {
+    /// Get human-readable name for this mode
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            UiMode::Simple => "Simple",
+            UiMode::Advanced => "Advanced",
+        }
+    }
+    
+    /// Check if this mode should show advanced overlays
+    pub fn show_advanced_overlays(&self) -> bool {
+        matches!(self, UiMode::Advanced)
+    }
+    
+    /// Check if this mode should show debug features
+    pub fn show_debug_features(&self) -> bool {
+        matches!(self, UiMode::Advanced)
+    }
+    
+    /// Check if this mode should show detailed physics controls
+    pub fn show_detailed_physics(&self) -> bool {
+        matches!(self, UiMode::Advanced)
+    }
+}
+
+impl Default for UiMode {
+    fn default() -> Self {
+        UiMode::Simple
+    }
+}
+
 impl Default for PipelineMode {
     fn default() -> Self {
         PipelineMode::Realtime { preserve_depth: true }
@@ -30,6 +70,8 @@ impl Default for PipelineMode {
 /// Simple and Advanced modes will use different presets of this configuration.
 #[derive(Clone, Debug)]
 pub struct PhysicsConfig {
+    /// UI mode that determines interface complexity
+    pub ui_mode: UiMode,
     /// Time step in Myr
     pub dt_myr: f32,
     /// Number of steps to run per frame (viewer may loop externally as well)
@@ -152,6 +194,7 @@ impl PhysicsConfig {
     /// Configuration preset for Simple mode
     pub fn simple_mode() -> Self {
         Self {
+            ui_mode: UiMode::Simple,
             dt_myr: 1.0,
             steps_per_frame: 1,
             
@@ -226,6 +269,7 @@ impl PhysicsConfig {
     /// Configuration preset for Advanced mode  
     pub fn advanced_mode() -> Self {
         Self {
+            ui_mode: UiMode::Advanced,
             dt_myr: 0.5,
             steps_per_frame: 1,
             
