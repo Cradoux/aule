@@ -791,6 +791,9 @@ fn generate_world_with_preset(
     ov.world_dirty = true;
     ov.raster_dirty = true;
     
+    // CRITICAL: Ensure bathymetry display is enabled to show elevation colors
+    ov.show_bathy = true;
+    
     // Force repaint immediately
     ctx.request_repaint();
 }

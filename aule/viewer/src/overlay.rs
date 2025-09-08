@@ -418,7 +418,7 @@ impl Default for OverlayState {
             vel_cache: None,
             bounds_cache: None,
             show_age: false,
-            show_bathy: false,
+            show_bathy: true,
             show_continents_field: false,
             continents_apply: true,
             v_floor_cm_per_yr: 0.5,
