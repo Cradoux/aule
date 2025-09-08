@@ -30,10 +30,14 @@ fn update_elevation_systems(world: &engine::world::World, ov: &mut overlay::Over
     // Update ElevationState for GPU consistency
     crate::get_elevation_state().update(elevation.clone());
     
-    // Invalidate overlay caches that depend on elevation
+    // Invalidate ALL overlay caches that depend on elevation
     ov.bathy_cache = None;
+    ov.plates_cache = None;
+    ov.vel_cache = None;
+    ov.bounds_cache = None;
     ov.color_dirty = true;
     ov.world_dirty = true;
+    ov.raster_dirty = true;
     
     // Log elevation statistics for debugging
     let elev_min = elevation.iter().fold(f32::INFINITY, |a, &b| a.min(b));
@@ -778,8 +782,16 @@ fn generate_world_with_preset(
     // Update all elevation systems for consistency
     update_elevation_systems(world, ov);
     
-    // Mark world as updated
+    // CRITICAL: Force complete cache invalidation for immediate visual update
+    ov.bathy_cache = None;
+    ov.plates_cache = None;
+    ov.vel_cache = None;
+    ov.bounds_cache = None;
+    ov.color_dirty = true;
+    ov.world_dirty = true;
     ov.raster_dirty = true;
+    
+    // Force repaint immediately
     ctx.request_repaint();
 }
 
