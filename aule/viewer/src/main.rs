@@ -732,7 +732,7 @@ fn generate_world_with_preset(
     ctx.request_repaint();
 }
 
-/// Generate realistic continents with multifractal noise and proper shapes
+/// Generate realistic continents with multifractal noise and plate-based seeding
 fn generate_realistic_continents(
     world: &mut engine::world::World,
     ov: &overlay::OverlayState,
@@ -746,27 +746,118 @@ fn generate_realistic_continents(
     world.c.fill(0.0);
     world.th_c_m.fill(0.0);
     
-    // Generate continents with realistic shapes
+    // Classify plates as continental or oceanic based on their properties
+    let continental_plates = classify_continental_plates(world, ov);
+    
+    println!("[world_gen] Generating {} continents on {} continental plates", continents_n, continental_plates.len());
+    
+    // Generate continents preferentially on continental plates
     let mut rng_state = ov.simple_seed;
     
     for continent_id in 0..continents_n {
-        // Pick a random center for this continent
-        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-        let center_idx = (rng_state % (n_cells as u64)) as usize;
-        
-        // Generate continent size based on preset
-        let continent_area_fraction = match ov.simple_preset {
-            1 => 0.15, // Archipelago - smaller continents
-            2 => 0.4,  // Continental - larger continents
-            3 => 0.8,  // Supercontinent - one massive continent
-            _ => 0.25, // Balanced
-        };
-        
-        let continent_area = target_land_area_m2 * continent_area_fraction / (continents_n as f64);
-        
-        // Generate realistic continent with multifractal noise
-        generate_continent_with_noise(world, center_idx, continent_area, continent_id, rng_state);
+        // Pick a continental plate for this continent
+        if !continental_plates.is_empty() {
+            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let plate_idx = (rng_state % (continental_plates.len() as u64)) as usize;
+            let target_plate_id = continental_plates[plate_idx];
+            
+            // Find a good center on this continental plate
+            let center_idx = find_continental_plate_center(world, target_plate_id, rng_state);
+            
+            // Generate continent size based on preset
+            let continent_area_fraction = match ov.simple_preset {
+                1 => 0.15, // Archipelago - smaller continents
+                2 => 0.4,  // Continental - larger continents  
+                3 => 0.8,  // Supercontinent - one massive continent
+                _ => 0.25, // Balanced
+            };
+            
+            let continent_area = target_land_area_m2 * continent_area_fraction / (continents_n as f64);
+            
+            // Generate realistic continent with multifractal noise
+            generate_continent_with_noise(world, center_idx, continent_area, continent_id, rng_state, target_plate_id);
+            
+            println!("[world_gen] Continent {} placed on plate {} at cell {}", continent_id, target_plate_id, center_idx);
+        }
     }
+}
+
+/// Classify plates as continental or oceanic based on size and position
+fn classify_continental_plates(world: &engine::world::World, ov: &overlay::OverlayState) -> Vec<u16> {
+    let mut plate_areas = std::collections::HashMap::new();
+    let mut plate_centers = std::collections::HashMap::new();
+    let mut plate_counts = std::collections::HashMap::new();
+    
+    // Calculate area and center for each plate
+    for i in 0..world.grid.cells {
+        let plate_id = world.plates.plate_id[i];
+        let area = world.area_m2[i] as f64;
+        let pos = world.grid.pos_xyz[i];
+        
+        *plate_areas.entry(plate_id).or_insert(0.0) += area;
+        *plate_counts.entry(plate_id).or_insert(0) += 1;
+        
+        let center = plate_centers.entry(plate_id).or_insert([0.0f64; 3]);
+        center[0] += pos[0] as f64;
+        center[1] += pos[1] as f64;
+        center[2] += pos[2] as f64;
+    }
+    
+    // Normalize centers and classify plates
+    let mut continental_plates = Vec::new();
+    let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+    let mean_plate_area = total_area / (plate_areas.len() as f64);
+    
+    for (&plate_id, &area) in &plate_areas {
+        // Normalize center
+        if let Some(center) = plate_centers.get_mut(&plate_id) {
+            let count = plate_counts[&plate_id] as f64;
+            center[0] /= count;
+            center[1] /= count; 
+            center[2] /= count;
+        }
+        
+        // Classify as continental if larger than average (continental plates are typically larger)
+        if area > mean_plate_area * 0.8 {
+            continental_plates.push(plate_id);
+        }
+    }
+    
+    // Ensure we have at least some continental plates
+    if continental_plates.is_empty() {
+        // If no large plates, pick the largest few plates
+        let mut plate_list: Vec<_> = plate_areas.iter().collect();
+        plate_list.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        
+        let num_continental = (plate_areas.len() / 2).max(1).min(4); // 50% of plates, 1-4 range
+        for i in 0..num_continental {
+            if i < plate_list.len() {
+                continental_plates.push(*plate_list[i].0);
+            }
+        }
+    }
+    
+    continental_plates
+}
+
+/// Find a good center point on a specific continental plate
+fn find_continental_plate_center(world: &engine::world::World, target_plate_id: u16, mut rng_state: u64) -> usize {
+    // Collect all cells belonging to this plate
+    let mut plate_cells = Vec::new();
+    for i in 0..world.grid.cells {
+        if world.plates.plate_id[i] == target_plate_id {
+            plate_cells.push(i);
+        }
+    }
+    
+    if plate_cells.is_empty() {
+        return 0; // Fallback
+    }
+    
+    // Pick a random cell from this plate
+    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+    let idx = (rng_state % (plate_cells.len() as u64)) as usize;
+    plate_cells[idx]
 }
 
 /// Generate a single continent with realistic multifractal noise
@@ -776,6 +867,7 @@ fn generate_continent_with_noise(
     target_area: f64,
     continent_id: u32,
     mut rng_state: u64,
+    target_plate_id: u16,
 ) {
     if center_idx >= world.grid.cells {
         return;
@@ -793,6 +885,11 @@ fn generate_continent_with_noise(
     let noise_weights = [1.0, 0.5, 0.25, 0.125, 0.0625]; // Decreasing weights
     
     for i in 0..world.grid.cells {
+        // Only place continents on the target continental plate
+        if world.plates.plate_id[i] != target_plate_id {
+            continue;
+        }
+        
         let pos = world.grid.pos_xyz[i];
         let distance = ((pos[0] - center_pos[0]).powi(2) + 
                        (pos[1] - center_pos[1]).powi(2) + 
@@ -830,7 +927,7 @@ fn generate_continent_with_noise(
                     world.c[i] = c_value.max(world.c[i]);
                     
                     // Continental thickness variation (20-45 km based on noise and position)
-                    let thickness_base = 25_000.0; // 25 km base
+                    let thickness_base = 30_000.0; // 30 km base (more realistic)
                     let thickness_variation = 20_000.0 * continental_strength; // Up to 20 km variation
                     let thickness = (thickness_base + thickness_variation) as f32;
                     world.th_c_m[i] = thickness.max(world.th_c_m[i]);

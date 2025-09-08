@@ -650,17 +650,17 @@ impl Default for OverlayState {
             disable_flexure: false,
             disable_subduction: false,
 
-            // Unified physics process enable flags (default: all enabled for advanced mode)
+            // Unified physics process enable flags (default: ALL ENABLED for realistic geology)
             enable_rigid_motion: true,
             enable_subduction: true,
             enable_transforms: true,
             // enable_flexure: true, (already initialized above)
-            enable_surface_processes: false, // Off by default (heavy computation)
+            enable_surface_processes: true, // Now enabled by default for complete geology
             enable_isostasy: true,
             enable_continental_buoyancy: true,
-            enable_orogeny: false, // Advanced feature, off by default
-            enable_accretion: false, // Advanced feature, off by default  
-            enable_rifting: false, // Advanced feature, off by default
+            enable_orogeny: true,        // Now enabled by default
+            enable_accretion: true,      // Now enabled by default
+            enable_rifting: true,        // Now enabled by default
             enable_ridge_birth: true,
 
             adv_open_kinematics: false,
