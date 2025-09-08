@@ -1781,6 +1781,7 @@ pub fn draw_advanced_layers(
         }
     }
     if ov.show_vel {
+        if ov.world_dirty { ov.vel_cache = None; }
         if ov.vel_cache.is_none() {
             let cap = ov.effective_arrows_cap() as usize;
             ov.vel_cache = Some(build_velocity_arrows(
@@ -1798,6 +1799,7 @@ pub fn draw_advanced_layers(
         }
     }
     if ov.show_bounds {
+        if ov.world_dirty { ov.bounds_cache = None; }
         if ov.bounds_cache.is_none() {
             let cap = ov.effective_bounds_cap() as usize;
             ov.bounds_cache = Some(build_boundary_strokes(

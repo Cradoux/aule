@@ -582,19 +582,19 @@ fn render_world_generation_unified(
                     .on_hover_text("Many small islands - great for learning plate tectonics")
                     .clicked() {
                     ov.simple_preset = 1;
-                    generate_world_with_preset(world, ov, ctx);
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
                 }
                 if ui.button("🌍 Pangaea")
                     .on_hover_text("Supercontinent - shows continental breakup")
                     .clicked() {
                     ov.simple_preset = 3;
-                    generate_world_with_preset(world, ov, ctx);
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
                 }
                 if ui.button("🎲 Random")
                     .on_hover_text("Balanced random world - good default")
                     .clicked() {
                     ov.simple_preset = 0;
-                    generate_world_with_preset(world, ov, ctx);
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
                 }
             });
             
@@ -679,7 +679,7 @@ fn render_world_generation_unified(
             if ui.button("🌍 Generate New World")
                 .on_hover_text("Create a new world with current settings")
                 .clicked() {
-                generate_world_with_preset(world, ov, ctx);
+                generate_world_with_preset(world, ov, ctx, tx_cmd);
             }
         });
 }
@@ -689,6 +689,7 @@ fn generate_world_with_preset(
     world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
     ctx: &egui::Context,
+    tx_cmd: &std::sync::mpsc::Sender<SimCommand>,
 ) {
     let plates = match ov.simple_preset {
         1 => 10,  // Archipelago
@@ -790,9 +791,32 @@ fn generate_world_with_preset(
     ov.color_dirty = true;
     ov.world_dirty = true;
     ov.raster_dirty = true;
+    // Show something immediately: use CPU raster for the first frame after generation
+    ov.use_gpu_raster = false;
+    ov.raster_tex_id = None;
+    {
+        let (rw, rh) = ov.raster_size;
+        let img = raster::render_map(world, ov, rw, rh);
+        ov.raster_tex = Some(ctx.load_texture("raster", img, egui::TextureOptions::LINEAR));
+        ov.raster_dirty = false;
+    }
     
     // CRITICAL: Ensure bathymetry display is enabled to show elevation colors
     ov.show_bathy = true;
+    
+    // CRITICAL: Sync the generated world to the simulation thread
+    let ws = WorldSnapshot {
+        depth_m: world.depth_m.clone(),
+        c: world.c.clone(),
+        th_c_m: world.th_c_m.clone(),
+        sea_eta_m: world.sea.eta_m,
+        plate_id: world.plates.plate_id.clone(),
+        pole_axis: world.plates.pole_axis.clone(),
+        omega_rad_yr: world.plates.omega_rad_yr.clone(),
+        v_en: world.v_en.clone(),
+        age_myr: world.age_myr.clone(),
+    };
+    let _ = tx_cmd.send(SimCommand::SyncWorld(ws));
     
     // Force repaint immediately
     ctx.request_repaint();
@@ -3463,6 +3487,7 @@ fn main() {
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 // Raster shader expects depth (positive down); use GPU buffer manager for consistency
+                                                if ov.world_dirty { gpu_buf_mgr.invalidate_cache(); }
                                                 let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
@@ -3838,6 +3863,11 @@ fn main() {
                                                     painter.add(egui::Shape::mesh(mesh));
                                                 }
                                             }
+                                            // Ensure boundary classification reflects current velocities/plates
+                                            if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
+                                                world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                                ov.bounds_cache = None;
+                                            }
                                             // Draw overlays on top in both modes (unified overlay system)
                                             let saved = ov.show_bathy; ov.show_bathy = false; 
                                             overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); 
@@ -3845,6 +3875,11 @@ fn main() {
                                         }
                                     } else {
                                         // CPU fallback raster
+                                        // Keep boundary classification fresh when world changed
+                                        if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
+                                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                            ov.bounds_cache = None;
+                                        }
                                         if ov.raster_dirty || ov.raster_tex.is_none() {
                                             let (rw, rh) = ov.raster_size;
                                             let img = raster::render_map(&world, &ov, rw, rh);
@@ -3866,7 +3901,29 @@ fn main() {
                                     }
                                     // UI no longer steps; background worker handles stepping
                                 } else {
-                                    overlay::draw_color_layer(ui, &painter, rect, &world, &world.grid, &mut ov);
+                                    // Always draw a smooth raster base even in advanced mode
+                                    if ov.raster_dirty || ov.raster_tex.is_none() {
+                                        let (rw, rh) = ov.raster_size;
+                                        let img = raster::render_map(&world, &ov, rw, rh);
+                                        ov.raster_tex = Some(ctx.load_texture(
+                                            "raster",
+                                            img,
+                                            egui::TextureOptions::LINEAR,
+                                        ));
+                                        ov.raster_dirty = false;
+                                    }
+                                    if let Some(tex) = &ov.raster_tex {
+                                        painter.image(
+                                            tex.id(),
+                                            rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
+                                    // Draw overlays on top
+                                    let saved = ov.show_bathy; ov.show_bathy = false;
+                                    overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
+                                    ov.show_bathy = saved;
                                 }
                             });
                             // Remove legacy central/top UI panels (moved to drawer)
