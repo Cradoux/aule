@@ -3815,7 +3815,11 @@ fn main() {
                                                 ov.bounds_cache = None;
                                             }
                                             // Draw overlays on top (GPU raster provides the base elevation layer)
+                                            // Temporarily disable bathy overlay since GPU raster provides smooth elevation colors
+                                            let saved_show_bathy = ov.show_bathy;
+                                            ov.show_bathy = false;
                                             overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
+                                            ov.show_bathy = saved_show_bathy;
                                         }
                                     } else {
                                         // CPU fallback raster (only when GPU raster is disabled)
