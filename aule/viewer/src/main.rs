@@ -3433,8 +3433,8 @@ fn main() {
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                // Raster shader expects depth (positive down); use world state directly
-                                                let verts = world.depth_m.clone();
+                                                // Ensure GPU raster uses the same data as CPU overlays
+                                                let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
@@ -3573,8 +3573,8 @@ fn main() {
                                                     dbg |= if ov.force_cpu_face_pick { 1u32<<7 } else { 0 };
                                                     dbg |= if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 };
                                                     let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                    // Raster path uses depth; ensure we don't seed elevation here
-                                                    // If forcing CPU face pick, generate per-pixel face ids using FACE_GEOM (A,B,C,N)
+                                                    // Ensure GPU raster uses consistent data source
+                                                    let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                     if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
                                                         let mut cpu_faces: Vec<u32> = vec![0; (rw * rh) as usize];
                                                         let picker = GeoPicker::new();
@@ -3588,9 +3588,8 @@ fn main() {
                                                         rg.write_cpu_face_pick(&gpu.queue, &cpu_faces);
                                                     }
                                                     rg.write_uniforms(&gpu.queue, &u);
-                                                    // Raster shader expects depth (positive down); use GPU buffer manager for consistency
-                                                    let depth_now = gpu_buf_mgr.get_depth_for_gpu(&world);
-                                                    rg.write_vertex_values(&gpu.queue, &depth_now);
+                                                    // Use the same vertex data for consistency
+                                                    rg.write_vertex_values(&gpu.queue, &verts);
                                                     rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                     rg.dispatch(&gpu.device, &gpu.queue);
                                                     // Optional parity readback and console stats when debug bit is set
@@ -3815,11 +3814,7 @@ fn main() {
                                                 ov.bounds_cache = None;
                                             }
                                             // Draw overlays on top (GPU raster provides the base elevation layer)
-                                            // Temporarily disable bathy overlay since GPU raster provides smooth elevation colors
-                                            let saved_show_bathy = ov.show_bathy;
-                                            ov.show_bathy = false;
                                             overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
-                                            ov.show_bathy = saved_show_bathy;
                                         }
                                     } else {
                                         // CPU fallback raster (only when GPU raster is disabled)
