@@ -14,6 +14,37 @@ use viewer::cpu_picker::{GeoPicker, Vec3};
 use viewer::pixel_map::{pixel_to_lon_lat, sph_to_unit as sph_to_unit_px};
 use gpu_buffer_manager::GpuBufferManager;
 
+/// Unified elevation computation to ensure consistency between overlays and rendering
+fn compute_unified_elevation(world: &engine::world::World) -> Vec<f32> {
+    // Standard elevation calculation: elevation = eta - depth (positive up)
+    world.depth_m.iter()
+        .map(|&d| world.sea.eta_m - d)
+        .collect()
+}
+
+/// Update all elevation-dependent systems for consistency
+fn update_elevation_systems(world: &engine::world::World, ov: &mut overlay::OverlayState) {
+    // Compute unified elevation
+    let elevation = compute_unified_elevation(world);
+    
+    // Update ElevationState for GPU consistency
+    crate::get_elevation_state().update(elevation.clone());
+    
+    // Invalidate overlay caches that depend on elevation
+    ov.bathy_cache = None;
+    ov.color_dirty = true;
+    ov.world_dirty = true;
+    
+    // Log elevation statistics for debugging
+    let elev_min = elevation.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+    let elev_max = elevation.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let land_cells = elevation.iter().filter(|&&z| z > 0.0).count();
+    let land_fraction = land_cells as f64 / elevation.len() as f64;
+    
+    println!("[elevation] Unified elevation: min={:.1}m, max={:.1}m, land={:.1}% ({} cells)", 
+        elev_min, elev_max, land_fraction * 100.0, land_cells);
+}
+
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
 use egui_winit::State as EguiWinitState;
@@ -717,6 +748,13 @@ fn generate_world_with_preset(
     // Generate realistic continents with multifractal noise
     if continents_n > 0 {
         generate_realistic_continents(world, ov, continents_n);
+        
+        // FALLBACK: If no continental material was created, force create some
+        let c_total_after: f32 = world.c.iter().sum();
+        if c_total_after < 0.1 {
+            println!("[world_gen] WARNING: No continental material created, applying fallback generation");
+            create_simple_fallback_continents(world, ov, continents_n);
+        }
     }
     
     // CRITICAL: Apply continental uplift to create visible land elevation
@@ -737,15 +775,10 @@ fn generate_world_with_preset(
     // Add realistic topographic variation using multifractal noise
     add_realistic_topography(world, ov);
     
-    // Update ElevationState for consistency with rendering
-    let elevation_field: Vec<f32> = world.depth_m.iter()
-        .map(|&d| world.sea.eta_m - d)
-        .collect();
-    get_elevation_state().update(elevation_field);
+    // Update all elevation systems for consistency
+    update_elevation_systems(world, ov);
     
     // Mark world as updated
-    ov.world_dirty = true;
-    ov.bathy_cache = None;
     ov.raster_dirty = true;
     ctx.request_repaint();
 }
@@ -1026,6 +1059,52 @@ fn simplex_noise_3d(x: f64, y: f64, z: f64, seed: u64) -> f64 {
     // Combine and normalize to [-1, 1]
     let noise = (a.fract() + b.fract() + c.fract()) / 3.0;
     (noise - 0.5) * 2.0
+}
+
+/// Simple fallback continent generation that definitely works
+fn create_simple_fallback_continents(
+    world: &mut engine::world::World,
+    ov: &overlay::OverlayState,
+    continents_n: u32,
+) {
+    println!("[world_gen] Creating {} fallback continents", continents_n);
+    
+    let n_cells = world.grid.cells;
+    let mut rng_state = ov.simple_seed;
+    
+    // Create simple, guaranteed-to-work continents
+    for continent_id in 0..continents_n {
+        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let center_idx = (rng_state % (n_cells as u64)) as usize;
+        
+        // Simple circular continent - guaranteed to create material
+        let center_pos = world.grid.pos_xyz[center_idx];
+        let radius = 0.2f32; // Large enough to be visible
+        
+        let mut cells_modified = 0;
+        for i in 0..n_cells {
+            let pos = world.grid.pos_xyz[i];
+            let distance = ((pos[0] - center_pos[0]).powi(2) + 
+                           (pos[1] - center_pos[1]).powi(2) + 
+                           (pos[2] - center_pos[2]).powi(2)).sqrt();
+            
+            if distance < radius {
+                let falloff = (1.0 - (distance / radius)).max(0.0);
+                if falloff > 0.1 {
+                    world.c[i] = (0.8 * falloff).max(world.c[i]);
+                    world.th_c_m[i] = (40_000.0 * falloff).max(world.th_c_m[i]); // 40 km thick
+                    cells_modified += 1;
+                }
+            }
+        }
+        
+        println!("[world_gen] Fallback continent {} at cell {}: radius={:.2}, cells_modified={}", 
+            continent_id, center_idx, radius, cells_modified);
+    }
+    
+    let c_total: f32 = world.c.iter().sum();
+    let th_total: f32 = world.th_c_m.iter().sum();
+    println!("[world_gen] Fallback result: C_sum={:.1}, th_c_sum={:.1} m", c_total, th_total);
 }
 
 /// 🎨 Visual Overlays - Organized by complexity with keyboard shortcuts
@@ -2537,29 +2616,29 @@ fn render_advanced_panels(
         });
         
         if ov.cadence_preset == "Custom" {
-            ui.separator();
+        ui.separator();
             ui.label("Custom Cadences (steps between executions):");
             
             ui.collapsing("Core Processes", |ui| {
-                ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
                     ui.label("Rigid Motion:");
                     if ui.add(egui::DragValue::new(&mut ov.cadence_rigid_motion).clamp_range(1..=10)).changed() {
                         ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
+            }
+        });
+        ui.horizontal(|ui| {
                     ui.label("Flexure:");
                     if ui.add(egui::DragValue::new(&mut ov.cadence_flexure).clamp_range(1..=10)).changed() {
                         ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
+            }
+        });
+        ui.horizontal(|ui| {
                     ui.label("Isostasy:");
                     if ui.add(egui::DragValue::new(&mut ov.cadence_isostasy).clamp_range(1..=10)).changed() {
                         ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
+            }
+        });
+        ui.horizontal(|ui| {
                     ui.label("Continental Buoyancy:");
                     if ui.add(egui::DragValue::new(&mut ov.cadence_continental_buoyancy).clamp_range(1..=10)).changed() {
                         ov.cadence_preset = "Custom".to_string();
@@ -2568,7 +2647,7 @@ fn render_advanced_panels(
             });
             
             ui.collapsing("Geological Processes", |ui| {
-                ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
                     ui.label("Transforms:");
                     if ui.add(egui::DragValue::new(&mut ov.cadence_transforms).clamp_range(1..=20)).changed() {
                         ov.cadence_preset = "Custom".to_string();
@@ -3155,9 +3234,9 @@ fn main() {
                                     ov.t505_logged = true;
                                 }
                             // Unified overlay shortcuts available in both Simple and Advanced modes
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
-                            if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
                             if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { _continents_dirty = true; } }
                             if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
                             
@@ -3198,14 +3277,14 @@ fn main() {
                                     ui.separator();
                                     // Live land fraction (area-weighted) using ELEVATION_CURR if available to match guard slice
                                     let land_pct_now: f64 = if let Some(elevation) = get_elevation_state().get_clone() {
-                                        let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
+                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
                                         for (&z, &a) in elevation.iter().zip(world.area_m2.iter()) { 
                                             area_sum += a as f64; 
                                             if z as f64 > 0.0 { land_area += a as f64; } 
                                         }
-                                        if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
-                                    } else {
-                                        let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
+                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
+                                        } else {
+                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
                                         for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { 
                                             area_sum += a as f64; 
                                             if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } 
