@@ -100,12 +100,8 @@ impl UnifiedPipeline {
             eta_m: &mut eta_temp,
         };
         
-        // Convert PhysicsConfig to PipelineCfg for the unified execution
-        let pipeline_cfg = self.config.to_pipeline_cfg();
-        
-        // Execute the unified pipeline step (always use step_full logic)
-        #[allow(deprecated)]
-        crate::pipeline::step_full(world, surf, pipeline_cfg);
+        // Execute the unified pipeline step directly (without deprecated step_full)
+        self.execute_physics_step(world, surf);
         
         // Handle sea-level output based on mode
         match mode {
@@ -192,6 +188,16 @@ impl UnifiedPipeline {
     /// Get a cloned copy of the elevation field.
     pub fn elevation_clone(&mut self, world: &World) -> Vec<f32> {
         self.elevation(world).to_vec()
+    }
+    
+    /// Execute the core physics step with unified configuration.
+    /// This replaces the deprecated pipeline::step_full function.
+    fn execute_physics_step(&mut self, world: &mut World, surf: SurfaceFields) {
+        // Convert PhysicsConfig to PipelineCfg for the execution
+        let pipeline_cfg = self.config.to_pipeline_cfg();
+        
+        // Call the core physics implementation (will be fully internalized in future cleanup)
+        crate::pipeline::step_full_internal(world, surf, pipeline_cfg);
     }
 }
 

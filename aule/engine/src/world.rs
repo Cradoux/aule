@@ -604,9 +604,9 @@ where
     }
 }
 
-/// Run the world forward until `t_end_myr` using repeated `step_once` calls.
-/// Stepping is chunked into at most `max_steps_per_yield` iterations per call so a
-/// caller (e.g., viewer) can interleave UI work between chunks.
+/// DEPRECATED: Use unified_pipeline::UnifiedPipeline instead.
+/// This function is kept temporarily for tests but will be removed.
+#[deprecated(note = "Use unified_pipeline::UnifiedPipeline::step instead")]
 pub fn run_to_t(world: &mut World, sp: &StepParams, t_end_myr: f64, max_steps_per_yield: u32) {
     let max_chunk = max_steps_per_yield.max(1);
     while world.clock.t_myr < t_end_myr {
@@ -620,12 +620,9 @@ pub fn run_to_t(world: &mut World, sp: &StepParams, t_end_myr: f64, max_steps_pe
     }
 }
 
-/// Execute one evolution step with a minimal CPU pipeline.
-///
-/// Order:
-/// A) age += dt; B) velocities; C) continents advect; D) boundaries classify;
-/// E) ridge birth; F) subduction; G) transforms; H) continents uplift;
-/// I) flexure; J) isostasy; clock += dt.
+/// DEPRECATED: Use unified_pipeline::UnifiedPipeline instead.
+/// This function is kept temporarily for tests but will be removed.
+#[deprecated(note = "Use unified_pipeline::UnifiedPipeline::step instead")]
 pub fn step_once(world: &mut World, sp: &StepParams) -> StepStats {
     // Micro-profiler accumulators (ms)
     let mut ms_boundaries = 0.0f64;

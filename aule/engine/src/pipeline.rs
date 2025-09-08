@@ -89,10 +89,9 @@ pub(crate) fn check_invariants(world: &World, elev_opt: Option<&[f32]>) {
     }
 }
 
-/// DEPRECATED: Use unified_pipeline::UnifiedPipeline instead.
-/// This function is kept temporarily for tests but will be removed.
-#[deprecated(note = "Use unified_pipeline::UnifiedPipeline::step instead")]
-pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
+/// Internal physics pipeline implementation.
+/// This function is only used internally by UnifiedPipeline.
+pub(crate) fn step_full_internal(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Performance timers (ms)
     let mut ms_boundaries = 0.0f64;
     let mut ms_kinematics = 0.0f64;

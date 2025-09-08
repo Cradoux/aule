@@ -430,7 +430,9 @@ impl PhysicsConfig {
     }
 }
 
-/// Parameters that control a single evolution step (legacy world::step_once).
+/// DEPRECATED: Use PhysicsConfig instead.
+/// This struct is kept temporarily for legacy code but will be removed.
+#[deprecated(note = "Use PhysicsConfig instead")]
 #[derive(Clone, Copy, Debug)]
 pub struct StepParams {
     /// Time step in Myr
