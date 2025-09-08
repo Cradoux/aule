@@ -502,12 +502,27 @@ fn render_simulation_basics_unified(
             
             ui.separator();
             
-            // Simulation status
+            // Simulation status and controls
             ui.horizontal(|ui| {
                 ui.label(format!("Current: {:.1} Myr (Step {})", world.clock.t_myr, world.clock.step_idx));
+                
+                // Play/Pause button
                 if ov.run_active {
+                    if ui.button("⏸️ Pause")
+                        .on_hover_text("Pause the simulation")
+                        .clicked() {
+                        ov.run_active = false;
+                        ov.stepper.playing = false;
+                    }
                     ui.label("🔄 Running");
                 } else {
+                    if ui.button("▶️ Play")
+                        .on_hover_text("Start/resume the simulation")
+                        .clicked() {
+                        ov.run_active = true;
+                        ov.stepper.playing = true;
+                        ov.stepper.t_target_myr = ov.simple_t_end_myr as f32;
+                    }
                     ui.label("⏸️ Paused");
                 }
             });
@@ -647,6 +662,13 @@ fn generate_world_with_preset(
         _ => 8,   // Default
     };
     
+    let continents_n = match ov.simple_preset {
+        1 => 4,   // Archipelago - many small continents
+        2 => 2,   // Continental - few large continents
+        3 => 0,   // Supercontinent - triggers specialized generator
+        _ => 3,   // Default - balanced
+    };
+    
     // Reset/normalize world state for current F & plates
     world.plates = engine::plates::Plates::new(&world.grid, plates, ov.simple_seed);
     world.v_en.clone_from(&world.plates.vel_en);
@@ -666,13 +688,89 @@ fn generate_world_with_preset(
         0.005,
     );
     
-    // Initialize with simplified world generation logic
-    // (This would use the existing world generation code from render_simple_panels)
+    // Initialize ridge births then baseline bathymetry from age (ocean depths)
+    {
+        let mut ages_tmp = world.age_myr.clone();
+        let _ridge_stats = engine::ridge::apply_ridge(
+            &world.grid,
+            &world.boundaries,
+            &mut ages_tmp,
+            engine::ridge::RidgeParams { fringe_age_myr: 0.0 },
+        );
+        world.age_myr = ages_tmp;
+    }
     
+    // Set baseline oceanic bathymetry from age
+    let n_cells = world.grid.cells;
+    for i in 0..n_cells {
+        let mut d = engine::age::depth_from_age_plate(
+            world.age_myr[i] as f64, 
+            world.plates.plate_id[i] as f64,
+            0.0, 0.0, 0.0  // Additional required parameters
+        );
+        if d < 10.0 {
+            d = 10.0; // Minimum depth
+        }
+        world.depth_m[i] = d as f32;
+    }
+    
+    // Generate continents using area-based land solver
+    if continents_n > 0 {
+        // Use the existing continent generation logic
+        let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+        let mean_area: f64 = total_area / (world.grid.cells as f64);
+        let target_land_area_m2 = ov.simple_target_land as f64 * total_area;
+        let mut target_c_sum = target_land_area_m2 / mean_area;
+        
+        // Simple continent placement - distribute continents randomly
+        let mut rng_state = ov.simple_seed;
+        for _ in 0..continents_n {
+            // Simple LCG for deterministic randomness
+            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let center_idx = (rng_state % (n_cells as u64)) as usize;
+            
+            // Place continent around this center
+            let continent_size = target_c_sum / (continents_n as f64);
+            place_continent_around(world, center_idx, continent_size);
+        }
+    }
+    
+    // Apply continental uplift to create land elevation
+    engine::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+    
+    // Mark world as updated
     ov.world_dirty = true;
     ov.bathy_cache = None;
     ov.raster_dirty = true;
     ctx.request_repaint();
+}
+
+/// Simple continent placement helper
+fn place_continent_around(world: &mut engine::world::World, center_idx: usize, size: f64) {
+    if center_idx >= world.grid.cells {
+        return;
+    }
+    
+    let center_pos = world.grid.pos_xyz[center_idx];
+    let continent_c = 0.8f32; // Continental fraction
+    let continent_thickness = 35_000.0f32; // 35 km thick continental crust
+    
+    // Place continent in a radius around center
+    let radius = (size / 10.0).sqrt() * 0.1; // Rough radius scaling
+    
+    for i in 0..world.grid.cells {
+        let pos = world.grid.pos_xyz[i];
+        let distance = ((pos[0] - center_pos[0]).powi(2) + 
+                       (pos[1] - center_pos[1]).powi(2) + 
+                       (pos[2] - center_pos[2]).powi(2)).sqrt();
+        
+        if distance < radius as f32 {
+            // Falloff from center
+            let falloff = (1.0f32 - (distance as f32 / radius as f32)).max(0.0f32);
+            world.c[i] = (continent_c * falloff).max(world.c[i]);
+            world.th_c_m[i] = (continent_thickness * falloff).max(world.th_c_m[i]);
+        }
+    }
 }
 
 /// 🎨 Visual Overlays - Organized by complexity with keyboard shortcuts
