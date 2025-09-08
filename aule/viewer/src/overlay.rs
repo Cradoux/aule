@@ -185,6 +185,21 @@ pub struct OverlayState {
     pub flexure_backend_cpu: bool, // true = CPU, false = GPU
     pub flexure_gpu_levels: u32,
     pub flexure_gpu_cycles: u32,
+    
+    // Unified cadence configuration
+    pub cadence_preset: String, // "Balanced", "Performance", "Quality", "Custom"
+    pub cadence_rigid_motion: u32,
+    pub cadence_transforms: u32,
+    pub cadence_subduction: u32,
+    pub cadence_flexure: u32,
+    pub cadence_surface_processes: u32,
+    pub cadence_isostasy: u32,
+    pub cadence_continental_buoyancy: u32,
+    pub cadence_orogeny: u32,
+    pub cadence_accretion: u32,
+    pub cadence_rifting: u32,
+    pub cadence_ridge_birth: u32,
+    pub cadence_force_balance: u32,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -485,6 +500,21 @@ impl Default for OverlayState {
             flexure_backend_cpu: true, // Default to CPU for reliability
             flexure_gpu_levels: 3,
             flexure_gpu_cycles: 2,
+            
+            // Unified cadence defaults
+            cadence_preset: "Balanced".to_string(),
+            cadence_rigid_motion: 1,
+            cadence_transforms: 2,
+            cadence_subduction: 4,
+            cadence_flexure: 1,
+            cadence_surface_processes: 1,
+            cadence_isostasy: 1,
+            cadence_continental_buoyancy: 1,
+            cadence_orogeny: 4,
+            cadence_accretion: 8,
+            cadence_rifting: 8,
+            cadence_ridge_birth: 8,
+            cadence_force_balance: 8,
             k_winkler: 3.0e8f32,
             wj_omega: 0.8,
             nu1: 1,

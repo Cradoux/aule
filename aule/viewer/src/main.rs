@@ -102,6 +102,9 @@ struct ProcessFlags {
     pub flexure_backend_cpu: bool,
     pub flexure_gpu_levels: u32,
     pub flexure_gpu_cycles: u32,
+    
+    // Unified cadence configuration
+    pub cadence_config: engine::cadence_manager::CadenceConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -1601,48 +1604,140 @@ fn render_advanced_panels(
         }
     });
 
-    egui::CollapsingHeader::new("Debug & Cadence").default_open(false).show(ui, |ui| {
+    egui::CollapsingHeader::new("Process Cadences").default_open(false).show(ui, |ui| {
+        ui.label("Performance Presets:");
+        ui.horizontal(|ui| {
+            let presets = ["Balanced", "Performance", "Quality", "Custom"];
+            for preset in &presets {
+                if ui.selectable_label(ov.cadence_preset == *preset, *preset).clicked() {
+                    ov.cadence_preset = preset.to_string();
+                    // Apply preset to cadence values
+                    match *preset {
+                        "Performance" => {
+                            ov.cadence_transforms = 4;
+                            ov.cadence_subduction = 8;
+                            ov.cadence_surface_processes = 4;
+                            ov.cadence_orogeny = 8;
+                            ov.cadence_accretion = 16;
+                            ov.cadence_rifting = 16;
+                        }
+                        "Quality" => {
+                            ov.cadence_transforms = 1;
+                            ov.cadence_subduction = 2;
+                            ov.cadence_surface_processes = 1;
+                            ov.cadence_orogeny = 2;
+                            ov.cadence_accretion = 4;
+                            ov.cadence_rifting = 4;
+                        }
+                        "Balanced" => {
+                            ov.cadence_transforms = 2;
+                            ov.cadence_subduction = 4;
+                            ov.cadence_surface_processes = 1;
+                            ov.cadence_orogeny = 4;
+                            ov.cadence_accretion = 8;
+                            ov.cadence_rifting = 8;
+                        }
+                        _ => {} // Custom - don't change values
+                    }
+                }
+            }
+        });
+        
+        if ov.cadence_preset == "Custom" {
+            ui.separator();
+            ui.label("Custom Cadences (steps between executions):");
+            
+            ui.collapsing("Core Processes", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Rigid Motion:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_rigid_motion).clamp_range(1..=10)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Flexure:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_flexure).clamp_range(1..=10)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Isostasy:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_isostasy).clamp_range(1..=10)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Continental Buoyancy:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_continental_buoyancy).clamp_range(1..=10)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+            });
+            
+            ui.collapsing("Geological Processes", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Transforms:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_transforms).clamp_range(1..=20)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Subduction:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_subduction).clamp_range(1..=20)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Surface Processes:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_surface_processes).clamp_range(1..=20)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Orogeny:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_orogeny).clamp_range(1..=20)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+            });
+            
+            ui.collapsing("Advanced Processes", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Accretion:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_accretion).clamp_range(0..=50)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Rifting:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_rifting).clamp_range(0..=50)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Ridge Birth:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_ridge_birth).clamp_range(0..=50)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Force Balance:");
+                    if ui.add(egui::DragValue::new(&mut ov.cadence_force_balance).clamp_range(0..=50)).changed() {
+                        ov.cadence_preset = "Custom".to_string();
+                    }
+                });
+            });
+        }
+        
+        ui.separator();
         ui.checkbox(&mut ov.debug_enable_all, "Debug: run all passes");
         ui.horizontal(|ui| {
             ui.label("Profiling burst (steps)");
             ui.add(egui::DragValue::new(&mut ov.debug_burst_steps).speed(1));
         });
-        ui.separator();
-        ui.label("Per-pass cadence (every N steps)");
         ui.horizontal(|ui| {
-            ui.label("advection");
-            let mut v = ov.cadence_adv_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_adv_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("transforms");
-            let mut v = ov.cadence_trf_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_trf_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("subduction");
-            let mut v = ov.cadence_sub_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_sub_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("flexure");
-            let mut v = ov.cadence_flx_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_flx_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("sea");
-            let mut v = ov.cadence_sea_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_sea_every = v.max(1);
-            }
+            ui.checkbox(&mut ov.disable_subduction, "Disable subduction");
+            // Note: Individual process controls are available in Physics Processes panel
         });
     });
 }
@@ -2042,6 +2137,9 @@ fn main() {
                                 cycles: process_flags.flexure_gpu_cycles,
                             }
                         };
+                        
+                        // Apply unified cadence configuration
+                        config.cadence_config = process_flags.cadence_config.clone();
                         
                         // Legacy compatibility (sync old flags if needed)
                         if !cfg.enable_flexure { config.enable_flexure = false; }
@@ -2488,6 +2586,24 @@ fn main() {
                                             flexure_backend_cpu: ov.flexure_backend_cpu,
                                             flexure_gpu_levels: ov.flexure_gpu_levels,
                                             flexure_gpu_cycles: ov.flexure_gpu_cycles,
+                                            
+                                            // Unified cadence configuration
+                                            cadence_config: {
+                                                let mut config = engine::cadence_manager::CadenceConfig::new();
+                                                config.set_cadence(engine::cadence_manager::ProcessType::RigidMotion, ov.cadence_rigid_motion);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Transforms, ov.cadence_transforms);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Subduction, ov.cadence_subduction);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Flexure, ov.cadence_flexure);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::SurfaceProcesses, ov.cadence_surface_processes);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Isostasy, ov.cadence_isostasy);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::ContinentalBuoyancy, ov.cadence_continental_buoyancy);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Orogeny, ov.cadence_orogeny);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Accretion, ov.cadence_accretion);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::Rifting, ov.cadence_rifting);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::RidgeBirth, ov.cadence_ridge_birth);
+                                                config.set_cadence(engine::cadence_manager::ProcessType::ForceBalance, ov.cadence_force_balance);
+                                                config
+                                            },
                                         };
                                         let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                                                     }
@@ -2956,6 +3072,24 @@ fn main() {
                                     flexure_backend_cpu: ov.flexure_backend_cpu,
                                     flexure_gpu_levels: ov.flexure_gpu_levels,
                                     flexure_gpu_cycles: ov.flexure_gpu_cycles,
+                                    
+                                    // Unified cadence configuration
+                                    cadence_config: {
+                                        let mut config = engine::cadence_manager::CadenceConfig::new();
+                                        config.set_cadence(engine::cadence_manager::ProcessType::RigidMotion, ov.cadence_rigid_motion);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Transforms, ov.cadence_transforms);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Subduction, ov.cadence_subduction);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Flexure, ov.cadence_flexure);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::SurfaceProcesses, ov.cadence_surface_processes);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Isostasy, ov.cadence_isostasy);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::ContinentalBuoyancy, ov.cadence_continental_buoyancy);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Orogeny, ov.cadence_orogeny);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Accretion, ov.cadence_accretion);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Rifting, ov.cadence_rifting);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::RidgeBirth, ov.cadence_ridge_birth);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::ForceBalance, ov.cadence_force_balance);
+                                        config
+                                    },
                                 };
                                 let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                             }

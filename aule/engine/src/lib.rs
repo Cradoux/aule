@@ -16,6 +16,8 @@ pub mod config;
 pub mod elevation_manager;
 /// Flexure load assembly helpers.
 pub mod flexure_loads;
+/// Unified cadence management for physics processes.
+pub mod cadence_manager;
 
 /// Arc/terrane accretion at O–C margins.
 pub mod accretion;

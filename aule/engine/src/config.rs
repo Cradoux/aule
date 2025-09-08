@@ -28,7 +28,7 @@ impl Default for PipelineMode {
 
 /// Unified physics configuration that replaces both StepParams and PipelineCfg.
 /// Simple and Advanced modes will use different presets of this configuration.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PhysicsConfig {
     /// Time step in Myr
     pub dt_myr: f32,
@@ -74,6 +74,10 @@ pub struct PhysicsConfig {
     pub cadence_isostasy: u32,
     /// Cadence for continental buoyancy updates
     pub cadence_continental_buoyancy: u32,
+    
+    // Unified cadence management
+    /// Unified cadence configuration for all processes
+    pub cadence_config: crate::cadence_manager::CadenceConfig,
     
     // Sea-level regulation
     /// Target land fraction (0..1) used by sea-level solve
@@ -173,6 +177,9 @@ impl PhysicsConfig {
             cadence_isostasy: 1,
             cadence_continental_buoyancy: 1,
             
+            // Unified cadence management
+            cadence_config: crate::cadence_manager::CadenceConfig::simple_mode(),
+            
             // Sea-level
             target_land_frac: 0.3,
             freeze_eta: false,
@@ -243,6 +250,9 @@ impl PhysicsConfig {
             cadence_surface_processes: 1,
             cadence_isostasy: 1,
             cadence_continental_buoyancy: 1,
+            
+            // Unified cadence management
+            cadence_config: crate::cadence_manager::CadenceConfig::advanced_mode(),
             
             // Sea-level  
             target_land_frac: 0.3,
