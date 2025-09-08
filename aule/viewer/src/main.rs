@@ -3866,7 +3866,7 @@ fn main() {
                                     }
                                     // UI no longer steps; background worker handles stepping
                                 } else {
-                                    overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
+                                    overlay::draw_color_layer(ui, &painter, rect, &world, &world.grid, &mut ov);
                                 }
                             });
                             // Remove legacy central/top UI panels (moved to drawer)
