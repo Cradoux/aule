@@ -714,29 +714,16 @@ fn generate_world_with_preset(
         world.depth_m[i] = d as f32;
     }
     
-    // Generate continents using area-based land solver
+    // Generate realistic continents with multifractal noise
     if continents_n > 0 {
-        // Use the existing continent generation logic
-        let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-        let mean_area: f64 = total_area / (world.grid.cells as f64);
-        let target_land_area_m2 = ov.simple_target_land as f64 * total_area;
-        let mut target_c_sum = target_land_area_m2 / mean_area;
-        
-        // Simple continent placement - distribute continents randomly
-        let mut rng_state = ov.simple_seed;
-        for _ in 0..continents_n {
-            // Simple LCG for deterministic randomness
-            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let center_idx = (rng_state % (n_cells as u64)) as usize;
-            
-            // Place continent around this center
-            let continent_size = target_c_sum / (continents_n as f64);
-            place_continent_around(world, center_idx, continent_size);
-        }
+        generate_realistic_continents(world, ov, continents_n);
     }
     
-    // Apply continental uplift to create land elevation
+    // Apply continental uplift to create realistic land elevation
     engine::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+    
+    // Add realistic topographic variation using multifractal noise
+    add_realistic_topography(world, ov);
     
     // Mark world as updated
     ov.world_dirty = true;
@@ -745,18 +732,65 @@ fn generate_world_with_preset(
     ctx.request_repaint();
 }
 
-/// Simple continent placement helper
-fn place_continent_around(world: &mut engine::world::World, center_idx: usize, size: f64) {
+/// Generate realistic continents with multifractal noise and proper shapes
+fn generate_realistic_continents(
+    world: &mut engine::world::World,
+    ov: &overlay::OverlayState,
+    continents_n: u32,
+) {
+    let n_cells = world.grid.cells;
+    let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+    let target_land_area_m2 = ov.simple_target_land as f64 * total_area;
+    
+    // Clear existing continental data
+    world.c.fill(0.0);
+    world.th_c_m.fill(0.0);
+    
+    // Generate continents with realistic shapes
+    let mut rng_state = ov.simple_seed;
+    
+    for continent_id in 0..continents_n {
+        // Pick a random center for this continent
+        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let center_idx = (rng_state % (n_cells as u64)) as usize;
+        
+        // Generate continent size based on preset
+        let continent_area_fraction = match ov.simple_preset {
+            1 => 0.15, // Archipelago - smaller continents
+            2 => 0.4,  // Continental - larger continents
+            3 => 0.8,  // Supercontinent - one massive continent
+            _ => 0.25, // Balanced
+        };
+        
+        let continent_area = target_land_area_m2 * continent_area_fraction / (continents_n as f64);
+        
+        // Generate realistic continent with multifractal noise
+        generate_continent_with_noise(world, center_idx, continent_area, continent_id, rng_state);
+    }
+}
+
+/// Generate a single continent with realistic multifractal noise
+fn generate_continent_with_noise(
+    world: &mut engine::world::World,
+    center_idx: usize,
+    target_area: f64,
+    continent_id: u32,
+    mut rng_state: u64,
+) {
     if center_idx >= world.grid.cells {
         return;
     }
     
     let center_pos = world.grid.pos_xyz[center_idx];
-    let continent_c = 0.8f32; // Continental fraction
-    let continent_thickness = 35_000.0f32; // 35 km thick continental crust
     
-    // Place continent in a radius around center
-    let radius = (size / 10.0).sqrt() * 0.1; // Rough radius scaling
+    // Estimate continent radius from target area (spherical approximation)
+    let mean_cell_area = world.area_m2.iter().map(|&a| a as f64).sum::<f64>() / (world.grid.cells as f64);
+    let target_cells = target_area / mean_cell_area;
+    let continent_radius = (target_cells / std::f64::consts::PI).sqrt() * 0.1; // Scale for geodesic grid
+    
+    // Multifractal noise parameters
+    let noise_scales = [0.5, 1.0, 2.0, 4.0, 8.0]; // Multiple octaves
+    let noise_weights = [1.0, 0.5, 0.25, 0.125, 0.0625]; // Decreasing weights
     
     for i in 0..world.grid.cells {
         let pos = world.grid.pos_xyz[i];
@@ -764,13 +798,105 @@ fn place_continent_around(world: &mut engine::world::World, center_idx: usize, s
                        (pos[1] - center_pos[1]).powi(2) + 
                        (pos[2] - center_pos[2]).powi(2)).sqrt();
         
-        if distance < radius as f32 {
-            // Falloff from center
-            let falloff = (1.0f32 - (distance as f32 / radius as f32)).max(0.0f32);
-            world.c[i] = (continent_c * falloff).max(world.c[i]);
-            world.th_c_m[i] = (continent_thickness * falloff).max(world.th_c_m[i]);
+        if distance < (continent_radius * 2.0) as f32 {
+            // Base falloff from center
+            let base_falloff = (1.0 - (distance as f64 / (continent_radius * 1.5))).max(0.0);
+            
+            if base_falloff > 0.0 {
+                // Generate multifractal noise for realistic continental shape
+                let mut noise_value = 0.0;
+                let mut total_weight = 0.0;
+                
+                for (scale, weight) in noise_scales.iter().zip(noise_weights.iter()) {
+                    let noise_freq = scale / continent_radius;
+                    let noise_sample = simplex_noise_3d(
+                        pos[0] as f64 * noise_freq,
+                        pos[1] as f64 * noise_freq,
+                        pos[2] as f64 * noise_freq,
+                        rng_state.wrapping_add(continent_id as u64),
+                    );
+                    noise_value += noise_sample * weight;
+                    total_weight += weight;
+                }
+                
+                noise_value /= total_weight;
+                
+                // Combine base falloff with noise for realistic continental margins
+                let continental_strength = (base_falloff * (0.7 + 0.3 * noise_value)).max(0.0);
+                
+                if continental_strength > 0.1 {
+                    // Continental fraction (0.6-0.9 based on noise)
+                    let c_value = (0.6 + 0.3 * continental_strength) as f32;
+                    world.c[i] = c_value.max(world.c[i]);
+                    
+                    // Continental thickness variation (20-45 km based on noise and position)
+                    let thickness_base = 25_000.0; // 25 km base
+                    let thickness_variation = 20_000.0 * continental_strength; // Up to 20 km variation
+                    let thickness = (thickness_base + thickness_variation) as f32;
+                    world.th_c_m[i] = thickness.max(world.th_c_m[i]);
+                }
+            }
         }
     }
+}
+
+/// Add realistic topographic variation using multifractal noise
+fn add_realistic_topography(world: &mut engine::world::World, ov: &overlay::OverlayState) {
+    let mut rng_state = ov.simple_seed.wrapping_add(12345); // Different seed for topography
+    
+    for i in 0..world.grid.cells {
+        let pos = world.grid.pos_xyz[i];
+        
+        // Only add topography to continental areas
+        if world.c[i] > 0.1 {
+            // Generate multifractal elevation noise
+            let mut elevation_noise = 0.0;
+            let mut total_weight = 0.0;
+            
+            // Multiple octaves for realistic mountain ranges
+            let scales = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+            let weights = [1.0, 0.6, 0.4, 0.3, 0.2, 0.1];
+            
+            for (scale, weight) in scales.iter().zip(weights.iter()) {
+                let noise_freq = scale * 0.1; // Scale for continental features
+                let noise_sample = simplex_noise_3d(
+                    pos[0] as f64 * noise_freq,
+                    pos[1] as f64 * noise_freq, 
+                    pos[2] as f64 * noise_freq,
+                    rng_state,
+                );
+                elevation_noise += noise_sample * weight;
+                total_weight += weight;
+            }
+            
+            elevation_noise /= total_weight;
+            
+            // Scale elevation based on continental strength and thickness
+            let continental_strength = world.c[i];
+            let max_elevation = 3000.0; // 3 km maximum elevation
+            let elevation_variation = (elevation_noise * max_elevation * continental_strength as f64) as f32;
+            
+            // Apply topographic variation to depth (negative for elevation)
+            world.depth_m[i] -= elevation_variation.abs(); // Make sure land is above sea level
+        }
+    }
+}
+
+/// Simplified 3D simplex noise implementation
+fn simplex_noise_3d(x: f64, y: f64, z: f64, seed: u64) -> f64 {
+    // Simple deterministic pseudo-noise using trigonometric functions
+    // This is a simplified version - in production you'd use a proper noise library
+    
+    let mut hash = seed;
+    hash = hash.wrapping_mul(1664525).wrapping_add(1013904223);
+    
+    let a = (x * 12.9898 + y * 78.233 + z * 37.719 + hash as f64 * 0.001).sin() * 43758.5453;
+    let b = (x * 93.9898 + y * 67.345 + z * 83.217 + hash as f64 * 0.002).sin() * 47896.6789;
+    let c = (x * 23.1234 + y * 56.789 + z * 91.234 + hash as f64 * 0.003).sin() * 39217.9876;
+    
+    // Combine and normalize to [-1, 1]
+    let noise = (a.fract() + b.fract() + c.fract()) / 3.0;
+    (noise - 0.5) * 2.0
 }
 
 /// 🎨 Visual Overlays - Organized by complexity with keyboard shortcuts
