@@ -3369,8 +3369,8 @@ fn main() {
                                         let ui_hijacked = ctx.is_using_pointer() || ctx.is_pointer_over_area();
                                         cam.update_from_input(&egui_ctx, ui_hijacked);
                                     }
-                                } else if ov.ui_mode == engine::config::UiMode::Simple {
-                                    // T-902A-GPU: compute raster path
+                                } else {
+                                    // Unified progressive UI: use GPU raster for smooth rendering
                                     if ov.use_gpu_raster {
                                         // Resolution policy: HQ when paused, LQ when running
                                         if !ov.run_active && ov.high_quality_when_paused {
@@ -3818,7 +3818,7 @@ fn main() {
                                             overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
                                         }
                                     } else {
-                                        // CPU fallback raster
+                                        // CPU fallback raster (only when GPU raster is disabled)
                                         // Keep boundary classification fresh when world changed
                                         if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
                                             world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
@@ -3842,30 +3842,9 @@ fn main() {
                                                 egui::Color32::WHITE,
                                             );
                                         }
+                                        // Draw overlays on top (CPU raster provides the base elevation layer)
+                                        overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
                                     }
-                                    // UI no longer steps; background worker handles stepping
-                                } else {
-                                    // Always draw a smooth raster base even in advanced mode
-                                    if ov.raster_dirty || ov.raster_tex.is_none() {
-                                        let (rw, rh) = ov.raster_size;
-                                        let img = raster::render_map(&world, &ov, rw, rh);
-                                        ov.raster_tex = Some(ctx.load_texture(
-                                            "raster",
-                                            img,
-                                            egui::TextureOptions::LINEAR,
-                                        ));
-                                        ov.raster_dirty = false;
-                                    }
-                                    if let Some(tex) = &ov.raster_tex {
-                                        painter.image(
-                                            tex.id(),
-                                            rect,
-                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                            egui::Color32::WHITE,
-                                        );
-                                    }
-                                    // Draw overlays on top (CPU raster provides the base elevation layer)
-                                    overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
                                 }
                             });
                             // Remove legacy central/top UI panels (moved to drawer)
