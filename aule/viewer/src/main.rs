@@ -719,11 +719,29 @@ fn generate_world_with_preset(
         generate_realistic_continents(world, ov, continents_n);
     }
     
-    // Apply continental uplift to create realistic land elevation
+    // CRITICAL: Apply continental uplift to create visible land elevation
+    println!("[world_gen] BEFORE uplift: depth_m range [{:.1}, {:.1}]", 
+        world.depth_m.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        world.depth_m.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+    
+    let c_total: f32 = world.c.iter().sum();
+    let th_total: f32 = world.th_c_m.iter().sum();
+    println!("[world_gen] Continental data: C_sum={:.1}, th_c_sum={:.1} m", c_total, th_total);
+    
     engine::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+    
+    println!("[world_gen] AFTER uplift: depth_m range [{:.1}, {:.1}]", 
+        world.depth_m.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        world.depth_m.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
     
     // Add realistic topographic variation using multifractal noise
     add_realistic_topography(world, ov);
+    
+    // Update ElevationState for consistency with rendering
+    let elevation_field: Vec<f32> = world.depth_m.iter()
+        .map(|&d| world.sea.eta_m - d)
+        .collect();
+    get_elevation_state().update(elevation_field);
     
     // Mark world as updated
     ov.world_dirty = true;
@@ -817,9 +835,14 @@ fn classify_continental_plates(world: &engine::world::World, ov: &overlay::Overl
             center[2] /= count;
         }
         
-        // Classify as continental if larger than average (continental plates are typically larger)
+            // Classify as continental if larger than average (continental plates are typically larger)
         if area > mean_plate_area * 0.8 {
             continental_plates.push(plate_id);
+            println!("[world_gen] Plate {} classified as CONTINENTAL (area={:.1e} m², mean={:.1e})", 
+                plate_id, area, mean_plate_area);
+        } else {
+            println!("[world_gen] Plate {} classified as oceanic (area={:.1e} m², mean={:.1e})", 
+                plate_id, area, mean_plate_area);
         }
     }
     
@@ -878,7 +901,10 @@ fn generate_continent_with_noise(
     // Estimate continent radius from target area (spherical approximation)
     let mean_cell_area = world.area_m2.iter().map(|&a| a as f64).sum::<f64>() / (world.grid.cells as f64);
     let target_cells = target_area / mean_cell_area;
-    let continent_radius = (target_cells / std::f64::consts::PI).sqrt() * 0.1; // Scale for geodesic grid
+    let continent_radius = (target_cells / std::f64::consts::PI).sqrt() * 0.3; // Increased scale for visibility
+    
+    println!("[world_gen] Continent {}: target_area={:.1e} m², target_cells={:.0}, radius={:.3}", 
+        continent_id, target_area, target_cells, continent_radius);
     
     // Multifractal noise parameters
     let noise_scales = [0.5, 1.0, 2.0, 4.0, 8.0]; // Multiple octaves
@@ -921,7 +947,7 @@ fn generate_continent_with_noise(
                 // Combine base falloff with noise for realistic continental margins
                 let continental_strength = (base_falloff * (0.7 + 0.3 * noise_value)).max(0.0);
                 
-                if continental_strength > 0.1 {
+                if continental_strength > 0.05 { // Lower threshold to ensure continents are created
                     // Continental fraction (0.6-0.9 based on noise)
                     let c_value = (0.6 + 0.3 * continental_strength) as f32;
                     world.c[i] = c_value.max(world.c[i]);
@@ -931,6 +957,12 @@ fn generate_continent_with_noise(
                     let thickness_variation = 20_000.0 * continental_strength; // Up to 20 km variation
                     let thickness = (thickness_base + thickness_variation) as f32;
                     world.th_c_m[i] = thickness.max(world.th_c_m[i]);
+                    
+                    // Debug: Log first few continental cells
+                    if continent_id == 0 && world.c[i] > 0.5 {
+                        println!("[world_gen] Continental cell {}: C={:.2}, th_c={:.0}m, strength={:.2}", 
+                                i, world.c[i], world.th_c_m[i], continental_strength);
+                    }
                 }
             }
         }
