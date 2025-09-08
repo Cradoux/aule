@@ -797,8 +797,8 @@ fn generate_world_with_preset(
     ov.raster_tex_id = None;
     ov.raster_dirty = true;
     
-    // CRITICAL: Ensure bathymetry display is enabled to show elevation colors
-    ov.show_bathy = true;
+    // GPU raster will provide smooth elevation colors; disable redundant CPU overlay
+    // (The unified logic in main loop will set show_bathy = !use_gpu_raster)
     
     // CRITICAL: Sync the generated world to the simulation thread
     let ws = WorldSnapshot {
@@ -3244,8 +3244,8 @@ fn main() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::Y)) { ov.show_hypsometry = !ov.show_hypsometry; }
                             }
                             
-                            // Always show color layer as base map
-                            ov.show_bathy = true;
+                            // GPU raster provides base elevation colors; disable redundant CPU bathy overlay
+                            ov.show_bathy = !ov.use_gpu_raster;
 
                             egui::TopBottomPanel::top("hud").show(ctx, |ui| {
                                 ui.horizontal_wrapped(|ui| {
@@ -3459,111 +3459,8 @@ fn main() {
                                                 ov.raster_dirty = false; ov.world_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
                                                 // println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                             } else {
-                                                // SIMULATION LOOP IS NOW COMMENTED OUT - will be replaced by thread command
-                                                /*
-                                                // Frame-driven stepping (non-blocking)
-                                                if ov.stepper.playing && (world.clock.t_myr as f32) < ov.stepper.t_target_myr {
-                                                    if !sim_busy.load(Ordering::SeqCst) {
-                                                        let cfg = engine::config::PipelineCfg {
-                                                            dt_myr: ov.sim_dt_myr.max(0.0),
-                                                            steps_per_frame: 1,
-                                                            enable_flexure: !ov.disable_flexure,
-                                                            enable_erosion: !ov.disable_erosion,
-                                                            target_land_frac: ov.simple_target_land,
-                                                            freeze_eta: ov.freeze_eta,
-                                                            log_mass_budget: false,
-                                                            enable_subduction: !ov.disable_subduction,
-                                                            enable_rigid_motion: true,
-                                                            cadence_trf_every: ov.cadence_trf_every.max(1),
-                                                            cadence_sub_every: ov.cadence_sub_every.max(1),
-                                                            cadence_flx_every: ov.cadence_flx_every.max(1),
-                                                            cadence_sea_every: ov.cadence_sea_every.max(1),
-                                                            cadence_surf_every: ov.cadence_sea_every.max(1),
-                                                            substeps_transforms: 4,
-                                                            substeps_subduction: 4,
-                                                            use_gpu_flexure: false,
-                                                            gpu_flex_levels: ov.levels.max(1),
-                                                            gpu_flex_cycles: ov.flex_cycles.max(1),
-                                                            gpu_wj_omega: ov.wj_omega,
-                                                            subtract_mean_load: ov.subtract_mean_load,
-                                                            surf_k_stream: ov.surf_k_stream,
-                                                            surf_m_exp: ov.surf_m_exp,
-                                                            surf_n_exp: ov.surf_n_exp,
-                                                            surf_k_diff: ov.surf_k_diff,
-                                                            surf_k_tr: ov.surf_k_tr,
-                                                            surf_p_exp: ov.surf_p_exp,
-                                                            surf_q_exp: ov.surf_q_exp,
-                                                            surf_rho_sed: ov.surf_rho_sed,
-                                                            surf_min_slope: ov.surf_min_slope,
-                                                            surf_subcycles: ov.surf_subcycles.max(1),
-                                                            surf_couple_flexure: ov.surf_couple_flexure,
-                                                            sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
-                                                            sub_trench_half_width_km: ov.sub_trench_half_width_km,
-                                                            sub_arc_offset_km: ov.sub_arc_offset_km,
-                                                            sub_arc_half_width_km: ov.sub_arc_half_width_km,
-                                                            sub_backarc_width_km: ov.sub_backarc_width_km,
-                                                            sub_trench_deepen_m: ov.sub_trench_deepen_m,
-                                                            sub_arc_uplift_m: ov.sub_arc_uplift_m,
-                                                            sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
-                                                            sub_rollback_offset_m: ov.sub_rollback_offset_m,
-                                                            sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
-                                                            sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
-                                                            sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
-                                                            sub_continent_c_min: ov.sub_continent_c_min,
-                                                            cadence_spawn_plate_every: 0,
-                                                            cadence_retire_plate_every: 0,
-                                                            cadence_force_balance_every: 8,
-                                                            fb_gain: 1.0e-12,
-                                                            fb_damp_per_myr: 0.2,
-                                                            fb_k_conv: 1.0,
-                                                            fb_k_div: 0.5,
-                                                            fb_k_trans: 0.1,
-                                                            fb_max_domega: 5.0e-9,
-                                                            fb_max_omega: 2.0e-7,
-                                                        };
-                                                        let process_flags = ProcessFlags {
-                                            enable_rigid_motion: ov.enable_rigid_motion,
-                                            enable_subduction: ov.enable_subduction,
-                                            enable_transforms: ov.enable_transforms,
-                                            enable_flexure: ov.enable_flexure,
-                                            enable_surface_processes: ov.enable_surface_processes,
-                                            enable_isostasy: ov.enable_isostasy,
-                                            enable_continental_buoyancy: ov.enable_continental_buoyancy,
-                                            enable_orogeny: ov.enable_orogeny,
-                                            enable_accretion: ov.enable_accretion,
-                                            enable_rifting: ov.enable_rifting,
-                                            enable_ridge_birth: ov.enable_ridge_birth,
-                                            
-                                            // Flexure backend configuration
-                                            flexure_backend_cpu: ov.flexure_backend_cpu,
-                                            flexure_gpu_levels: ov.flexure_gpu_levels,
-                                            flexure_gpu_cycles: ov.flexure_gpu_cycles,
-                                            
-                                            // Unified cadence configuration
-                                            cadence_config: {
-                                                let mut config = engine::cadence_manager::CadenceConfig::new();
-                                                config.set_cadence(engine::cadence_manager::ProcessType::RigidMotion, ov.cadence_rigid_motion);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Transforms, ov.cadence_transforms);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Subduction, ov.cadence_subduction);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Flexure, ov.cadence_flexure);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::SurfaceProcesses, ov.cadence_surface_processes);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Isostasy, ov.cadence_isostasy);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::ContinentalBuoyancy, ov.cadence_continental_buoyancy);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Orogeny, ov.cadence_orogeny);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Accretion, ov.cadence_accretion);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::Rifting, ov.cadence_rifting);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::RidgeBirth, ov.cadence_ridge_birth);
-                                                config.set_cadence(engine::cadence_manager::ProcessType::ForceBalance, ov.cadence_force_balance);
-                                                config
-                                            },
-                                        };
-                                        let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
-                                                    }
-                                                    ctx.request_repaint();
-                                                }
-                                                */
-                                                // Always raster each frame to ensure visible updates per step
-                                                if true {
+                                                // Always execute GPU raster when needed (data changed or texture missing)
+                                                if ov.raster_dirty || ov.world_dirty || ov.color_dirty || ov.raster_tex_id.is_none() {
                                                     let mut dbg = if ov.gpu_dbg_wire { 1u32 } else { 0 };
                                                     dbg |= if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 };
                                                     dbg |= if ov.gpu_dbg_grid { 1u32<<2 } else { 0 };
@@ -3786,6 +3683,7 @@ fn main() {
                                                     // println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                                 }
                                             }
+                                        }
                                             // Draw GPU raster and capture its actual rect for overlays
                                             let mut rect_img = rect;
                                             if let Some(tid) = ov.raster_tex_id {
