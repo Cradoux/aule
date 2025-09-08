@@ -791,15 +791,11 @@ fn generate_world_with_preset(
     ov.color_dirty = true;
     ov.world_dirty = true;
     ov.raster_dirty = true;
-    // Show something immediately: use CPU raster for the first frame after generation
-    ov.use_gpu_raster = false;
+    // Re-enable GPU raster for smooth rendering after generation
+    ov.use_gpu_raster = true;
+    ov.raster_tex = None;
     ov.raster_tex_id = None;
-    {
-        let (rw, rh) = ov.raster_size;
-        let img = raster::render_map(world, ov, rw, rh);
-        ov.raster_tex = Some(ctx.load_texture("raster", img, egui::TextureOptions::LINEAR));
-        ov.raster_dirty = false;
-    }
+    ov.raster_dirty = true;
     
     // CRITICAL: Ensure bathymetry display is enabled to show elevation colors
     ov.show_bathy = true;
@@ -3078,10 +3074,35 @@ fn main() {
         let tx_world_bg = tx_world.clone();
         let sim_busy_bg = sim_busy.clone();
         let rx_cmd_bg = rx_cmd;
-        let init_world = world.clone();
+        let init_world = WorldSnapshot {
+            depth_m: world.depth_m.clone(),
+            c: world.c.clone(),
+            th_c_m: world.th_c_m.clone(),
+            sea_eta_m: world.sea.eta_m,
+            plate_id: world.plates.plate_id.clone(),
+            pole_axis: world.plates.pole_axis.clone(),
+            omega_rad_yr: world.plates.omega_rad_yr.clone(),
+            v_en: world.v_en.clone(),
+            age_myr: world.age_myr.clone(),
+        };
         
         let sim_thread = std::thread::spawn(move || {
-            let mut sim_world = init_world;
+            let mut sim_world = engine::world::World::new(64, 8, 12345);
+            
+            // Initialize from snapshot
+            if sim_world.depth_m.len() == init_world.depth_m.len() {
+                sim_world.depth_m = init_world.depth_m;
+                sim_world.depth_stage_m.clone_from(&sim_world.depth_m);
+            }
+            if sim_world.c.len() == init_world.c.len() { sim_world.c = init_world.c; }
+            if sim_world.th_c_m.len() == init_world.th_c_m.len() { sim_world.th_c_m = init_world.th_c_m; }
+            sim_world.sea.eta_m = init_world.sea_eta_m;
+            if sim_world.plates.plate_id.len() == init_world.plate_id.len() { sim_world.plates.plate_id = init_world.plate_id; }
+            if sim_world.plates.pole_axis.len() == init_world.pole_axis.len() { sim_world.plates.pole_axis = init_world.pole_axis; }
+            if sim_world.plates.omega_rad_yr.len() == init_world.omega_rad_yr.len() { sim_world.plates.omega_rad_yr = init_world.omega_rad_yr; }
+            if sim_world.v_en.len() == init_world.v_en.len() { sim_world.v_en = init_world.v_en; }
+            if sim_world.age_myr.len() == init_world.age_myr.len() { sim_world.age_myr = init_world.age_myr; }
+            sim_world.boundaries = engine::boundaries::Boundaries::classify(&sim_world.grid, &sim_world.plates.plate_id, &sim_world.v_en, 0.005);
             
             while let Ok(cmd) = rx_cmd_bg.recv() {
                 match cmd {
@@ -3109,9 +3130,9 @@ fn main() {
                         
                         // Apply flexure backend
                         config.flexure_backend = if process_flags.flexure_backend_cpu {
-                            engine::flexure_manager::FlexureBackend::Cpu
+                            engine::flexure_manager::FlexureBackend::CpuWinkler
                         } else {
-                            engine::flexure_manager::FlexureBackend::Gpu {
+                            engine::flexure_manager::FlexureBackend::GpuMultigrid {
                                 levels: process_flags.flexure_gpu_levels,
                                 cycles: process_flags.flexure_gpu_cycles,
                             }
@@ -3793,10 +3814,8 @@ fn main() {
                                                 world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
                                                 ov.bounds_cache = None;
                                             }
-                                            // Draw overlays on top in both modes (unified overlay system)
-                                            let saved = ov.show_bathy; ov.show_bathy = false; 
-                                            overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); 
-                                            ov.show_bathy = saved;
+                                            // Draw overlays on top (GPU raster provides the base elevation layer)
+                                            overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
                                         }
                                     } else {
                                         // CPU fallback raster
@@ -3845,10 +3864,8 @@ fn main() {
                                             egui::Color32::WHITE,
                                         );
                                     }
-                                    // Draw overlays on top
-                                    let saved = ov.show_bathy; ov.show_bathy = false;
+                                    // Draw overlays on top (CPU raster provides the base elevation layer)
                                     overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
-                                    ov.show_bathy = saved;
                                 }
                             });
                             // Remove legacy central/top UI panels (moved to drawer)
@@ -4057,13 +4074,7 @@ fn main() {
                                 let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                             }
                         }
-                        // Drain any snapshot from the worker and update visible world
-                        while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                            get_elevation_state().update(elev);
-                            world.sea.eta_m = eta;
-                            world.clock.t_myr = t_myr;
-                            ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true;
-                        }
+                        // World updates now come through unified rx_world channel only
                         
                         // Drain any world snapshots and update complete world state for overlays
                         while let Ok(ws) = rx_world.try_recv() {
