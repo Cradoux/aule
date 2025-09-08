@@ -1221,10 +1221,19 @@ impl OverlayState {
         self.hypso_d_max = max_ocean.max(4000.0);
         self.hypso_h_max = max_land.max(4000.0);
         let snow = self.hypso_snowline;
+        
+        // DEBUG: Log color mapping parameters
+        println!("[color] hypso_d_max={:.1}m, hypso_h_max={:.1}m, max_ocean={:.1}m, max_land={:.1}m", 
+            self.hypso_d_max, self.hypso_h_max, max_ocean, max_land);
+        let mut land_count = 0;
+        let mut ocean_count = 0;
         for (i, &ll) in grid.latlon.iter().enumerate() {
             let p = project_equirect(ll[0], ll[1], rect);
             let d = depth_m[i];
             let elev = eta_m - d;
+            
+            // DEBUG: Count land vs ocean cells
+            if elev > 0.0 { land_count += 1; } else { ocean_count += 1; }
             let mut col = if self.color_mode == 0 {
                 if elev <= 0.0 {
                     ocean_color32((-elev).max(0.0), self.hypso_d_max)
@@ -1279,6 +1288,11 @@ impl OverlayState {
             }
         }
         shapes.extend(coast);
+        
+        // DEBUG: Log final counts before moving shapes
+        println!("[color] Generated {} shapes: {} land cells, {} ocean cells", 
+            shapes.len(), land_count, ocean_count);
+        
         self.bathy_cache = Some(shapes);
     }
 
