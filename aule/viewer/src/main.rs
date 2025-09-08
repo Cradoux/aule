@@ -3063,70 +3063,38 @@ fn main() {
     let mut fps: f32 = 0.0;
     let _nplates: usize = world.plates.pole_axis.len();
 
-    // Background stepping worker plumbing
+    // Background simulation thread with unified world state sync
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
-    // Removed unused SimCtrl
-    let (tx_snap, rx_snap) = mpsc::channel::<(Vec<f32>, f32, f64)>();
+    
+    // Single world update channel - no separate elevation stream
     let (tx_world, rx_world) = mpsc::channel::<WorldSnapshot>();
-    // Simulation thread command channel and busy flag
     let (tx_cmd, rx_cmd) = mpsc::channel::<SimCommand>();
     let sim_busy = Arc::new(AtomicBool::new(false));
     let sim_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-    // Removed unused sim_stop
-    // Capture a complete initial snapshot from the UI world to seed the simulation thread
-    let init_snapshot = WorldSnapshot {
-        depth_m: world.depth_m.clone(),
-        c: world.c.clone(),
-        th_c_m: world.th_c_m.clone(),
-        sea_eta_m: world.sea.eta_m,
-        plate_id: world.plates.plate_id.clone(),
-        pole_axis: world.plates.pole_axis.clone(),
-        omega_rad_yr: world.plates.omega_rad_yr.clone(),
-        v_en: world.v_en.clone(),
-        age_myr: world.age_myr.clone(),
-    };
+    
+    // Initialize background simulation thread
     {
-        let tx_snap_bg = tx_snap.clone();
         let tx_world_bg = tx_world.clone();
         let sim_busy_bg = sim_busy.clone();
         let rx_cmd_bg = rx_cmd;
-        let init_ws = init_snapshot;
+        let init_world = world.clone();
+        
         let sim_thread = std::thread::spawn(move || {
-            // Separate simulation world to avoid blocking UI
-            let f: u32 = 64;
-            let mut sim_world = engine::world::World::new(f, 8, 12345);
-            // Seed world with the initial snapshot
-            if sim_world.depth_m.len() == init_ws.depth_m.len() {
-                sim_world.depth_m = init_ws.depth_m;
-                sim_world.depth_stage_m.clone_from(&sim_world.depth_m);
-            }
-            if sim_world.c.len() == init_ws.c.len() { sim_world.c = init_ws.c; }
-            if sim_world.th_c_m.len() == init_ws.th_c_m.len() { sim_world.th_c_m = init_ws.th_c_m; }
-            sim_world.sea.eta_m = init_ws.sea_eta_m;
-            if sim_world.plates.plate_id.len() == init_ws.plate_id.len() { sim_world.plates.plate_id = init_ws.plate_id; }
-            if sim_world.plates.pole_axis.len() == init_ws.pole_axis.len() { sim_world.plates.pole_axis = init_ws.pole_axis; }
-            if sim_world.plates.omega_rad_yr.len() == init_ws.omega_rad_yr.len() { sim_world.plates.omega_rad_yr = init_ws.omega_rad_yr; }
-            if sim_world.v_en.len() == init_ws.v_en.len() { sim_world.v_en = init_ws.v_en; } else {
-                sim_world.v_en = engine::plates::velocity_en_m_per_yr(&sim_world.grid, &sim_world.plates, &sim_world.plates.plate_id);
-            }
-            if sim_world.age_myr.len() == init_ws.age_myr.len() { sim_world.age_myr = init_ws.age_myr; }
-            // Ensure boundaries consistent with current kinematics
-            sim_world.boundaries = engine::boundaries::Boundaries::classify(
-                &sim_world.grid,
-                &sim_world.plates.plate_id,
-                &sim_world.v_en,
-                0.005,
-            );
+            let mut sim_world = init_world;
+            
             while let Ok(cmd) = rx_cmd_bg.recv() {
                 match cmd {
                     SimCommand::Step(cfg, process_flags) => {
                         sim_busy_bg.store(true, Ordering::SeqCst);
-                        // Convert PipelineCfg to PhysicsConfig for unified pipeline
+                        
+                        // Convert UI flags to unified PhysicsConfig
                         let mut config = engine::config::PhysicsConfig::simple_mode();
                         config.dt_myr = cfg.dt_myr;
+                        config.target_land_frac = cfg.target_land_frac;
+                        config.freeze_eta = cfg.freeze_eta;
                         
-                        // Apply unified process enable flags from UI
+                        // Apply process enables
                         config.enable_rigid_motion = process_flags.enable_rigid_motion;
                         config.enable_subduction = process_flags.enable_subduction;
                         config.enable_transforms = process_flags.enable_transforms;
@@ -3139,63 +3107,25 @@ fn main() {
                         config.enable_rifting = process_flags.enable_rifting;
                         config.enable_ridge_birth = process_flags.enable_ridge_birth;
                         
-                        // Apply flexure backend selection from UI
+                        // Apply flexure backend
                         config.flexure_backend = if process_flags.flexure_backend_cpu {
-                            engine::flexure_manager::FlexureBackend::CpuWinkler
+                            engine::flexure_manager::FlexureBackend::Cpu
                         } else {
-                            engine::flexure_manager::FlexureBackend::GpuMultigrid {
+                            engine::flexure_manager::FlexureBackend::Gpu {
                                 levels: process_flags.flexure_gpu_levels,
                                 cycles: process_flags.flexure_gpu_cycles,
                             }
                         };
                         
-                        // Apply unified cadence configuration
-                        config.cadence_config = process_flags.cadence_config.clone();
+                        // Apply cadence config
+                        config.cadence_config = process_flags.cadence_config;
                         
-                        // Legacy compatibility (sync old flags if needed)
-                        if !cfg.enable_flexure { config.enable_flexure = false; }
-                        if cfg.enable_erosion { config.enable_surface_processes = true; }
-                        
-                        config.target_land_frac = cfg.target_land_frac;
-                        config.freeze_eta = cfg.freeze_eta;
-                        
-                        // Copy surface process parameters
-                        config.surface_params.k_stream = cfg.surf_k_stream;
-                        config.surface_params.m_exp = cfg.surf_m_exp;
-                        config.surface_params.n_exp = cfg.surf_n_exp;
-                        config.surface_params.k_diff = cfg.surf_k_diff;
-                        config.surface_params.k_tr = cfg.surf_k_tr;
-                        config.surface_params.p_exp = cfg.surf_p_exp;
-                        config.surface_params.q_exp = cfg.surf_q_exp;
-                        config.surface_params.rho_sed = cfg.surf_rho_sed;
-                        config.surface_params.min_slope = cfg.surf_min_slope;
-                        config.surface_params.subcycles = cfg.surf_subcycles;
-                        config.surface_params.couple_flexure = cfg.surf_couple_flexure;
-                        
-                        // Copy subduction parameters
-                        config.sub_tau_conv_m_per_yr = cfg.sub_tau_conv_m_per_yr;
-                        config.sub_trench_half_width_km = cfg.sub_trench_half_width_km;
-                        config.sub_arc_offset_km = cfg.sub_arc_offset_km;
-                        config.sub_arc_half_width_km = cfg.sub_arc_half_width_km;
-                        config.sub_backarc_width_km = cfg.sub_backarc_width_km;
-                        config.sub_trench_deepen_m = cfg.sub_trench_deepen_m;
-                        config.sub_arc_uplift_m = cfg.sub_arc_uplift_m;
-                        config.sub_backarc_uplift_m = cfg.sub_backarc_uplift_m;
-                        config.sub_rollback_offset_m = cfg.sub_rollback_offset_m;
-                        config.sub_rollback_rate_km_per_myr = cfg.sub_rollback_rate_km_per_myr;
-                        config.sub_backarc_extension_mode = cfg.sub_backarc_extension_mode;
-                        config.sub_backarc_extension_deepen_m = cfg.sub_backarc_extension_deepen_m;
-                        config.sub_continent_c_min = cfg.sub_continent_c_min;
-                        
-                        // Use unified pipeline
+                        // Run unified pipeline step
                         let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
                         let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
                         let _result = pipeline.step(&mut sim_world, mode);
-                        // Get elevation from unified pipeline (already computed correctly)
-                        let elev_now: Vec<f32> = pipeline.elevation(&sim_world).to_vec();
-                        let _ = tx_snap_bg.send((elev_now, sim_world.sea.eta_m, sim_world.clock.t_myr));
                         
-                        // Send complete world state for overlay updates (less frequently to avoid overwhelming UI)
+                        // Send complete world state (unified approach)
                         let ws = WorldSnapshot {
                             depth_m: sim_world.depth_m.clone(),
                             c: sim_world.c.clone(),
@@ -3207,10 +3137,11 @@ fn main() {
                             v_en: sim_world.v_en.clone(),
                             age_myr: sim_world.age_myr.clone(),
                         };
-                        let _ = tx_world_bg.send(ws); // Send world snapshot
+                        let _ = tx_world_bg.send(ws);
                         sim_busy_bg.store(false, Ordering::SeqCst);
                     }
                     SimCommand::SyncWorld(ws) => {
+                        // Update simulation world from UI (e.g., after Generate World)
                         if sim_world.depth_m.len() == ws.depth_m.len() {
                             sim_world.depth_m = ws.depth_m;
                             sim_world.depth_stage_m.clone_from(&sim_world.depth_m);
@@ -3231,14 +3162,11 @@ fn main() {
                 }
             }
         });
+        
         if let Ok(mut h) = sim_handle.lock() {
             *h = Some(sim_thread);
         }
     }
-    // dt now comes from ov.sim_dt_myr
-    // Removed unused stepping cadence variables
-    // Snapshots frequency (Myr)
-    // Removed unused snapshot interval
 
     event_loop
     .run(move |event, elwt| {
@@ -3360,31 +3288,29 @@ fn main() {
                                         });
                                 });
                             }
-                            // Drain any pending simulation snapshots (non-blocking)
-                            while let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                                get_elevation_state().update(elev);
-                                world.sea.eta_m = eta;
-                                world.clock.t_myr = t_myr;
-                                ov.world_dirty = true; ov.color_dirty = true;
-                                // Invalidate GPU buffer cache when world changes
-                                gpu_buf_mgr.invalidate_cache();
-                            }
-                            
-                            // Drain any world snapshots and update complete world state for overlays
+                            // Unified world state updates - single authoritative source
                             while let Ok(ws) = rx_world.try_recv() {
+                                // Update complete world state from simulation thread
                                 if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
                                 if world.c.len() == ws.c.len() { world.c = ws.c; }
                                 if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
                                 world.sea.eta_m = ws.sea_eta_m;
+                                world.clock.t_myr = ws.age_myr.iter().fold(0.0, |acc, &age| acc.max(age as f64)); // Approximate time from max age
                                 if world.plates.plate_id.len() == ws.plate_id.len() { world.plates.plate_id = ws.plate_id; }
                                 if world.plates.pole_axis.len() == ws.pole_axis.len() { world.plates.pole_axis = ws.pole_axis; }
                                 if world.plates.omega_rad_yr.len() == ws.omega_rad_yr.len() { world.plates.omega_rad_yr = ws.omega_rad_yr; }
                                 if world.v_en.len() == ws.v_en.len() { world.v_en = ws.v_en; }
                                 if world.age_myr.len() == ws.age_myr.len() { world.age_myr = ws.age_myr; }
+                                
                                 // Recompute boundaries with updated state
                                 world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                
+                                // Update unified elevation state for GPU consistency
+                                let elevation: Vec<f32> = world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect();
+                                get_elevation_state().update(elevation);
+                                
+                                // Mark everything dirty for immediate update
                                 ov.world_dirty = true; ov.color_dirty = true;
-                                // Invalidate overlay caches so they update with new world state
                                 ov.plates_cache = None;
                                 ov.vel_cache = None;
                                 ov.bounds_cache = None;
@@ -3486,9 +3412,8 @@ fn main() {
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                // Raster shader expects depth (positive down); use GPU buffer manager for consistency
-                                                if ov.world_dirty { gpu_buf_mgr.invalidate_cache(); }
-                                                let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
+                                                // Raster shader expects depth (positive down); use world state directly
+                                                let verts = world.depth_m.clone();
                                                 rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
