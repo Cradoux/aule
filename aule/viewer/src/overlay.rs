@@ -200,6 +200,10 @@ pub struct OverlayState {
     pub cadence_rifting: u32,
     pub cadence_ridge_birth: u32,
     pub cadence_force_balance: u32,
+    
+    // Additional UI state for unified interface
+    pub enable_force_balance: bool,
+    pub debug_wireframes: bool,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -516,6 +520,10 @@ impl Default for OverlayState {
             cadence_rifting: 8,
             cadence_ridge_birth: 8,
             cadence_force_balance: 8,
+            
+            // Additional UI state defaults
+            enable_force_balance: false, // Advanced feature, disabled by default
+            debug_wireframes: false,
             k_winkler: 3.0e8f32,
             wj_omega: 0.8,
             nu1: 1,
