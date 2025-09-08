@@ -603,7 +603,10 @@ fn render_world_generation_unified(
                         .on_hover_text("Controls random world generation - same seed = same world");
                     ui.add(egui::DragValue::new(&mut ov.simple_seed).speed(1000));
                     if ui.button("🎲").on_hover_text("Generate new random seed").clicked() {
-                        ov.simple_seed = rand::random();
+                        ov.simple_seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
                     }
                 });
                 

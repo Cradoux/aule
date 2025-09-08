@@ -204,6 +204,7 @@ pub struct OverlayState {
     // Additional UI state for unified interface
     pub enable_force_balance: bool,
     pub debug_wireframes: bool,
+    pub show_plate_id: bool,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -524,6 +525,7 @@ impl Default for OverlayState {
             // Additional UI state defaults
             enable_force_balance: false, // Advanced feature, disabled by default
             debug_wireframes: false,
+            show_plate_id: false,
             k_winkler: 3.0e8f32,
             wj_omega: 0.8,
             nu1: 1,
