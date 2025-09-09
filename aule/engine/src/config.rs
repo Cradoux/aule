@@ -392,13 +392,13 @@ impl PhysicsConfig {
             cadence_spawn_plate_every: 0, // disabled by default
             cadence_retire_plate_every: 0, // disabled by default  
             cadence_force_balance_every: 0, // disabled by default
-            fb_gain: 1.0e-12,
+            fb_gain: 1.0e-8,               // Increase gain for more responsive force balance
             fb_damp_per_myr: 0.2,
             fb_k_conv: 1.0,
             fb_k_div: 0.5,
             fb_k_trans: 0.1,
-            fb_max_domega: 5.0e-9,
-            fb_max_omega: 2.0e-7,
+            fb_max_domega: 1.0e-7,         // Allow larger omega changes per step
+            fb_max_omega: 5.0e-6,          // Allow realistic plate rotation rates (~0.3°/Myr)
         }
     }
     

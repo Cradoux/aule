@@ -176,13 +176,13 @@ fn run_to_t_realtime(
                 cadence_spawn_plate_every: 0,
                 cadence_retire_plate_every: 0,
                 cadence_force_balance_every: 8,
-                fb_gain: 1.0e-12,
+                fb_gain: 1.0e-8,               // Realistic force balance gain
                 fb_damp_per_myr: 0.2,
                 fb_k_conv: 1.0,
                 fb_k_div: 0.5,
                 fb_k_trans: 0.1,
-                fb_max_domega: 5.0e-9,
-                fb_max_omega: 2.0e-7,
+                fb_max_domega: 1.0e-7,         // Allow realistic omega changes
+                fb_max_omega: 5.0e-6,          // Allow realistic plate rotation rates
             };
             // Convert PipelineCfg to PhysicsConfig for unified pipeline
             let mut config = engine::config::PhysicsConfig::simple_mode();
@@ -3477,7 +3477,8 @@ fn main() {
                                                         ov.export_parity_csv_requested = false;
                                                     }
                                                     if ov.raster_tex_id.is_none() { let tid = egui_renderer.register_native_texture(&gpu.device, &rg.out_view, wgpu::FilterMode::Linear); ov.raster_tex_id = Some(tid); }
-                                                    ov.raster_dirty = false; ov.world_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
+                                                    ov.raster_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
+                                                    // Don't clear world_dirty here - let overlays update first
                                                     // println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                                 }
                                             }
@@ -3511,6 +3512,9 @@ fn main() {
                                         }
                                         // Draw overlays on top (GPU raster provides the base elevation layer)
                                         overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
+                                        
+                                        // Clear world_dirty flag after overlays have been updated
+                                        ov.world_dirty = false;
                                     } else {
                                         // CPU fallback raster (only when GPU raster is disabled)
                                         // Keep boundary classification fresh when world changed
@@ -3538,6 +3542,9 @@ fn main() {
                                         }
                                         // Draw overlays on top (CPU raster provides the base elevation layer)
                                         overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
+                                        
+                                        // Clear world_dirty flag after overlays have been updated
+                                        ov.world_dirty = false;
                                     }
                                 }
                             });
