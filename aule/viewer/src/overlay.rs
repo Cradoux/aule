@@ -206,6 +206,15 @@ pub struct OverlayState {
     pub debug_wireframes: bool,
     pub show_plate_id: bool,
     
+    // Force Balance Parameters (exposed for tuning)
+    pub fb_gain: f32,
+    pub fb_damp_per_myr: f32,
+    pub fb_k_conv: f32,
+    pub fb_k_div: f32,
+    pub fb_k_trans: f32,
+    pub fb_max_domega: f32,
+    pub fb_max_omega: f32,
+    
     // Simulation rate limiting
     pub last_sim_step_time: Option<std::time::Instant>,
     pub k_winkler: f32, // N/m^3
@@ -529,6 +538,15 @@ impl Default for OverlayState {
             enable_force_balance: false, // Advanced feature, disabled by default
             debug_wireframes: false,
             show_plate_id: false,
+            
+            // Force Balance Parameter defaults (match config.rs values)
+            fb_gain: 1.0e-9,
+            fb_damp_per_myr: 0.1,
+            fb_k_conv: 1.0,
+            fb_k_div: 0.5,
+            fb_k_trans: 0.1,
+            fb_max_domega: 5.0e-8,
+            fb_max_omega: 1.0e-6,
             
             // Simulation rate limiting defaults
             last_sim_step_time: None,

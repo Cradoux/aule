@@ -176,13 +176,13 @@ fn run_to_t_realtime(
                 cadence_spawn_plate_every: 0,
                 cadence_retire_plate_every: 0,
                 cadence_force_balance_every: 8,
-                fb_gain: 1.0e-9,               // Balanced gain - between frozen and runaway
-                fb_damp_per_myr: 0.1,          // Moderate damping for stability
-                fb_k_conv: 1.0,
-                fb_k_div: 0.5,
-                fb_k_trans: 0.1,
-                fb_max_domega: 5.0e-8,         // More conservative omega changes per step
-                fb_max_omega: 1.0e-6,          // More conservative rotation rate limit
+                fb_gain: ov.fb_gain,               // Use UI-configurable value
+                fb_damp_per_myr: ov.fb_damp_per_myr, // Use UI-configurable value
+                fb_k_conv: ov.fb_k_conv,
+                fb_k_div: ov.fb_k_div,
+                fb_k_trans: ov.fb_k_trans,
+                fb_max_domega: ov.fb_max_domega,
+                fb_max_omega: ov.fb_max_omega,
             };
             // Convert PipelineCfg to PhysicsConfig for unified pipeline
             let mut config = engine::config::PhysicsConfig::simple_mode();
@@ -951,85 +951,42 @@ fn render_visual_overlays_unified(
     _world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
 ) {
+    // ============= FLAT UI STRUCTURE - NO NESTED GROUPS =============
+    
+    // Visual Overlays Section
     egui::CollapsingHeader::new("🎨 Visual Overlays")
         .default_open(false)
         .show(ui, |ui| {
-            ui.label("Essential Overlays:");
-            
             ui.horizontal(|ui| {
-                ui.checkbox(&mut ov.show_plates, "Plate Boundaries [1]")
-                    .on_hover_text("Shows tectonic plate edges - essential for understanding plate tectonics");
-                ui.checkbox(&mut ov.show_vel, "Plate Velocity [2]")
-                    .on_hover_text("Visualize plate movement directions and speeds");
+                ui.checkbox(&mut ov.show_plates, "Plate Boundaries [1]");
+                ui.checkbox(&mut ov.show_vel, "Plate Velocity [2]");
+                ui.checkbox(&mut ov.show_continents, "Continental Crust [C]");
+                ui.checkbox(&mut ov.show_bounds, "Boundary Types [3]");
             });
             
             ui.horizontal(|ui| {
-                ui.checkbox(&mut ov.show_continents, "Continental Crust [C]")
-                    .on_hover_text("Highlight landmasses and continental regions");
-                ui.checkbox(&mut ov.show_bounds, "Boundary Types [3]")
-                    .on_hover_text("Color-code convergent, divergent, and transform boundaries");
+                ui.checkbox(&mut ov.show_subduction, "Subduction Zones [7]");
+                ui.checkbox(&mut ov.show_transforms, "Transform Faults [0]");
+                ui.checkbox(&mut ov.show_age_depth, "Age-Depth [6]");
+                ui.checkbox(&mut ov.show_plate_id, "Plate ID Colors");
             });
             
-            ui.separator();
-            
-            // Geological Analysis (intermediate complexity)
-            ui.collapsing("🔬 Geological Analysis", |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut ov.show_subduction, "Subduction Zones [7]")
-                        .on_hover_text("For studying convergent margins where plates collide");
-                    ui.checkbox(&mut ov.show_transforms, "Transform Faults [0]")
-                        .on_hover_text("For analyzing lateral plate motion and shear zones");
-                });
-                
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut ov.show_age_depth, "Age-Depth Relationship [6]")
-                        .on_hover_text("Advanced: seafloor spreading analysis - depth vs crustal age");
-                    ui.checkbox(&mut ov.show_plate_id, "Plate ID Colors")
-                        .on_hover_text("Color-code individual plates for identification");
-                });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.show_triple_junctions, "Triple Junctions [5]");
+                ui.checkbox(&mut ov.show_plate_adjacency, "Plate Adjacency [4]");
+                ui.checkbox(&mut ov.show_flexure, "Flexure Response");
+                ui.checkbox(&mut ov.debug_wireframes, "Debug Wireframes");
             });
             
-            // Advanced Diagnostics (expert level)
-            ui.collapsing("🔬 Advanced Diagnostics", |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut ov.show_triple_junctions, "Triple Junctions [5]")
-                        .on_hover_text("Expert: points where three tectonic plates meet");
-                    ui.checkbox(&mut ov.show_plate_adjacency, "Plate Adjacency [4]")
-                        .on_hover_text("Expert: visualize plate neighbor relationships");
-                });
-                
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut ov.show_flexure, "Flexure Response")
-                        .on_hover_text("Expert: crustal bending under geological loads");
-                    ui.checkbox(&mut ov.debug_wireframes, "Debug Wireframes")
-                        .on_hover_text("Developer: show underlying mesh structure");
-                });
-            });
-            
-            ui.separator();
-            
-            // Color and rendering options
-            ui.collapsing("🎨 Color & Rendering", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Color mode:")
-                        .on_hover_text("Choose how terrain is colored");
-                    ui.selectable_value(&mut ov.color_mode, 0, "Elevation")
-                        .on_hover_text("Color by height - blue=ocean, green/brown=land");
-                    ui.selectable_value(&mut ov.color_mode, 1, "Biomes")
-                        .on_hover_text("Color by climate zones and vegetation");
-                });
-                
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut ov.shade_on, "Hillshading")
-                        .on_hover_text("Add shadows to show terrain relief");
-                    if ov.shade_on {
-                        ui.add(egui::Slider::new(&mut ov.shade_strength, 0.0..=1.0)
-                            .text("Strength"));
-                    }
-                });
-                
-                ui.checkbox(&mut ov.legend_on, "Show Legend")
-                    .on_hover_text("Display color scale and overlay explanations");
+            ui.horizontal(|ui| {
+                ui.label("Color mode:");
+                ui.selectable_value(&mut ov.color_mode, 0, "Elevation");
+                ui.selectable_value(&mut ov.color_mode, 1, "Biomes");
+                ui.checkbox(&mut ov.shade_on, "Hillshading");
+                if ov.shade_on {
+                    ui.add(egui::Slider::new(&mut ov.shade_strength, 0.0..=1.0).text("Strength"));
+                }
+                ui.checkbox(&mut ov.legend_on, "Show Legend");
             });
             
             // Invalidate caches when overlays change
@@ -1039,6 +996,73 @@ fn render_visual_overlays_unified(
                 ov.bounds_cache = None;
                 ov.color_dirty = true;
             }
+        });
+
+    // Force Balance Parameters Section
+    egui::CollapsingHeader::new("⚖️ Force Balance")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.enable_force_balance, "Enable Force Balance");
+                ui.label("Gain:");
+                ui.add(egui::DragValue::new(&mut ov.fb_gain).speed(1e-11).clamp_range(1e-12..=1e-5));
+                ui.label("Damping (per Myr):");
+                ui.add(egui::DragValue::new(&mut ov.fb_damp_per_myr).speed(0.001).clamp_range(0.001..=1.0));
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Conv. Coeff:");
+                ui.add(egui::DragValue::new(&mut ov.fb_k_conv).speed(0.01).clamp_range(0.1..=5.0));
+                ui.label("Div. Coeff:");
+                ui.add(egui::DragValue::new(&mut ov.fb_k_div).speed(0.01).clamp_range(0.1..=5.0));
+                ui.label("Trans. Coeff:");
+                ui.add(egui::DragValue::new(&mut ov.fb_k_trans).speed(0.01).clamp_range(0.01..=1.0));
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Max dΩ:");
+                ui.add(egui::DragValue::new(&mut ov.fb_max_domega).speed(1e-10).clamp_range(1e-10..=1e-6));
+                ui.label("Max Ω:");
+                ui.add(egui::DragValue::new(&mut ov.fb_max_omega).speed(1e-8).clamp_range(1e-8..=1e-4));
+            });
+        });
+
+    // Geological Processes Section
+    egui::CollapsingHeader::new("🌋 Geological Processes")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Rigid Motion:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_rigid_motion).clamp_range(1..=20));
+                ui.label("Transforms:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_transforms).clamp_range(1..=20));
+                ui.label("Subduction:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_subduction).clamp_range(1..=20));
+                ui.label("Flexure:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_flexure).clamp_range(1..=10));
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Isostasy:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_isostasy).clamp_range(1..=10));
+                ui.label("Cont. Buoyancy:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_continental_buoyancy).clamp_range(1..=10));
+                ui.label("Surface Proc.:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_surface_processes).clamp_range(1..=20));
+                ui.label("Orogeny:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_orogeny).clamp_range(1..=20));
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Accretion:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_accretion).clamp_range(0..=50));
+                ui.label("Rifting:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_rifting).clamp_range(0..=50));
+                ui.label("Ridge Birth:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_ridge_birth).clamp_range(0..=50));
+                ui.label("Force Balance:");
+                ui.add(egui::DragValue::new(&mut ov.cadence_force_balance).clamp_range(0..=50));
+            });
         });
 }
 
@@ -2483,59 +2507,7 @@ fn render_advanced_panels(
                 });
             });
             
-            ui.collapsing("Geological Processes", |ui| {
-        ui.horizontal(|ui| {
-                    ui.label("Transforms:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_transforms).clamp_range(1..=20)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Subduction:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_subduction).clamp_range(1..=20)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Surface Processes:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_surface_processes).clamp_range(1..=20)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Orogeny:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_orogeny).clamp_range(1..=20)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-            });
-            
-            ui.collapsing("Advanced Processes", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Accretion:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_accretion).clamp_range(0..=50)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Rifting:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_rifting).clamp_range(0..=50)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Ridge Birth:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_ridge_birth).clamp_range(0..=50)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Force Balance:");
-                    if ui.add(egui::DragValue::new(&mut ov.cadence_force_balance).clamp_range(0..=50)).changed() {
-                        ov.cadence_preset = "Custom".to_string();
-                    }
-                });
-            });
+            // REMOVED: Nested geological processes - now in flat structure above
         }
         
         ui.separator();
