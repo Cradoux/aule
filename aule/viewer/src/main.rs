@@ -999,70 +999,112 @@ fn render_visual_overlays_unified(
         });
 
     // Force Balance Parameters Section
-    egui::CollapsingHeader::new("⚖️ Force Balance")
+    egui::CollapsingHeader::new("⚖️ Force Balance Parameters")
         .default_open(false)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut ov.enable_force_balance, "Enable Force Balance");
-                ui.label("Gain:");
-                ui.add(egui::DragValue::new(&mut ov.fb_gain).speed(1e-11).clamp_range(1e-12..=1e-5));
-                ui.label("Damping (per Myr):");
-                ui.add(egui::DragValue::new(&mut ov.fb_damp_per_myr).speed(0.001).clamp_range(0.001..=1.0));
-            });
+            ui.checkbox(&mut ov.enable_force_balance, "Enable Force Balance")
+                .on_hover_text("Controls automatic adjustment of plate rotation rates based on boundary forces");
             
-            ui.horizontal(|ui| {
-                ui.label("Conv. Coeff:");
-                ui.add(egui::DragValue::new(&mut ov.fb_k_conv).speed(0.01).clamp_range(0.1..=5.0));
-                ui.label("Div. Coeff:");
-                ui.add(egui::DragValue::new(&mut ov.fb_k_div).speed(0.01).clamp_range(0.1..=5.0));
-                ui.label("Trans. Coeff:");
-                ui.add(egui::DragValue::new(&mut ov.fb_k_trans).speed(0.01).clamp_range(0.01..=1.0));
-            });
+            ui.label("Gain (dimensionless):");
+            ui.add(egui::Slider::new(&mut ov.fb_gain, 1e-12..=1e-5).logarithmic(true))
+                .on_hover_text("Primary control for plate motion responsiveness. Higher = faster rotation changes. Typical: 1e-10 to 1e-8");
             
-            ui.horizontal(|ui| {
-                ui.label("Max dΩ:");
-                ui.add(egui::DragValue::new(&mut ov.fb_max_domega).speed(1e-10).clamp_range(1e-10..=1e-6));
-                ui.label("Max Ω:");
-                ui.add(egui::DragValue::new(&mut ov.fb_max_omega).speed(1e-8).clamp_range(1e-8..=1e-4));
-            });
+            ui.label("Damping (per Myr):");
+            ui.add(egui::Slider::new(&mut ov.fb_damp_per_myr, 0.001..=1.0).logarithmic(true))
+                .on_hover_text("Stabilizes plate motion. Higher = more damping, slower changes. Typical: 0.01 to 0.1");
+            
+            ui.label("Convergent Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_conv, 0.1..=5.0))
+                .on_hover_text("Force multiplier for convergent boundaries (subduction/collision). Typical: 0.5 to 2.0");
+            
+            ui.label("Divergent Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_div, 0.1..=5.0))
+                .on_hover_text("Force multiplier for divergent boundaries (spreading ridges). Typical: 0.2 to 1.0");
+            
+            ui.label("Transform Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_trans, 0.01..=1.0))
+                .on_hover_text("Force multiplier for transform boundaries (lateral motion). Typical: 0.05 to 0.2");
+            
+            ui.label("Max Ω Change (rad/yr per step):");
+            ui.add(egui::Slider::new(&mut ov.fb_max_domega, 1e-12..=1e-6).logarithmic(true))
+                .on_hover_text("Maximum rotation rate change per time step. Prevents instability. Typical: 1e-9 to 1e-7");
+            
+            ui.label("Max Ω Total (rad/yr):");
+            ui.add(egui::Slider::new(&mut ov.fb_max_omega, 1e-9..=1e-4).logarithmic(true))
+                .on_hover_text("Maximum absolute plate rotation rate. Real plates: ~1e-7 to 1e-5 rad/yr");
         });
 
-    // Geological Processes Section
-    egui::CollapsingHeader::new("🌋 Geological Processes")
+    // Plate Motion & Kinematics
+    egui::CollapsingHeader::new("🔄 Plate Motion & Kinematics")
         .default_open(false)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Rigid Motion:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_rigid_motion).clamp_range(1..=20));
-                ui.label("Transforms:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_transforms).clamp_range(1..=20));
-                ui.label("Subduction:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_subduction).clamp_range(1..=20));
-                ui.label("Flexure:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_flexure).clamp_range(1..=10));
-            });
+            ui.label("Rigid Motion Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_rigid_motion, 1..=10))
+                .on_hover_text("How often to update plate velocities. 1=every step, higher=less frequent. Affects motion smoothness.");
             
-            ui.horizontal(|ui| {
-                ui.label("Isostasy:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_isostasy).clamp_range(1..=10));
-                ui.label("Cont. Buoyancy:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_continental_buoyancy).clamp_range(1..=10));
-                ui.label("Surface Proc.:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_surface_processes).clamp_range(1..=20));
-                ui.label("Orogeny:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_orogeny).clamp_range(1..=20));
-            });
+            ui.label("Force Balance Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_force_balance, 1..=20))
+                .on_hover_text("How often to adjust plate rotation rates. Higher = more stable but less responsive motion.");
+        });
+
+    // Plate Boundaries & Tectonics  
+    egui::CollapsingHeader::new("🌋 Plate Boundaries & Tectonics")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Transform Faults Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_transforms, 1..=20))
+                .on_hover_text("Frequency of transform fault processing. Controls lateral plate motion and strike-slip zones.");
             
-            ui.horizontal(|ui| {
-                ui.label("Accretion:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_accretion).clamp_range(0..=50));
-                ui.label("Rifting:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_rifting).clamp_range(0..=50));
-                ui.label("Ridge Birth:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_ridge_birth).clamp_range(0..=50));
-                ui.label("Force Balance:");
-                ui.add(egui::DragValue::new(&mut ov.cadence_force_balance).clamp_range(0..=50));
-            });
+            ui.label("Subduction Zones Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_subduction, 1..=20))
+                .on_hover_text("Frequency of subduction processing. Controls convergent margin dynamics and volcanic arcs.");
+            
+            ui.label("Oceanic Rifting Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_rifting, 0..=50))
+                .on_hover_text("Continental breakup and oceanic rifting. 0=disabled. Controls new ocean formation.");
+            
+            ui.label("Ridge Birth Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_ridge_birth, 0..=50))
+                .on_hover_text("New spreading ridge formation. 0=disabled. Resets seafloor age at divergent boundaries.");
+        });
+
+    // Mountain Building & Collisions
+    egui::CollapsingHeader::new("🏔️ Mountain Building & Collisions")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Orogeny Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_orogeny, 1..=50))
+                .on_hover_text("Continental collision and mountain building. Creates orogenic belts when continents collide.");
+            
+            ui.label("Oceanic Accretion Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_accretion, 0..=50))
+                .on_hover_text("Growth of volcanic arcs and accretionary wedges at subduction zones. 0=disabled.");
+        });
+
+    // Isostasy & Buoyancy
+    egui::CollapsingHeader::new("⚖️ Isostasy & Buoyancy")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Flexural Response Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_flexure, 1..=10))
+                .on_hover_text("Lithospheric bending under loads. Controls crustal deflection from mountains and sediments.");
+            
+            ui.label("Isostatic Adjustment Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_isostasy, 1..=10))
+                .on_hover_text("Global sea level regulation and isostatic rebound. Maintains target land fraction.");
+            
+            ui.label("Continental Buoyancy Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_continental_buoyancy, 1..=10))
+                .on_hover_text("Buoyant response of continental crust. Controls continental elevation relative to oceans.");
+        });
+
+    // Surface Processes
+    egui::CollapsingHeader::new("🌊 Surface Processes")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Surface Processes Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_surface_processes, 1..=50))
+                .on_hover_text("Erosion, sedimentation, and landscape evolution. Controls weathering and transport of material.");
         });
 }
 
