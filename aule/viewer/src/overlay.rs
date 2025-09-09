@@ -205,6 +205,9 @@ pub struct OverlayState {
     pub enable_force_balance: bool,
     pub debug_wireframes: bool,
     pub show_plate_id: bool,
+    
+    // Simulation rate limiting
+    pub last_sim_step_time: Option<std::time::Instant>,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -526,6 +529,9 @@ impl Default for OverlayState {
             enable_force_balance: false, // Advanced feature, disabled by default
             debug_wireframes: false,
             show_plate_id: false,
+            
+            // Simulation rate limiting defaults
+            last_sim_step_time: None,
             k_winkler: 3.0e8f32,
             wj_omega: 0.8,
             nu1: 1,
@@ -602,7 +608,7 @@ impl Default for OverlayState {
             simple_palette: 0,
             simple_f: 64,
 
-            sim_dt_myr: 1.0,
+            sim_dt_myr: 0.1, // Smaller default for smoother visual updates
             profile_idx: 1,
             show_profile_confirm: false,
             pending_profile: 1,

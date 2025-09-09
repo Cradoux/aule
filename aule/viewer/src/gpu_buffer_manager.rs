@@ -1,73 +1,37 @@
-//! GPU buffer management with consistent elevation data synchronization.
+//! Direct GPU buffer access with no caching or conversion layers.
 //!
-//! This module provides a centralized manager for GPU buffer operations
-//! to ensure consistency between CPU and GPU elevation data.
+//! This module provides direct access to world data for GPU operations,
+//! eliminating redundant caches and conversion steps.
 
-use crate::get_elevation_state;
 use engine::world::World;
 
-/// Centralized GPU buffer manager for consistent elevation data.
-pub struct GpuBufferManager {
-    /// Cached elevation data to avoid redundant computations
-    cached_elevation: Option<Vec<f32>>,
-    /// Whether the cached elevation is valid
-    cache_valid: bool,
-}
+/// Direct GPU buffer manager - no caching, no conversion.
+pub struct GpuBufferManager;
 
 impl GpuBufferManager {
     /// Create a new GPU buffer manager.
     pub fn new() -> Self {
-        Self {
-            cached_elevation: None,
-            cache_valid: false,
-        }
+        Self
     }
 
-    /// Get consistent elevation data for GPU upload.
+    /// Get depth data for GPU upload.
     /// 
-    /// This method ensures all GPU operations use the same elevation calculation:
-    /// - Priority 1: Use simulation thread elevation from ElevationState
-    /// - Priority 2: Fallback to world.depth_m converted to elevation
-    /// 
-    /// Returns depth values (positive down) for GPU shaders.
-    pub fn get_depth_for_gpu(&mut self, world: &World) -> Vec<f32> {
-        if !self.cache_valid {
-            let elevation = if let Some(elev) = get_elevation_state().get_clone() {
-                // Use elevation from simulation thread (most up-to-date)
-                elev.iter().map(|&z| world.sea.eta_m - z).collect()
-            } else {
-                // Fallback to world depth_m (static world state)
-                world.depth_m.clone()
-            };
-            
-            self.cached_elevation = Some(elevation);
-            self.cache_valid = true;
-        }
-        
-        self.cached_elevation.clone().unwrap_or_else(|| world.depth_m.clone())
+    /// Returns direct reference to world.depth_m (positive down) for GPU shaders.
+    /// The GPU shader will compute elevation as eta_m - depth.
+    pub fn get_depth_for_gpu<'a>(&self, world: &'a World) -> &'a [f32] {
+        &world.depth_m
     }
 
-    /// Get consistent elevation data for CPU/GPU comparison.
+    /// Get elevation data for CPU/GPU comparison.
     /// 
-    /// Returns elevation values (positive up) for consistency checks.
-    pub fn get_elevation_for_comparison(&mut self, world: &World) -> Vec<f32> {
-        if let Some(elev) = get_elevation_state().get_clone() {
-            elev
-        } else {
-            // Convert depth to elevation: elevation = eta - depth
-            world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect()
-        }
+    /// Returns elevation values (positive up) computed directly from world state.
+    pub fn get_elevation_for_comparison(&self, world: &World) -> Vec<f32> {
+        world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect()
     }
 
-    /// Invalidate the cache when world state changes.
+    /// No-op for compatibility - no cache to invalidate.
     pub fn invalidate_cache(&mut self) {
-        self.cache_valid = false;
-        self.cached_elevation = None;
-    }
-
-    /// Check if the cache is valid.
-    pub fn is_cache_valid(&self) -> bool {
-        self.cache_valid
+        // No cache to invalidate
     }
 }
 

@@ -14,40 +14,6 @@ use viewer::cpu_picker::{GeoPicker, Vec3};
 use viewer::pixel_map::{pixel_to_lon_lat, sph_to_unit as sph_to_unit_px};
 use gpu_buffer_manager::GpuBufferManager;
 
-/// Unified elevation computation to ensure consistency between overlays and rendering
-fn compute_unified_elevation(world: &engine::world::World) -> Vec<f32> {
-    // Standard elevation calculation: elevation = eta - depth (positive up)
-    world.depth_m.iter()
-        .map(|&d| world.sea.eta_m - d)
-        .collect()
-}
-
-/// Update all elevation-dependent systems for consistency
-fn update_elevation_systems(world: &engine::world::World, ov: &mut overlay::OverlayState) {
-    // Compute unified elevation
-    let elevation = compute_unified_elevation(world);
-    
-    // Update ElevationState for GPU consistency
-    crate::get_elevation_state().update(elevation.clone());
-    
-    // Invalidate ALL overlay caches that depend on elevation
-    ov.bathy_cache = None;
-    ov.plates_cache = None;
-    ov.vel_cache = None;
-    ov.bounds_cache = None;
-    ov.color_dirty = true;
-    ov.world_dirty = true;
-    ov.raster_dirty = true;
-    
-    // Log elevation statistics for debugging
-    let elev_min = elevation.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-    let elev_max = elevation.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-    let land_cells = elevation.iter().filter(|&&z| z > 0.0).count();
-    let land_fraction = land_cells as f64 / elevation.len() as f64;
-    
-    println!("[elevation] Unified elevation: min={:.1}m, max={:.1}m, land={:.1}% ({} cells)", 
-        elev_min, elev_max, land_fraction * 100.0, land_cells);
-}
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
@@ -65,45 +31,7 @@ fn get_phys_consts() -> engine::PhysConsts {
     engine::PhysConsts::default()
 }
 
-use std::sync::{Arc, OnceLock, RwLock};
-
-// --- Thread-safe elevation state management ---
-#[derive(Clone)]
-struct ElevationState {
-    data: Arc<RwLock<Option<Vec<f32>>>>,
-}
-
-impl ElevationState {
-    fn new() -> Self {
-        Self {
-            data: Arc::new(RwLock::new(None)),
-        }
-    }
-    
-    fn update(&self, new_elevation: Vec<f32>) {
-        if let Ok(mut data) = self.data.write() {
-            match data.as_mut() {
-                Some(existing) => *existing = new_elevation,
-                None => *data = Some(new_elevation),
-            }
-        }
-    }
-    
-    fn get_clone(&self) -> Option<Vec<f32>> {
-        if let Ok(data) = self.data.read() {
-            data.clone()
-        } else {
-            None
-        }
-    }
-}
-
-// Global thread-safe elevation state
-static ELEVATION_STATE: OnceLock<ElevationState> = OnceLock::new();
-
-fn get_elevation_state() -> &'static ElevationState {
-    ELEVATION_STATE.get_or_init(|| ElevationState::new())
-}
+use std::sync::{OnceLock, RwLock};
 
 // --- Simulation thread messages and snapshot types ---
 #[derive(Clone, Debug)]
@@ -149,160 +77,9 @@ enum SimCommand {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct HypsStats {
-    min: f32,
-    mean: f32,
-    max: f32,
-    n: usize,
-    count_non_finite: usize,
-    count_below_datum: usize,
-    count_at_cap_min: usize,
-    count_at_cap_max: usize,
-}
-fn hyps_stats(elevation: &[f32]) -> HypsStats {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut sum = 0.0f64;
-    let mut n = 0usize;
-    let mut bad = 0usize;
-    let mut below = 0usize;
-    let mut cap_min = 0usize;
-    let mut cap_max = 0usize;
-    for &v in elevation {
-        if !v.is_finite() {
-            bad += 1;
-            continue;
-        }
-        n += 1;
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
-        sum += v as f64;
-        if v < 0.0 {
-            below += 1;
-        }
-        let pc = get_phys_consts();
-        if (v - pc.elevation_cap_min_m).abs() <= 0.5 {
-            cap_min += 1;
-        }
-        if (v - pc.elevation_cap_max_m).abs() <= 0.5 {
-            cap_max += 1;
-        }
-    }
-    HypsStats {
-        min: if n == 0 { f32::NAN } else { min },
-        mean: if n == 0 { f32::NAN } else { (sum / n as f64) as f32 },
-        max: if n == 0 { f32::NAN } else { max },
-        n,
-        count_non_finite: bad,
-        count_below_datum: below,
-        count_at_cap_min: cap_min,
-        count_at_cap_max: cap_max,
-    }
-}
+// Removed unused HypsStats struct and hyps_stats function
 
-#[derive(Debug, Clone, Copy)]
-enum PoisonReason {
-    NonFinite,
-    ZeroNoOcean,
-    CapSlam,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct LastGood {
-    eta_m: f32,
-    land_frac: f32,
-    cap_frac: f32,
-    have: bool,
-}
-
-static LAST_GOOD: OnceLock<RwLock<LastGood>> = OnceLock::new();
-fn last_good_cell() -> &'static RwLock<LastGood> {
-    LAST_GOOD.get_or_init(|| RwLock::new(LastGood::default()))
-}
-
-fn is_poisoned_with_reason(s: &HypsStats, last: Option<LastGood>) -> Option<PoisonReason> {
-    if s.count_non_finite > 0 {
-        return Some(PoisonReason::NonFinite);
-    }
-    let min_zeroish = s.min.abs() <= get_phys_consts().epsilon;
-    if min_zeroish && s.count_below_datum == 0 {
-        return Some(PoisonReason::ZeroNoOcean);
-    }
-    let cap_frac =
-        if s.n == 0 { 0.0 } else { (s.count_at_cap_max + s.count_at_cap_min) as f32 / s.n as f32 };
-    if let Some(prev) = last {
-        let land_now = if s.n == 0 { 0.0 } else { (s.n - s.count_below_datum) as f32 / s.n as f32 };
-        // EMA smoothing on previous to reduce chatter
-        let alpha = 0.2f32;
-        let ema_cap = alpha * cap_frac + (1.0 - alpha) * prev.cap_frac;
-        let ema_land = alpha * land_now + (1.0 - alpha) * prev.land_frac;
-        let cap_spike = cap_frac > 0.05 && (cap_frac - ema_cap) > 0.02;
-        let land_jump = (land_now - ema_land).abs() > 0.20;
-        if cap_spike && land_jump {
-            return Some(PoisonReason::CapSlam);
-        }
-        // Drop plain LandJump as a poison reason to avoid benign cadence skips
-    }
-    None
-}
-
-fn slew_eta(prev: f32, proposed: f32, max_step_m: f32) -> f32 {
-    prev + (proposed - prev).clamp(-max_step_m, max_step_m)
-}
-
-fn guarded_hyps_and_eta(
-    elevation: &[f32],
-    proposed_eta_m: f32,
-    eta_m_inout: &mut f32,
-) -> Result<(f32, HypsStats), PoisonReason> {
-    let stats = hyps_stats(elevation);
-    // Additional hard sanity: reject absurd magnitudes even if finite (tolerate ±30 km, 60 km span)
-    let too_large = stats.min.abs() > 30_000.0
-        || stats.max.abs() > 30_000.0
-        || (stats.max - stats.min) > 60_000.0;
-    let last_opt = {
-        match last_good_cell().read() {
-            Ok(g) => *g,
-            Err(_) => LastGood::default(),
-        }
-    };
-    if too_large {
-        if last_opt.have {
-            *eta_m_inout = last_opt.eta_m;
-        }
-        return Err(PoisonReason::NonFinite);
-    }
-    if let Some(reason) =
-        is_poisoned_with_reason(&stats, if last_opt.have { Some(last_opt) } else { None })
-    {
-        if last_opt.have {
-            *eta_m_inout = last_opt.eta_m; // freeze η
-            return Err(reason);
-        }
-        return Err(reason);
-    }
-    let land_frac = if stats.n == 0 {
-        0.0
-    } else {
-        (stats.n - stats.count_below_datum) as f32 / stats.n as f32
-    };
-    let cap_frac = if stats.n == 0 {
-        0.0
-    } else {
-        (stats.count_at_cap_max + stats.count_at_cap_min) as f32 / stats.n as f32
-    };
-    let max_step_m = 200.0;
-    *eta_m_inout = slew_eta(*eta_m_inout, proposed_eta_m, max_step_m);
-    if let Ok(mut w) = last_good_cell().write() {
-        *w = LastGood { eta_m: *eta_m_inout, land_frac, cap_frac, have: true };
-    }
-    Ok((land_frac, stats))
-}
+// Removed unused poisoning detection system and guarded eta functions
 
 // T-505 drawer render — Simple/Advanced
 #[allow(dead_code)]
@@ -780,10 +557,7 @@ fn generate_world_with_preset(
     // Add realistic topographic variation using multifractal noise
     add_realistic_topography(world, ov);
     
-    // Update all elevation systems for consistency
-    update_elevation_systems(world, ov);
-    
-    // CRITICAL: Force complete cache invalidation for immediate visual update
+    // Mark elevation-dependent systems dirty
     ov.bathy_cache = None;
     ov.plates_cache = None;
     ov.vel_cache = None;
@@ -795,7 +569,6 @@ fn generate_world_with_preset(
     ov.use_gpu_raster = true;
     ov.raster_tex = None;
     ov.raster_tex_id = None;
-    ov.raster_dirty = true;
     
     // GPU raster will provide smooth elevation colors; disable redundant CPU overlay
     // (The unified logic in main loop will set show_bathy = !use_gpu_raster)
@@ -3263,16 +3036,10 @@ fn main() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
                                     ui.separator();
-                                    // Live land fraction (area-weighted) using ELEVATION_CURR if available to match guard slice
-                                    let land_pct_now: f64 = if let Some(elevation) = get_elevation_state().get_clone() {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
-                                        for (&z, &a) in elevation.iter().zip(world.area_m2.iter()) { 
-                                            area_sum += a as f64; 
-                                            if z as f64 > 0.0 { land_area += a as f64; } 
-                                        }
-                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
-                                        } else {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
+                                    // Live land fraction (area-weighted) directly from world data
+                                    let land_pct_now: f64 = {
+                                        let mut area_sum = 0.0f64; 
+                                        let mut land_area = 0.0f64;
                                         for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { 
                                             area_sum += a as f64; 
                                             if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } 
@@ -3309,8 +3076,14 @@ fn main() {
                                         });
                                 });
                             }
-                            // Unified world state updates - single authoritative source
+                            // Atomic world state updates - drain ALL pending updates before rendering
+                            let mut latest_world_update: Option<WorldSnapshot> = None;
                             while let Ok(ws) = rx_world.try_recv() {
+                                latest_world_update = Some(ws); // Keep only the most recent update
+                            }
+                            
+                            // Apply the most recent world state atomically (if any)
+                            if let Some(ws) = latest_world_update {
                                 // Update complete world state from simulation thread
                                 if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
                                 if world.c.len() == ws.c.len() { world.c = ws.c; }
@@ -3325,10 +3098,6 @@ fn main() {
                                 
                                 // Recompute boundaries with updated state
                                 world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
-                                
-                                // Update unified elevation state for GPU consistency
-                                let elevation: Vec<f32> = world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect();
-                                get_elevation_state().update(elevation);
                                 
                                 // Mark everything dirty for immediate update
                                 ov.world_dirty = true; ov.color_dirty = true;
@@ -3435,7 +3204,7 @@ fn main() {
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
                                                 // Ensure GPU raster uses the same data as CPU overlays
                                                 let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
-                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
+                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
                                                 if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
@@ -3684,36 +3453,35 @@ fn main() {
                                                 }
                                             }
                                         }
-                                            // Draw GPU raster and capture its actual rect for overlays
-                                            let mut rect_img = rect;
-                                            if let Some(tid) = ov.raster_tex_id {
-                                                let avail = ui.available_size();
-                                                let resp = ui.image(egui::load::SizedTexture::new(tid, avail));
-                                                rect_img = resp.rect;
-                                            }
-                                            // Draw parity heat overlay as red dots if enabled
-                                            if ov.show_parity_heat {
-                                                if let Some(points) = &ov.parity_points {
-                                                    let rect_px = rect_img;
-                                                    // current raster size
-                                                    let (rw, rh) = ov.raster_size;
-                                                    let mut mesh = egui::epaint::Mesh::default();
-                                                    for pxy in points.iter() {
-                                                        let x = rect_px.left() + (pxy[0] as f32 + 0.5) / (rw as f32) * rect_px.width();
-                                                        let y = rect_px.top() + (pxy[1] as f32 + 0.5) / (rh as f32) * rect_px.height();
-                                                        overlay::OverlayState::mesh_add_dot(&mut mesh, egui::pos2(x, y), 1.2, egui::Color32::RED);
-                                                    }
-                                                    painter.add(egui::Shape::mesh(mesh));
-                                                }
-                                            }
-                                            // Ensure boundary classification reflects current velocities/plates
-                                            if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
-                                                world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
-                                                ov.bounds_cache = None;
-                                            }
-                                            // Draw overlays on top (GPU raster provides the base elevation layer)
-                                            overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
+                                        // Draw GPU raster and capture its actual rect for overlays
+                                        let mut rect_img = rect;
+                                        if let Some(tid) = ov.raster_tex_id {
+                                            let avail = ui.available_size();
+                                            let resp = ui.image(egui::load::SizedTexture::new(tid, avail));
+                                            rect_img = resp.rect;
                                         }
+                                        // Draw parity heat overlay as red dots if enabled
+                                        if ov.show_parity_heat {
+                                            if let Some(points) = &ov.parity_points {
+                                                let rect_px = rect_img;
+                                                // current raster size
+                                                let (rw, rh) = ov.raster_size;
+                                                let mut mesh = egui::epaint::Mesh::default();
+                                                for pxy in points.iter() {
+                                                    let x = rect_px.left() + (pxy[0] as f32 + 0.5) / (rw as f32) * rect_px.width();
+                                                    let y = rect_px.top() + (pxy[1] as f32 + 0.5) / (rh as f32) * rect_px.height();
+                                                    overlay::OverlayState::mesh_add_dot(&mut mesh, egui::pos2(x, y), 1.2, egui::Color32::RED);
+                                                }
+                                                painter.add(egui::Shape::mesh(mesh));
+                                            }
+                                        }
+                                        // Ensure boundary classification reflects current velocities/plates
+                                        if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
+                                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                            ov.bounds_cache = None;
+                                        }
+                                        // Draw overlays on top (GPU raster provides the base elevation layer)
+                                        overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
                                     } else {
                                         // CPU fallback raster (only when GPU raster is disabled)
                                         // Keep boundary classification fresh when world changed
@@ -3851,9 +3619,18 @@ fn main() {
                         if dt > 0.0 { fps = 0.9 * fps + 0.1 * (1.0 / dt); }
                         // Update adaptive caps using frame time in ms
                         ov.update_adaptive_caps(dt * 1000.0);
-                        // Playback ticking
+                        // Playback ticking - rate limited to prevent visual chaos
                         if ov.stepper.playing {
-                            if !sim_busy.load(Ordering::SeqCst) {
+                            // Rate limit simulation steps to avoid overwhelming the viewer
+                            let now = std::time::Instant::now();
+                            let should_step = if let Some(last_step_time) = ov.last_sim_step_time {
+                                now.duration_since(last_step_time).as_millis() >= 100 // Max 10 steps per second
+                            } else {
+                                true // First step
+                            };
+                            
+                            if should_step && !sim_busy.load(Ordering::SeqCst) {
+                                ov.last_sim_step_time = Some(now);
                                 let cfg = engine::config::PipelineCfg {
                                     dt_myr: ov.sim_dt_myr.max(0.0),
                                     steps_per_frame: 1,
@@ -3952,8 +3729,14 @@ fn main() {
                         }
                         // World updates now come through unified rx_world channel only
                         
-                        // Drain any world snapshots and update complete world state for overlays
+                        // Atomic world updates - drain ALL pending updates before rendering (secondary location)
+                        let mut latest_world_update: Option<WorldSnapshot> = None;
                         while let Ok(ws) = rx_world.try_recv() {
+                            latest_world_update = Some(ws); // Keep only the most recent update
+                        }
+                        
+                        // Apply the most recent world state atomically (if any)
+                        if let Some(ws) = latest_world_update {
                             if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
                             if world.c.len() == ws.c.len() { world.c = ws.c; }
                             if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
@@ -4036,5 +3819,6 @@ fn apply_sub_preset(ov: &mut overlay::OverlayState) {
 }
 
 fn elevation_curr_clone() -> Option<Vec<f32>> {
-    get_elevation_state().get_clone()
+    // No longer using global elevation state - return None
+    None
 }
