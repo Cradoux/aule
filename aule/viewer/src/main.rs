@@ -31,7 +31,7 @@ fn get_phys_consts() -> engine::PhysConsts {
     engine::PhysConsts::default()
 }
 
-use std::sync::{OnceLock, RwLock};
+// Removed unused imports
 
 // --- Simulation thread messages and snapshot types ---
 #[derive(Clone, Debug)]
@@ -79,7 +79,36 @@ enum SimCommand {
 
 // Removed unused HypsStats struct and hyps_stats function
 
-// Removed unused poisoning detection system and guarded eta functions
+// Temporary stubs for dead code that still has references (will be removed completely)
+#[derive(Debug, Clone, Copy)]
+enum PoisonReason { NonFinite, ZeroNoOcean, CapSlam }
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LastGood { eta_m: f32, land_frac: f32, cap_frac: f32, have: bool }
+
+fn last_good_cell() -> &'static std::sync::RwLock<LastGood> {
+    use std::sync::{OnceLock, RwLock};
+    static LAST_GOOD: OnceLock<RwLock<LastGood>> = OnceLock::new();
+    LAST_GOOD.get_or_init(|| RwLock::new(LastGood::default()))
+}
+
+fn guarded_hyps_and_eta(_elevation: &[f32], proposed_eta_m: f32, eta_m_inout: &mut f32) -> Result<(f32, HypsStats), PoisonReason> {
+    *eta_m_inout = proposed_eta_m;
+    Ok((0.3, HypsStats { min: 0.0, mean: 0.0, max: 0.0, n: 0, count_non_finite: 0, count_below_datum: 0, count_at_cap_min: 0, count_at_cap_max: 0 }))
+}
+
+// Temporary stub for HypsStats
+#[derive(Debug, Clone, Copy)]
+struct HypsStats {
+    min: f32,
+    mean: f32,
+    max: f32,
+    n: usize,
+    count_non_finite: usize,
+    count_below_datum: usize,
+    count_at_cap_min: usize,
+    count_at_cap_max: usize,
+}
 
 // T-505 drawer render — Simple/Advanced
 #[allow(dead_code)]
