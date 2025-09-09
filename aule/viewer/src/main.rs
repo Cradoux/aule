@@ -175,7 +175,6 @@ fn run_to_t_realtime(
                 sub_continent_c_min: ov.sub_continent_c_min,
                 cadence_spawn_plate_every: 0,
                 cadence_retire_plate_every: 0,
-                cadence_force_balance_every: 8,
                 fb_gain: ov.fb_gain,               // Use UI-configurable value
                 fb_damp_per_myr: ov.fb_damp_per_myr, // Use UI-configurable value
                 fb_k_conv: ov.fb_k_conv,
@@ -183,6 +182,7 @@ fn run_to_t_realtime(
                 fb_k_trans: ov.fb_k_trans,
                 fb_max_domega: ov.fb_max_domega,
                 fb_max_omega: ov.fb_max_omega,
+                cadence_force_balance_every: ov.cadence_force_balance_every,
             };
             // Convert PipelineCfg to PhysicsConfig for unified pipeline
             let mut config = engine::config::PhysicsConfig::simple_mode();
@@ -1032,6 +1032,10 @@ fn render_visual_overlays_unified(
             ui.label("Max Ω Total (rad/yr):");
             ui.add(egui::Slider::new(&mut ov.fb_max_omega, 1e-9..=1e-4).logarithmic(true))
                 .on_hover_text("Maximum absolute plate rotation rate. Real plates: ~1e-7 to 1e-5 rad/yr");
+            
+            ui.label("Force Balance Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_force_balance_every, 1..=10))
+                .on_hover_text("How often to apply force balance updates. 1 = every step (dynamic), higher = less frequent. CRITICAL: Must be >0 for plates to move!");
         });
 
     // Plate Motion & Kinematics

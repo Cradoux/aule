@@ -391,12 +391,12 @@ impl PhysicsConfig {
             surf_couple_flexure: self.surface_params.couple_flexure,
             cadence_spawn_plate_every: 0, // disabled by default
             cadence_retire_plate_every: 0, // disabled by default  
-            cadence_force_balance_every: 0, // disabled by default
-            fb_gain: 1.0e-9,               // Balanced gain - between frozen and runaway
+            cadence_force_balance_every: 1, // Apply force balance every step for dynamic plate motion
+            fb_gain: 1.0e-7,               // Higher gain for transform-dominated systems
             fb_damp_per_myr: 0.1,          // Moderate damping for stability
             fb_k_conv: 1.0,
             fb_k_div: 0.5,
-            fb_k_trans: 0.1,
+            fb_k_trans: 1.0,
             fb_max_domega: 5.0e-8,         // More conservative omega changes per step
             fb_max_omega: 1.0e-6,          // More conservative rotation rate limit
         }
