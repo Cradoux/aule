@@ -39,9 +39,9 @@ pub struct ContKey {
 pub struct StepperState {
     pub playing: bool,
     pub t_target_myr: f32,
-    pub max_steps_per_frame: u32,
-    pub min_ms_between_raster: u64,
-    pub last_raster_at: Instant,
+    pub _max_steps_per_frame: u32,
+    pub _min_ms_between_raster: u64,
+    pub _last_raster_at: Instant,
 }
 
 #[allow(dead_code)]
@@ -180,6 +180,44 @@ pub struct OverlayState {
     pub e_gpa: f32,
     pub nu: f32,
     pub te_km: f32,
+    
+    // Flexure backend selection
+    pub flexure_backend_cpu: bool, // true = CPU, false = GPU
+    pub flexure_gpu_levels: u32,
+    pub flexure_gpu_cycles: u32,
+    
+    // Unified cadence configuration
+    pub cadence_preset: String, // "Balanced", "Performance", "Quality", "Custom"
+    pub cadence_rigid_motion: u32,
+    pub cadence_transforms: u32,
+    pub cadence_subduction: u32,
+    pub cadence_flexure: u32,
+    pub cadence_surface_processes: u32,
+    pub cadence_isostasy: u32,
+    pub cadence_continental_buoyancy: u32,
+    pub cadence_orogeny: u32,
+    pub cadence_accretion: u32,
+    pub cadence_rifting: u32,
+    pub cadence_ridge_birth: u32,
+    pub cadence_force_balance: u32,
+    
+    // Additional UI state for unified interface
+    pub enable_force_balance: bool,
+    pub debug_wireframes: bool,
+    pub show_plate_id: bool,
+    
+    // Force Balance Parameters (exposed for tuning)
+    pub fb_gain: f32,
+    pub fb_damp_per_myr: f32,
+    pub fb_k_conv: f32,
+    pub fb_k_div: f32,
+    pub fb_k_trans: f32,
+    pub fb_max_domega: f32,
+    pub fb_max_omega: f32,
+    pub cadence_force_balance_every: u32,
+    
+    // Simulation rate limiting
+    pub last_sim_step_time: Option<std::time::Instant>,
     pub k_winkler: f32, // N/m^3
     pub wj_omega: f32,  // 0.6..0.9
     pub nu1: u32,
@@ -251,8 +289,9 @@ pub struct OverlayState {
     pub tile_halo_rings: u32,
     pub high_f_available: bool,
 
-    // Simple/Advanced UI (T-500)
-    pub mode_simple: bool,
+    // Unified UI mode (T-500 unified)
+    pub ui_mode: engine::config::UiMode,
+    pub mode_simple: bool, // Legacy field for compatibility
     pub mode_was_simple: bool,
     pub drawer_open: bool,
     pub simple_seed: u64,
@@ -305,6 +344,19 @@ pub struct OverlayState {
     pub disable_erosion: bool,
     pub disable_flexure: bool,
     pub disable_subduction: bool,
+
+    // Unified physics process enable flags (T-unify-16)
+    pub enable_rigid_motion: bool,
+    pub enable_subduction: bool,
+    pub enable_transforms: bool,
+    // enable_flexure already exists above (line 179)
+    pub enable_surface_processes: bool,
+    pub enable_isostasy: bool,
+    pub enable_continental_buoyancy: bool,
+    pub enable_orogeny: bool,
+    pub enable_accretion: bool,
+    pub enable_rifting: bool,
+    pub enable_ridge_birth: bool,
 
     // Parity heat overlay (CPU vs GPU)
     pub show_parity_heat: bool,
@@ -379,7 +431,7 @@ impl Default for OverlayState {
             vel_cache: None,
             bounds_cache: None,
             show_age: false,
-            show_bathy: false,
+            show_bathy: true,
             show_continents_field: false,
             continents_apply: true,
             v_floor_cm_per_yr: 0.5,
@@ -462,11 +514,49 @@ impl Default for OverlayState {
             e_gpa: 70.0,
             nu: 0.25,
             te_km: 25.0,
+            
+            // Flexure backend defaults
+            flexure_backend_cpu: true, // Default to CPU for reliability
+            flexure_gpu_levels: 3,
+            flexure_gpu_cycles: 2,
+            
+            // Unified cadence defaults
+            cadence_preset: "Balanced".to_string(),
+            cadence_rigid_motion: 1,
+            cadence_transforms: 2,
+            cadence_subduction: 4,
+            cadence_flexure: 1,
+            cadence_surface_processes: 1,
+            cadence_isostasy: 1,
+            cadence_continental_buoyancy: 1,
+            cadence_orogeny: 4,
+            cadence_accretion: 8,
+            cadence_rifting: 8,
+            cadence_ridge_birth: 8,
+            cadence_force_balance: 8,
+            
+            // Additional UI state defaults
+            enable_force_balance: false, // Advanced feature, disabled by default
+            debug_wireframes: false,
+            show_plate_id: false,
+            
+            // Force Balance Parameter defaults (match config.rs values)
+            fb_gain: 1.0e-7,
+            fb_damp_per_myr: 0.1,
+            fb_k_conv: 1.0,
+            fb_k_div: 0.5,
+            fb_k_trans: 1.0,
+            fb_max_domega: 5.0e-8,
+            fb_max_omega: 1.0e-6,
+            cadence_force_balance_every: 1,
+            
+            // Simulation rate limiting defaults
+            last_sim_step_time: None,
             k_winkler: 3.0e8f32,
-            wj_omega: 0.7,
+            wj_omega: 0.8,
             nu1: 1,
             nu2: 1,
-            levels: 2,
+            levels: 3,
             max_points_flex: 10_000,
             last_residual: 0.0,
             flex_mesh: None,
@@ -527,6 +617,7 @@ impl Default for OverlayState {
             tile_halo_rings: 1,
             high_f_available: false,
 
+            ui_mode: engine::config::UiMode::Simple,
             mode_simple: true,
             mode_was_simple: true,
             drawer_open: true,
@@ -537,7 +628,7 @@ impl Default for OverlayState {
             simple_palette: 0,
             simple_f: 64,
 
-            sim_dt_myr: 1.0,
+            sim_dt_myr: 0.1, // Smaller default for smoother visual updates
             profile_idx: 1,
             show_profile_confirm: false,
             pending_profile: 1,
@@ -548,9 +639,9 @@ impl Default for OverlayState {
             stepper: StepperState {
                 playing: false,
                 t_target_myr: 0.0,
-                max_steps_per_frame: 4,
-                min_ms_between_raster: 200,
-                last_raster_at: Instant::now(),
+                _max_steps_per_frame: 4,
+                _min_ms_between_raster: 200,
+                _last_raster_at: Instant::now(),
             },
 
             hypso_d_max: 4000.0,
@@ -584,6 +675,19 @@ impl Default for OverlayState {
             disable_erosion: false,
             disable_flexure: false,
             disable_subduction: false,
+
+            // Unified physics process enable flags (default: ALL ENABLED for realistic geology)
+            enable_rigid_motion: true,
+            enable_subduction: true,
+            enable_transforms: true,
+            // enable_flexure: true, (already initialized above)
+            enable_surface_processes: true, // Now enabled by default for complete geology
+            enable_isostasy: true,
+            enable_continental_buoyancy: true,
+            enable_orogeny: true,        // Now enabled by default
+            enable_accretion: true,      // Now enabled by default
+            enable_rifting: true,        // Now enabled by default
+            enable_ridge_birth: true,
 
             adv_open_kinematics: false,
             adv_open_flexure: false,
@@ -1143,10 +1247,19 @@ impl OverlayState {
         self.hypso_d_max = max_ocean.max(4000.0);
         self.hypso_h_max = max_land.max(4000.0);
         let snow = self.hypso_snowline;
+        
+        // DEBUG: Log color mapping parameters
+        println!("[color] hypso_d_max={:.1}m, hypso_h_max={:.1}m, max_ocean={:.1}m, max_land={:.1}m", 
+            self.hypso_d_max, self.hypso_h_max, max_ocean, max_land);
+        let mut land_count = 0;
+        let mut ocean_count = 0;
         for (i, &ll) in grid.latlon.iter().enumerate() {
             let p = project_equirect(ll[0], ll[1], rect);
             let d = depth_m[i];
             let elev = eta_m - d;
+            
+            // DEBUG: Count land vs ocean cells
+            if elev > 0.0 { land_count += 1; } else { ocean_count += 1; }
             let mut col = if self.color_mode == 0 {
                 if elev <= 0.0 {
                     ocean_color32((-elev).max(0.0), self.hypso_d_max)
@@ -1201,6 +1314,11 @@ impl OverlayState {
             }
         }
         shapes.extend(coast);
+        
+        // DEBUG: Log final counts before moving shapes
+        println!("[color] Generated {} shapes: {} land cells, {} ocean cells", 
+            shapes.len(), land_count, ocean_count);
+        
         self.bathy_cache = Some(shapes);
     }
 
@@ -1235,8 +1353,8 @@ impl OverlayState {
     #[allow(dead_code)]
     fn draw_legend_hyps(&self, painter: &egui::Painter, r: Rect) {
         let pal = crate::colormap::hyps_default_palette();
-        let elev_min = -self.depth_minmax.1;
-        let elev_max = -self.depth_minmax.0;
+        let elevation_min = -self.depth_minmax.1;
+        let elevation_max = -self.depth_minmax.0;
         let bar = Rect::from_min_size(
             Pos2::new(r.left() + 8.0, r.center().y - 8.0),
             egui::vec2(r.width() - 16.0, 16.0),
@@ -1254,8 +1372,8 @@ impl OverlayState {
             painter.rect_filled(seg, 0.0, col);
         }
         painter.rect_stroke(bar, 0.0, Stroke::new(1.0, Color32::BLACK));
-        let txt_min = format!("{:.0} m", elev_min);
-        let txt_max = format!("{:.0} m", elev_max);
+        let txt_min = format!("{:.0} m", elevation_min);
+        let txt_max = format!("{:.0} m", elevation_max);
         painter.text(
             Pos2::new(bar.left(), bar.bottom() + 4.0),
             egui::Align2::LEFT_TOP,
@@ -1270,8 +1388,8 @@ impl OverlayState {
             egui::FontId::proportional(12.0),
             Color32::WHITE,
         );
-        if elev_max > elev_min {
-            let t0 = (0.0 - elev_min) / (elev_max - elev_min);
+        if elevation_max > elevation_min {
+            let t0 = (0.0 - elevation_min) / (elevation_max - elevation_min);
             if t0.is_finite() {
                 let x = bar.left() + t0.clamp(0.0, 1.0) * bar.width();
                 painter.line_segment(
@@ -1689,6 +1807,7 @@ pub fn draw_advanced_layers(
         }
     }
     if ov.show_vel {
+        if ov.world_dirty { ov.vel_cache = None; }
         if ov.vel_cache.is_none() {
             let cap = ov.effective_arrows_cap() as usize;
             ov.vel_cache = Some(build_velocity_arrows(
@@ -1706,6 +1825,7 @@ pub fn draw_advanced_layers(
         }
     }
     if ov.show_bounds {
+        if ov.world_dirty { ov.bounds_cache = None; }
         if ov.bounds_cache.is_none() {
             let cap = ov.effective_bounds_cap() as usize;
             ov.bounds_cache = Some(build_boundary_strokes(

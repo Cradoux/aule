@@ -173,7 +173,7 @@ pub fn solve_offset_for_ocean_area_fraction(
 
 /// Solve sea level (eta) by bisection on surface elevation to hit a target land fraction.
 pub fn solve_eta_on_elevation(
-    surface_elev_m: &[f32],
+    surface_elevation_m: &[f32],
     area_m2: &[f32],
     target_land_frac: f32,
 ) -> f32 {
@@ -183,7 +183,7 @@ pub fn solve_eta_on_elevation(
     let land_frac = |eta: f32| -> f32 {
         let mut land = 0.0f64;
         let mut tot = 0.0f64;
-        for (z, a) in surface_elev_m.iter().zip(area_m2.iter()) {
+        for (z, a) in surface_elevation_m.iter().zip(area_m2.iter()) {
             if (*z as f64 - eta as f64) > 0.0 {
                 land += *a as f64;
             }
@@ -214,7 +214,7 @@ pub fn solve_eta_on_elevation(
 /// Solve sea level to achieve a target land fraction (0..1) using world's depth/area.
 pub fn solve_to_target_land(
     world: &crate::world::World,
-    elev_m: &[f32],
+    elevation_m: &[f32],
     target_land_frac: f32,
     eta_m: &mut f32,
 ) {
@@ -228,7 +228,7 @@ pub fn solve_to_target_land(
     let target = target_land_frac.clamp(0.0, 1.0) as f64;
     let land_frac = |eta: f64| -> f64 {
         let mut land = 0.0f64;
-        for (z, &a) in elev_m.iter().zip(world.area_m2.iter()) {
+        for (z, &a) in elevation_m.iter().zip(world.area_m2.iter()) {
             if (*z as f64 - eta) > 0.0 {
                 land += a as f64;
             }

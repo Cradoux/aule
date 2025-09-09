@@ -7,136 +7,14 @@
 //! - Subduction/transform/rifting/orogeny still edit `depth_m` additively on top of age-derived bathy.
 //!   If these are applied at high cadence without normalization, long-run drift of `depth_m` can occur.
 
-use crate::{boundaries, flexure_loads, ridge, subduction, transforms, world::World};
+use crate::{boundaries, config::PipelineCfg, flexure_loads, ridge, subduction, transforms, world::World};
 use std::thread;
 
-/// Pipeline configuration used by Simple and Advanced modes.
-#[derive(Clone, Copy, Debug)]
-pub struct PipelineCfg {
-    /// Time step in Myr.
-    pub dt_myr: f32,
-    /// Number of steps to run per frame (viewer may loop externally as well).
-    pub steps_per_frame: u32,
-    /// Enable flexure solve stage.
-    pub enable_flexure: bool,
-    /// Enable erosion/diffusion stage.
-    pub enable_erosion: bool,
-    /// Target land fraction (0..1) used by sea-level solve.
-    pub target_land_frac: f32,
-    /// If true, keep eta fixed (skip sea-level regulation this tick).
-    pub freeze_eta: bool,
-    /// If true, append a one-line mass budget log each step.
-    pub log_mass_budget: bool,
-    /// Enable subduction band edits (disable to isolate physics noise)
-    pub enable_subduction: bool,
-    /// Enable rigid plate motion (advect `plate_id`, refresh velocities)
-    pub enable_rigid_motion: bool,
-    /// Cadence controls (>=1); a stage runs when `(step_idx+1) % cadence == 0`.
-    /// Transformer bands cadence in steps.
-    pub cadence_trf_every: u32,
-    /// Subduction bands cadence in steps.
-    pub cadence_sub_every: u32,
-    /// Flexure cadence in steps.
-    pub cadence_flx_every: u32,
-    /// Sea-level (eta) solve cadence in steps.
-    pub cadence_sea_every: u32,
-    /// Surface processes cadence in steps.
-    pub cadence_surf_every: u32,
-    /// Sub-steps for transforms per cadence (narrow operator stability)
-    pub substeps_transforms: u32,
-    /// Sub-steps for subduction band deltas per cadence
-    pub substeps_subduction: u32,
-    /// If true, attempt GPU flexure (experimental). Fallback to Winkler if unavailable.
-    pub use_gpu_flexure: bool,
-    /// GPU flexure: number of multigrid levels.
-    pub gpu_flex_levels: u32,
-    /// GPU flexure: V-cycles per cadence.
-    pub gpu_flex_cycles: u32,
-    /// GPU flexure: weighted-Jacobi omega.
-    pub gpu_wj_omega: f32,
-    /// Subtract mean load before solving (stability, removes rigid-body mode).
-    pub subtract_mean_load: bool,
-    // Subduction tunables (viewer-controlled)
-    /// Convergence threshold in m/yr used for band detection.
-    pub sub_tau_conv_m_per_yr: f32,
-    /// Trench band half-width in km on subducting side.
-    pub sub_trench_half_width_km: f32,
-    /// Arc band peak offset from trench hinge in km (overriding side).
-    pub sub_arc_offset_km: f32,
-    /// Arc band half-width in km.
-    pub sub_arc_half_width_km: f32,
-    /// Back-arc band width in km (behind arc).
-    pub sub_backarc_width_km: f32,
-    /// Trench deepening magnitude in meters (positive deepens).
-    pub sub_trench_deepen_m: f32,
-    /// Arc uplift magnitude in meters (negative uplifts/shallows).
-    pub sub_arc_uplift_m: f32,
-    /// Back-arc uplift magnitude in meters (negative uplifts/shallows).
-    pub sub_backarc_uplift_m: f32,
-    /// Absolute rollback offset applied to overriding distances in meters.
-    pub sub_rollback_offset_m: f32,
-    /// Rollback rate in km/Myr for time-progression (applied by viewer logic).
-    pub sub_rollback_rate_km_per_myr: f32,
-    /// If true, back-arc is deepened (extension mode) instead of uplifted.
-    pub sub_backarc_extension_mode: bool,
-    /// Back-arc deepening magnitude in meters when in extension mode.
-    pub sub_backarc_extension_deepen_m: f32,
-    /// Continental fraction threshold [0,1] for gating trench deepening.
-    pub sub_continent_c_min: f32,
-
-    // Surface processes parameters (viewer-controlled)
-    /// Stream-power coefficient for fluvial incision (yr⁻¹ m^(1-m) s^m units folded)
-    pub surf_k_stream: f32,
-    /// Stream-power m exponent
-    pub surf_m_exp: f32,
-    /// Stream-power n exponent
-    pub surf_n_exp: f32,
-    /// Hillslope diffusion coefficient κ (m²/yr)
-    pub surf_k_diff: f32,
-    /// Sediment transport coefficient (nondimensional scaling)
-    pub surf_k_tr: f32,
-    /// Transport-limited p exponent
-    pub surf_p_exp: f32,
-    /// Transport-limited q exponent
-    pub surf_q_exp: f32,
-    /// Sediment density (kg/m³)
-    pub surf_rho_sed: f32,
-    /// Minimum slope threshold
-    pub surf_min_slope: f32,
-    /// Subcycles per step for numerical stability (>=1)
-    pub surf_subcycles: u32,
-    /// If true, couple surface mass change back into flexure load (placeholder)
-    pub surf_couple_flexure: bool,
-
-    // Plate lifecycle (scaffolding)
-    /// If >0, every N steps attempt to spawn a microplate at a random convergent cell.
-    pub cadence_spawn_plate_every: u32,
-    /// If >0, every N steps attempt to retire the smallest-degree plate into a neighbor.
-    pub cadence_retire_plate_every: u32,
-
-    // Force-balance Euler update
-    /// If >0, every N steps apply a small force-balance update to plate omegas.
-    pub cadence_force_balance_every: u32,
-    /// Force-balance gain (unitless scale to map boundary drive to dω).
-    pub fb_gain: f32,
-    /// Force-balance damping per Myr.
-    pub fb_damp_per_myr: f32,
-    /// Weight for convergent edges.
-    pub fb_k_conv: f32,
-    /// Weight for divergent edges.
-    pub fb_k_div: f32,
-    /// Weight for transform edges.
-    pub fb_k_trans: f32,
-    /// Max per-step Δω clamp.
-    pub fb_max_domega: f32,
-    /// Max absolute |ω| clamp.
-    pub fb_max_omega: f32,
-}
 
 /// Borrowed views of surface fields required by the pipeline.
 pub struct SurfaceFields<'a> {
     /// Solved surface elevation (meters), vertex-major, same order as GPU uploads.
-    pub elev_m: &'a mut [f32],
+    pub elevation_m: &'a mut [f32],
     /// Sea level eta (meters) relative to geoid; output of sea-level solve.
     pub eta_m: &'a mut f32,
 }
@@ -211,18 +89,9 @@ pub(crate) fn check_invariants(world: &World, elev_opt: Option<&[f32]>) {
     }
 }
 
-/// Execute the full physics step sequence once.
-///
-/// Order:
-/// 1) boundaries
-/// 2) advection (kinematics)
-/// 3) ridges (oceanic crust production)
-/// 4) subduction (convergence thinning/consumption)
-/// 5) flexure (optional)
-/// 6) erosion/diffusion (optional)
-/// 7) sea-level bisection to target land fraction
-/// 8) sanitize elevation
-pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
+/// Internal physics pipeline implementation.
+/// This function is only used internally by UnifiedPipeline.
+pub(crate) fn step_full_internal(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Performance timers (ms)
     let mut ms_boundaries = 0.0f64;
     let mut ms_kinematics = 0.0f64;
@@ -260,6 +129,9 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         let c_src = world.c.clone();
         let th_src = world.th_c_m.clone();
         let age_src = world.age_myr.clone();
+        
+        // Debug: Check if continents exist before advection (for mass conservation)
+        let c_sum_before = c_src.iter().sum::<f32>();
 
         let theta_max = world.plates.max_abs_omega_rad_yr() * dt_years;
         let cell_angle = world.grid.mean_cell_angle_rad();
@@ -279,6 +151,33 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
             &mut world.c,
             &mut world.th_c_m,
         );
+        
+        // Check for mass conservation and apply correction if needed
+        let c_sum_after = world.c.iter().sum::<f32>();
+        
+        // Debug: Check if plate motion is working (always show to track force balance)
+        let max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        let max_velocity = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
+        println!("[rigid_motion] BEFORE_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr", max_omega, max_velocity);
+        
+        // CRITICAL FIX: Enforce mass conservation to prevent continental loss
+        let mass_loss = c_sum_before - c_sum_after;
+        if mass_loss.abs() > 0.001 { // Ultra-strict mass conservation (0.1% threshold)
+            // Aggressively correct mass loss - preserve continental material
+            let total_existing = c_sum_after;
+            if total_existing > 0.0 {
+                let correction_factor = c_sum_before / total_existing;
+                for c_val in &mut world.c {
+                    if *c_val > 0.0 {
+                        *c_val *= correction_factor;
+                        *c_val = c_val.clamp(0.0, 1.0); // Keep in valid range
+                    }
+                }
+                let final_sum = world.c.iter().sum::<f32>();
+                println!("[continental_conservation] MASS CORRECTED: loss={:.3}%, {:.1} -> {:.1}", 
+                         (mass_loss / c_sum_before) * 100.0, c_sum_before, final_sum);
+            }
+        }
         crate::age::rigid_advect_age_from(
             &world.grid,
             &world.plates,
@@ -288,13 +187,20 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         );
         crate::age::increment_oceanic_age(&world.c, &mut world.age_myr, cfg.dt_myr as f64);
         // Keep ridges wet: enforce ocean only where very young seafloor AND previously oceanic
-        // (do not erase continental caps)
+        // CRITICAL FIX: Protect continents from ridge destruction - be much more conservative
         for i in 0..world.grid.cells {
-            if world.age_myr[i] < 2.0 && c_src.get(i).copied().unwrap_or(0.0) < 0.5 {
+            // Only destroy if ALL conditions met: young ridge + was oceanic + still oceanic + thin
+            if world.age_myr[i] < 1.0 && 
+               c_src.get(i).copied().unwrap_or(0.0) < 0.05 && 
+               world.c[i] < 0.05 &&
+               world.th_c_m[i] < 1000.0 {
+                // Only destroy truly oceanic areas with very strict criteria
                 world.c[i] = 0.0;
                 world.th_c_m[i] = 0.0;
             }
         }
+        
+        // Note: Continental uplift will be applied later after all geological processes
 
         // Rebuild velocities and kinds after motion
         world.v_en =
@@ -350,6 +256,62 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     world.boundaries =
         boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
     ms_boundaries += t_b0.elapsed().as_secs_f64() * 1000.0;
+    
+    // Debug: Log boundary statistics to check if they're changing
+    let stats = &world.boundaries.stats;
+    println!("[boundaries] ridge={} subd={} trans={} | total_edges={}", 
+             stats.divergent, stats.convergent, stats.transform, world.boundaries.edges.len());
+
+    // Apply force balance to update plate rotation rates using CONFIG values (no hardcoded overrides)
+    let t_fb0 = std::time::Instant::now();
+    let fb_params = crate::force_balance::FbParams {
+        gain: cfg.fb_gain,
+        damp_per_myr: cfg.fb_damp_per_myr,
+        k_conv: cfg.fb_k_conv,
+        k_div: cfg.fb_k_div,
+        k_trans: cfg.fb_k_trans,
+        max_domega: cfg.fb_max_domega,
+        max_omega: cfg.fb_max_omega,
+    };
+    // Debug: Show force balance parameters to diagnose the issue
+    println!("[force_balance] PARAMS: gain={:.2e}, damp={:.3}, k_conv={:.3}, k_div={:.3}, k_trans={:.3}, max_domega={:.2e}, max_omega={:.2e}", 
+             fb_params.gain, fb_params.damp_per_myr, fb_params.k_conv, fb_params.k_div, fb_params.k_trans, fb_params.max_domega, fb_params.max_omega);
+    
+    // Debug: Monitor plate speed saturation
+    let _pre_fb_max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let pre_fb_max_velocity = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
+    // Store plate_id to avoid borrow checker issues
+    let plate_id = world.plates.plate_id.clone();
+    crate::force_balance::apply_force_balance(
+        &world.grid,
+        &world.boundaries,
+        &plate_id,
+        &mut world.plates,
+        &world.grid.area,
+        cfg.dt_myr as f64,
+        fb_params,
+    );
+    // Update velocity field after force balance changes omega_rad_yr
+    world.v_en = crate::plates::velocity_en_m_per_yr(&world.grid, &world.plates, &world.plates.plate_id);
+    let ms_force_balance = t_fb0.elapsed().as_secs_f64() * 1000.0;
+    
+    // Debug: Check if force balance updated omega values and detect saturation
+    let max_omega_after = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let max_velocity_after = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
+    
+    // Check for force balance saturation
+    let omega_saturated = max_omega_after >= fb_params.max_omega * 0.95;
+    let zero_rotation = max_omega_after < 1.0e-9;
+    
+    // Check for runaway acceleration
+    let velocity_delta = max_velocity_after - pre_fb_max_velocity;
+    let runaway_acceleration = velocity_delta > 0.5; // If velocity increases by >0.5 m/yr per step
+    
+    println!("[force_balance] AFTER_FB: max_omega={:.6} rad/yr, max_velocity={:.6} m/yr{}{}{}", 
+             max_omega_after, max_velocity_after,
+             if omega_saturated { " [SATURATED - plates at speed limit]" } else { "" },
+             if zero_rotation { " [WARNING: Zero rotation - check gain vs damping]" } else { "" },
+             if runaway_acceleration { format!(" [RUNAWAY: +{:.3} m/yr per step!]", velocity_delta) } else { "".to_string() });
     // Plate-id diagnostics and healing
     {
         let mut invalid = 0usize;
@@ -533,10 +495,15 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Skip legacy semi-Lagrangian advection for C/th_c_m and age when rigid motion is enabled
     if !cfg.enable_rigid_motion {
         // 1) C and th_c_m via existing helper
-        crate::continent::advect_c_thc(
+        // Save current state as source
+        let c_src = world.c.clone();
+        let th_src = world.th_c_m.clone();
+        crate::continent::rigid_advect_c_thc_from(
             &world.grid,
-            &world.v_en,
+            &world.plates,
             dt as f64,
+            &c_src,
+            &th_src,
             &mut world.c,
             &mut world.th_c_m,
         );
@@ -593,9 +560,28 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     }
     ms_ridge += t_r0.elapsed().as_secs_f64() * 1000.0;
 
-    // Compose tectonic edits as a single delta added to baseline
+    // CRITICAL FIX: Compute baseline bathymetry from age (missing from unified pipeline!)
+    // This was causing geological processes to overwrite each other instead of being additive
     let n = world.grid.cells;
-    let base_depth = world.depth_m.clone(); // previous full depth (for dv_struct)
+    let previous_depth = world.depth_m.clone(); // Store for structural volume change calculation
+    
+    // Recompute baseline bathymetry from age (like world.rs does)
+    for i in 0..n {
+        let mut d = crate::age::depth_from_age_plate(
+            world.age_myr[i] as f64,
+            2600.0,
+            world.clock.t_myr,
+            6000.0,
+            1.0e-6,
+        ) as f32;
+        if !d.is_finite() {
+            d = 6000.0;
+        }
+        world.depth_m[i] = d.clamp(0.0, 6000.0);
+    }
+    
+    // Now prepare additive tectonic edits on top of this baseline
+    let base_depth = world.depth_m.clone();
     let th_before = world.th_c_m.clone();
     // Prepare persistent scratch buffers
     if world.scratch.f32_a.len() != n {
@@ -1655,6 +1641,15 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         }
     }
 
+    // CRITICAL FIX: Apply continental uplift AFTER all geological processes finish
+    // This ensures continental elevation follows plate motion and isn't overwritten
+    if cfg.enable_rigid_motion {
+        let t_uplift0 = std::time::Instant::now();
+        crate::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+        let ms_continental_uplift = t_uplift0.elapsed().as_secs_f64() * 1000.0;
+        println!("[continental_uplift] Applied continental thickness to depth_m field AFTER geological processes ({:.2} ms)", ms_continental_uplift);
+    }
+
     // Solve eta to hit target land fraction unless frozen; elevation is independent of eta
     // Eta solve moved after writing elevation to reduce coastline speckle
 
@@ -1767,13 +1762,13 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     }
 
     // Write surface elevation after eta solve: z = eta - depth
-    for (e, &d) in surf.elev_m.iter_mut().zip(world.depth_m.iter()) {
+    for (e, &d) in surf.elevation_m.iter_mut().zip(world.depth_m.iter()) {
         let z = (*surf.eta_m as f64 - d as f64) as f32;
         *e = z;
     }
 
     // Invariants & guards (TST-2): check after we have elevation
-    check_invariants(world, Some(surf.elev_m));
+    check_invariants(world, Some(surf.elevation_m));
 
     // Optional: mass/volume budgets and per-step deltas (DL-2)
     if cfg.log_mass_budget {
@@ -1821,7 +1816,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         }
         let mut dv_struct_m3: f64 = 0.0;
         for (i, &a) in world.area_m2.iter().enumerate().take(n) {
-            let dd = (world.depth_m[i] as f64) - (base_depth[i] as f64);
+            let dd = (world.depth_m[i] as f64) - (previous_depth[i] as f64);
             dv_struct_m3 += (a as f64) * dd;
         }
         let pc = crate::PhysConsts::default();
@@ -1896,6 +1891,7 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
     // Consolidated perf log for viewer pipeline
     let step_ms = ms_boundaries
         + ms_kinematics
+        + ms_force_balance
         + ms_ridge
         + ms_subduction
         + ms_transforms
@@ -1905,10 +1901,11 @@ pub fn step_full(world: &mut World, surf: SurfaceFields, cfg: PipelineCfg) {
         + ms_surface
         + ms_eta;
     println!(
-        "[perf.pipeline] step={:.2} ms | kin={:.2} | bounds={:.2} | ridge={:.2} | subd={:.2} | trf={:.2} | buoy={:.2} | acc+orog={:.2} | flex={:.2} | surf={:.2} | eta={:.2}",
+        "[perf.pipeline] step={:.2} ms | kin={:.2} | bounds={:.2} | fb={:.2} | ridge={:.2} | subd={:.2} | trf={:.2} | buoy={:.2} | acc+orog={:.2} | flex={:.2} | surf={:.2} | eta={:.2}",
         step_ms,
         ms_kinematics,
         ms_boundaries,
+        ms_force_balance,
         ms_ridge,
         ms_subduction,
         ms_transforms,

@@ -188,15 +188,17 @@ impl Boundaries {
                             let n = crate::geo::dot(dv, n_hat);
                             let t_signed = crate::geo::dot(dv, t_hat);
                             let t_abs = t_signed.abs();
+                            // Classify boundary type based on velocity gradients
                             let class = if n > tau {
-                                1u8
+                                1u8 // Divergent (opening/rifting)
                             } else if n < -tau {
-                                2u8
+                                2u8 // Convergent (closing/subduction)
                             } else if t_abs > n.abs() {
-                                3u8
+                                3u8 // Transform (shearing)
                             } else {
-                                0u8
+                                0u8 // No significant activity
                             };
+                            
                             if class != 0 {
                                 match class {
                                     1 => {

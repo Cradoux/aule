@@ -1,4 +1,4 @@
-use engine::{pipeline, world::World};
+use engine::{self, pipeline, world::World};
 
 fn read_last_dl1_record() -> Option<(u32, u32, u32, u32)> {
     let path = std::path::Path::new("out/dl1_metrics.csv");
@@ -36,9 +36,9 @@ fn snapshot_tiny_grid_one_step() {
     let mut w = World::new(f, plates, seed);
     let mut elev = vec![0.0f32; w.grid.cells];
     let mut eta: f32 = 0.0;
-    let surf = pipeline::SurfaceFields { elev_m: &mut elev, eta_m: &mut eta };
+    let surf = pipeline::SurfaceFields { elevation_m: &mut elev, eta_m: &mut eta };
     // Configure to run subduction/transforms each step; enable flexure off for speed
-    let cfg = pipeline::PipelineCfg {
+    let cfg = engine::config::PipelineCfg {
         dt_myr: 1.0,
         steps_per_frame: 1,
         enable_flexure: false,
@@ -95,8 +95,11 @@ fn snapshot_tiny_grid_one_step() {
         fb_max_domega: 1.0,
         fb_max_omega: 1.0,
     };
-    // One step
-    pipeline::step_full(&mut w, surf, cfg);
+    // One step using unified pipeline
+    let physics_cfg = engine::config::PhysicsConfig::from_pipeline_cfg(cfg);
+    let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(physics_cfg);
+    let mode = engine::config::PipelineMode::Batch { write_back_sea_level: false };
+    let _result = pipeline.step(&mut w, mode);
 
     // Snapshot metrics
     // Boundary counts by class
@@ -189,12 +192,12 @@ fn snapshot_tiny_grid_one_step() {
     if let Some((_cap_comp, _cap_thc, _rs, _ru)) = caps { /* present and parsed */ }
     assert!(cfl.max_cfl.is_finite() && cfl.mean_cfl.is_finite());
 
-    // Re-run and compare within tight tolerance
+    // Re-run and compare within tight tolerance using unified pipeline
     let mut w2 = World::new(f, plates, seed);
-    let mut elev2 = vec![0.0f32; w2.grid.cells];
-    let mut eta2: f32 = 0.0;
-    let surf2 = pipeline::SurfaceFields { elev_m: &mut elev2, eta_m: &mut eta2 };
-    pipeline::step_full(&mut w2, surf2, cfg);
+    let physics_cfg2 = engine::config::PhysicsConfig::from_pipeline_cfg(cfg);
+    let mut pipeline2 = engine::unified_pipeline::UnifiedPipeline::new(physics_cfg2);
+    let mode2 = engine::config::PipelineMode::Batch { write_back_sea_level: false };
+    let _result2 = pipeline2.step(&mut w2, mode2);
     // boundary counts
     let mut n_r2 = 0u32;
     let mut n_s2 = 0u32;
@@ -210,7 +213,8 @@ fn snapshot_tiny_grid_one_step() {
     assert_eq!(n_r, n_r2);
     assert_eq!(n_s, n_s2);
     assert_eq!(n_t, n_t2);
-    // land fraction
+    // land fraction - get elevation from unified pipeline
+    let elev2 = pipeline2.elevation_clone(&w2);
     let mut land2 = 0.0f64;
     let mut tot2 = 0.0f64;
     for (a, &z) in w2.area_m2.iter().zip(elev2.iter()) {

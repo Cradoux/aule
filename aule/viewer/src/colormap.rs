@@ -28,8 +28,8 @@ pub struct BiomeClass {
     pub name: String,
     pub min_lat: f32,
     pub max_lat: f32,
-    pub min_elev_m: f32,
-    pub max_elev_m: f32,
+    pub min_elevation_m: f32,
+    pub max_elevation_m: f32,
     pub rgb: [u8; 3],
 }
 
@@ -89,7 +89,7 @@ pub fn parse_pal(src: &str) -> Result<Palette, String> {
 
 /// Parse a `.cls` discrete classes file.
 ///
-/// Format: rows of `name  min_lat  max_lat  min_elev_m  max_elev_m  #RRGGBB`
+/// Format: rows of `name  min_lat  max_lat  min_elevation_m  max_elevation_m  #RRGGBB`
 #[allow(dead_code)]
 pub fn parse_cls(src: &str) -> Result<Vec<BiomeClass>, String> {
     let mut classes: Vec<BiomeClass> = Vec::new();
@@ -115,12 +115,12 @@ pub fn parse_cls(src: &str) -> Result<Vec<BiomeClass>, String> {
             toks[1].parse().map_err(|_| format!(".cls: line {} bad min_lat", lineno + 1))?;
         let max_lat: f32 =
             toks[2].parse().map_err(|_| format!(".cls: line {} bad max_lat", lineno + 1))?;
-        let min_elev_m: f32 =
-            toks[3].parse().map_err(|_| format!(".cls: line {} bad min_elev_m", lineno + 1))?;
-        let max_elev_m: f32 =
-            toks[4].parse().map_err(|_| format!(".cls: line {} bad max_elev_m", lineno + 1))?;
+        let min_elevation_m: f32 =
+            toks[3].parse().map_err(|_| format!(".cls: line {} bad min_elevation_m", lineno + 1))?;
+        let max_elevation_m: f32 =
+            toks[4].parse().map_err(|_| format!(".cls: line {} bad max_elevation_m", lineno + 1))?;
         let rgb = parse_hex_rgb(toks[5]).map_err(|e| format!(".cls: line {} {}", lineno + 1, e))?;
-        classes.push(BiomeClass { name, min_lat, max_lat, min_elev_m, max_elev_m, rgb });
+        classes.push(BiomeClass { name, min_lat, max_lat, min_elevation_m, max_elevation_m, rgb });
     }
     Ok(classes)
 }
@@ -222,13 +222,13 @@ pub fn biome_default_classes() -> &'static [BiomeClass] {
 
 /// Pick the first matching class by latitude and elevation.
 #[allow(dead_code)]
-pub fn pick_biome_color(lat_rad: f32, elev_m: f32) -> [u8; 3] {
+pub fn pick_biome_color(lat_rad: f32, elevation_m: f32) -> [u8; 3] {
     let lat_deg = lat_rad.to_degrees();
     for cls in biome_default_classes() {
         if lat_deg >= cls.min_lat
             && lat_deg <= cls.max_lat
-            && elev_m >= cls.min_elev_m
-            && elev_m <= cls.max_elev_m
+            && elevation_m >= cls.min_elevation_m
+            && elevation_m <= cls.max_elevation_m
         {
             return cls.rgb;
         }

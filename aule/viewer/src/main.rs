@@ -3,6 +3,7 @@
 
 mod colormap;
 mod globe;
+mod gpu_buffer_manager;
 mod overlay;
 mod plot;
 mod plot_age_depth;
@@ -11,6 +12,8 @@ mod raster;
 mod raster_gpu;
 use viewer::cpu_picker::{GeoPicker, Vec3};
 use viewer::pixel_map::{pixel_to_lon_lat, sph_to_unit as sph_to_unit_px};
+use gpu_buffer_manager::GpuBufferManager;
+
 
 use egui_wgpu::Renderer as EguiRenderer;
 use egui_wgpu::ScreenDescriptor;
@@ -22,16 +25,13 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-// --- Global CPU elevation snapshots (double-buffered) ---
-static mut ELEV_CURR: Option<Vec<f32>> = None;
-// Removed unused ELEV_STAGE staging buffer
-
 // --- Hypsometry snapshot guards (poison detection & slew) ---
-const ELEV_CAP_MIN: f32 = -11_000.0;
-const ELEV_CAP_MAX: f32 = 9_000.0;
-const EPS: f32 = 1e-6;
+// Physical constants - use centralized values from engine
+fn get_phys_consts() -> engine::PhysConsts {
+    engine::PhysConsts::default()
+}
 
-use std::sync::{OnceLock, RwLock};
+// Removed unused imports
 
 // --- Simulation thread messages and snapshot types ---
 #[derive(Clone, Debug)]
@@ -48,1482 +48,1075 @@ struct WorldSnapshot {
 }
 
 #[derive(Clone, Debug)]
+struct ProcessFlags {
+    pub enable_rigid_motion: bool,
+    pub enable_subduction: bool,
+    pub enable_transforms: bool,
+    pub enable_flexure: bool,
+    pub enable_surface_processes: bool,
+    pub enable_isostasy: bool,
+    pub enable_continental_buoyancy: bool,
+    pub enable_orogeny: bool,
+    pub enable_accretion: bool,
+    pub enable_rifting: bool,
+    pub enable_ridge_birth: bool,
+    
+    // Flexure backend configuration
+    pub flexure_backend_cpu: bool,
+    pub flexure_gpu_levels: u32,
+    pub flexure_gpu_cycles: u32,
+    
+    // Unified cadence configuration
+    pub cadence_config: engine::cadence_manager::CadenceConfig,
+}
+
+#[derive(Clone, Debug)]
 enum SimCommand {
-    Step(engine::pipeline::PipelineCfg),
+    Step(engine::config::PipelineCfg, ProcessFlags),
     SyncWorld(WorldSnapshot),
     Stop,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct HypsStats {
-    min: f32,
-    mean: f32,
-    max: f32,
-    n: usize,
-    count_non_finite: usize,
-    count_below_datum: usize,
-    count_at_cap_min: usize,
-    count_at_cap_max: usize,
-}
-fn hyps_stats(elev: &[f32]) -> HypsStats {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut sum = 0.0f64;
-    let mut n = 0usize;
-    let mut bad = 0usize;
-    let mut below = 0usize;
-    let mut cap_min = 0usize;
-    let mut cap_max = 0usize;
-    for &v in elev {
-        if !v.is_finite() {
-            bad += 1;
-            continue;
-        }
-        n += 1;
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
-        sum += v as f64;
-        if v < 0.0 {
-            below += 1;
-        }
-        if (v - ELEV_CAP_MIN).abs() <= 0.5 {
-            cap_min += 1;
-        }
-        if (v - ELEV_CAP_MAX).abs() <= 0.5 {
-            cap_max += 1;
-        }
-    }
-    HypsStats {
-        min: if n == 0 { f32::NAN } else { min },
-        mean: if n == 0 { f32::NAN } else { (sum / n as f64) as f32 },
-        max: if n == 0 { f32::NAN } else { max },
-        n,
-        count_non_finite: bad,
-        count_below_datum: below,
-        count_at_cap_min: cap_min,
-        count_at_cap_max: cap_max,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PoisonReason {
-    NonFinite,
-    ZeroNoOcean,
-    CapSlam,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct LastGood {
-    eta_m: f32,
-    land_frac: f32,
-    cap_frac: f32,
-    have: bool,
-}
-
-static LAST_GOOD: OnceLock<RwLock<LastGood>> = OnceLock::new();
-fn last_good_cell() -> &'static RwLock<LastGood> {
-    LAST_GOOD.get_or_init(|| RwLock::new(LastGood::default()))
-}
-
-fn is_poisoned_with_reason(s: &HypsStats, last: Option<LastGood>) -> Option<PoisonReason> {
-    if s.count_non_finite > 0 {
-        return Some(PoisonReason::NonFinite);
-    }
-    let min_zeroish = s.min.abs() <= EPS;
-    if min_zeroish && s.count_below_datum == 0 {
-        return Some(PoisonReason::ZeroNoOcean);
-    }
-    let cap_frac =
-        if s.n == 0 { 0.0 } else { (s.count_at_cap_max + s.count_at_cap_min) as f32 / s.n as f32 };
-    if let Some(prev) = last {
-        let land_now = if s.n == 0 { 0.0 } else { (s.n - s.count_below_datum) as f32 / s.n as f32 };
-        // EMA smoothing on previous to reduce chatter
-        let alpha = 0.2f32;
-        let ema_cap = alpha * cap_frac + (1.0 - alpha) * prev.cap_frac;
-        let ema_land = alpha * land_now + (1.0 - alpha) * prev.land_frac;
-        let cap_spike = cap_frac > 0.05 && (cap_frac - ema_cap) > 0.02;
-        let land_jump = (land_now - ema_land).abs() > 0.20;
-        if cap_spike && land_jump {
-            return Some(PoisonReason::CapSlam);
-        }
-        // Drop plain LandJump as a poison reason to avoid benign cadence skips
-    }
-    None
-}
-
-fn slew_eta(prev: f32, proposed: f32, max_step_m: f32) -> f32 {
-    prev + (proposed - prev).clamp(-max_step_m, max_step_m)
-}
-
-fn guarded_hyps_and_eta(
-    elev: &[f32],
-    proposed_eta_m: f32,
-    eta_m_inout: &mut f32,
-) -> Result<(f32, HypsStats), PoisonReason> {
-    let stats = hyps_stats(elev);
-    // Additional hard sanity: reject absurd magnitudes even if finite (tolerate ±30 km, 60 km span)
-    let too_large = stats.min.abs() > 30_000.0
-        || stats.max.abs() > 30_000.0
-        || (stats.max - stats.min) > 60_000.0;
-    let last_opt = {
-        match last_good_cell().read() {
-            Ok(g) => *g,
-            Err(_) => LastGood::default(),
-        }
-    };
-    if too_large {
-        if last_opt.have {
-            *eta_m_inout = last_opt.eta_m;
-        }
-        return Err(PoisonReason::NonFinite);
-    }
-    if let Some(reason) =
-        is_poisoned_with_reason(&stats, if last_opt.have { Some(last_opt) } else { None })
-    {
-        if last_opt.have {
-            *eta_m_inout = last_opt.eta_m; // freeze η
-            return Err(reason);
-        }
-        return Err(reason);
-    }
-    let land_frac = if stats.n == 0 {
-        0.0
-    } else {
-        (stats.n - stats.count_below_datum) as f32 / stats.n as f32
-    };
-    let cap_frac = if stats.n == 0 {
-        0.0
-    } else {
-        (stats.count_at_cap_max + stats.count_at_cap_min) as f32 / stats.n as f32
-    };
-    let max_step_m = 200.0;
-    *eta_m_inout = slew_eta(*eta_m_inout, proposed_eta_m, max_step_m);
-    if let Ok(mut w) = last_good_cell().write() {
-        *w = LastGood { eta_m: *eta_m_inout, land_frac, cap_frac, have: true };
-    }
-    Ok((land_frac, stats))
-}
-
 // T-505 drawer render — Simple/Advanced
 #[allow(dead_code)]
-fn run_to_t_realtime(
-    ctx: &egui::Context,
-    world: &mut engine::world::World,
-    ov: &mut overlay::OverlayState,
-    sp: &engine::world::StepParams,
-    t_end_myr: f64,
-    max_steps_per_yield: u32,
-) {
-    let max_chunk = max_steps_per_yield.max(1);
-    while world.clock.t_myr < t_end_myr {
-        for _ in 0..max_chunk {
-            if world.clock.t_myr >= t_end_myr {
-                break;
-            }
-            // Centralized pipeline step: solves eta to target land fraction
-            let cfg = engine::pipeline::PipelineCfg {
-                dt_myr: ov.sim_dt_myr.max(0.0),
-                steps_per_frame: 1,
-                enable_flexure: sp.do_flexure,
-                enable_erosion: sp.do_surface,
-                target_land_frac: ov.simple_target_land,
-                freeze_eta: ov.freeze_eta,
-                log_mass_budget: false,
-                enable_subduction: sp.do_subduction,
-                enable_rigid_motion: sp.do_rigid_motion,
-                cadence_trf_every: ov.cadence_trf_every.max(1),
-                cadence_sub_every: ov.cadence_sub_every.max(1),
-                cadence_flx_every: ov.cadence_flx_every.max(1),
-                cadence_sea_every: ov.cadence_sea_every.max(1),
-                cadence_surf_every: ov.cadence_sea_every.max(1),
-                substeps_transforms: 4,
-                substeps_subduction: 4,
-                use_gpu_flexure: true,
-                gpu_flex_levels: ov.levels.max(1),
-                gpu_flex_cycles: ov.flex_cycles.max(1),
-                gpu_wj_omega: ov.wj_omega,
-                subtract_mean_load: ov.subtract_mean_load,
-                surf_k_stream: ov.surf_k_stream,
-                surf_m_exp: ov.surf_m_exp,
-                surf_n_exp: ov.surf_n_exp,
-                surf_k_diff: ov.surf_k_diff,
-                surf_k_tr: ov.surf_k_tr,
-                surf_p_exp: ov.surf_p_exp,
-                surf_q_exp: ov.surf_q_exp,
-                surf_rho_sed: ov.surf_rho_sed,
-                surf_min_slope: ov.surf_min_slope,
-                surf_subcycles: ov.surf_subcycles,
-                surf_couple_flexure: ov.surf_couple_flexure,
-                sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
-                sub_trench_half_width_km: ov.sub_trench_half_width_km,
-                sub_arc_offset_km: ov.sub_arc_offset_km,
-                sub_arc_half_width_km: ov.sub_arc_half_width_km,
-                sub_backarc_width_km: ov.sub_backarc_width_km,
-                sub_trench_deepen_m: ov.sub_trench_deepen_m,
-                sub_arc_uplift_m: ov.sub_arc_uplift_m,
-                sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
-                sub_rollback_offset_m: ov.sub_rollback_offset_m,
-                sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
-                sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
-                sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
-                sub_continent_c_min: ov.sub_continent_c_min,
-                cadence_spawn_plate_every: 0,
-                cadence_retire_plate_every: 0,
-                cadence_force_balance_every: 8,
-                fb_gain: 1.0e-12,
-                fb_damp_per_myr: 0.2,
-                fb_k_conv: 1.0,
-                fb_k_div: 0.5,
-                fb_k_trans: 0.1,
-                fb_max_domega: 5.0e-9,
-                fb_max_omega: 2.0e-7,
-            };
-            let mut elev_tmp: Vec<f32> = vec![0.0; world.depth_m.len()];
-            let mut eta = world.sea.eta_m;
-            engine::pipeline::step_full(
-                world,
-                engine::pipeline::SurfaceFields { elev_m: &mut elev_tmp, eta_m: &mut eta },
-                cfg,
-            );
-            world.sea.eta_m = eta;
-            ov.world_dirty = true;
-            ov.color_dirty = true;
-            ov.bathy_cache = None;
-            ctx.request_repaint();
-        }
-        std::thread::yield_now();
-    }
-}
-fn render_simple_panels(
+
+
+/// Unified progressive UI that replaces Simple/Advanced modes
+/// Features progressive disclosure with smart defaults and tooltips
+fn render_unified_progressive_panels(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
     tx_cmd: &std::sync::mpsc::Sender<SimCommand>,
 ) {
-    egui::CollapsingHeader::new("Simulation Basics").default_open(true).show(ui, |ui| {
-        let tiling_ok = cfg!(feature = "tiling") || ov.high_f_available;
-        let current_f = world.grid.frequency;
-        ui.horizontal(|ui| {
-            ui.label("Resolution (F):");
-            ui.selectable_value(&mut ov.simple_f, 64, "64");
-            ui.selectable_value(&mut ov.simple_f, 128, "128");
-            ui.selectable_value(&mut ov.simple_f, 256, "256");
-            ui.add_enabled_ui(tiling_ok, |ui| {
-                ui.selectable_value(&mut ov.simple_f, 512, "512");
-            });
-            if !tiling_ok {
-                ui.label(egui::RichText::new("512 requires T-455").small());
-            }
-        });
-        // Rebuild grid/world on F change (no auto run)
-        if ov.simple_f != current_f {
-            let allow = ov.simple_f <= 256 || tiling_ok;
-            if allow {
-                let num_plates: u32 = world.plates.pole_axis.len() as u32;
-                let num_plates = if num_plates == 0 { 8 } else { num_plates };
-                *world = engine::world::World::new(ov.simple_f, num_plates, ov.simple_seed);
-                ov.world_dirty = true;
-                ov.bathy_cache = None;
-                ov.raster_dirty = true;
-                ctx.request_repaint();
-            }
-        }
-        ui.add(egui::DragValue::new(&mut ov.simple_t_end_myr).speed(10.0).suffix(" Myr"));
-        ui.separator();
-        // UI-2: Parameter profile selector and dt with tooltips
-        ui.horizontal(|ui| {
-            ui.label("Profile:");
-            let mut sel = ov.profile_idx;
-            egui::ComboBox::from_id_source("sim_param_profile")
-                .selected_text(match sel {
-                    0 => "Conservative",
-                    2 => "Aggressive",
-                    _ => "Standard",
-                })
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(sel == 0, "Conservative")
-                        .on_hover_text("Lower CFL_MAX, wider widths, smaller dt")
-                        .clicked()
-                    {
-                        sel = 0;
-                    }
-                    if ui
-                        .selectable_label(sel == 1, "Standard")
-                        .on_hover_text("Defaults: CFL_MAX=0.3")
-                        .clicked()
-                    {
-                        sel = 1;
-                    }
-                    if ui
-                        .selectable_label(sel == 2, "Aggressive")
-                        .on_hover_text("Higher CFL_MAX, narrower widths, larger dt")
-                        .clicked()
-                    {
-                        sel = 2;
-                    }
-                });
-            if sel != ov.profile_idx {
-                ov.pending_profile = sel;
-                ov.show_profile_confirm = true;
-            }
-            ui.separator();
-            ui.add(egui::DragValue::new(&mut ov.sim_dt_myr).speed(0.1).suffix(" Myr"))
-                .on_hover_text("Time step dt (Myr)");
-        });
-        if ov.show_profile_confirm {
-            egui::Window::new("Apply profile?").collapsible(false).resizable(false).show(
-                ctx,
-                |ui| {
-                    ui.label("Switch simulation profile? This updates widths, gates, and CFL_MAX.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply").clicked() {
-                            // Apply preset to subduction UI knobs as a proxy for SimParams live update
-                            ov.profile_idx = ov.pending_profile;
-                            match ov.profile_idx {
-                                0 => {
-                                    // Conservative
-                                    ov.sub_tau_conv_m_per_yr = 0.025;
-                                    ov.sub_trench_half_width_km = 60.0;
-                                }
-                                2 => {
-                                    // Aggressive
-                                    ov.sub_tau_conv_m_per_yr = 0.015;
-                                    ov.sub_trench_half_width_km = 30.0;
-                                }
-                                _ => {
-                                    // Standard
-                                    ov.sub_tau_conv_m_per_yr = 0.020;
-                                    ov.sub_trench_half_width_km = 40.0;
-                                }
-                            }
-                            ov.show_profile_confirm = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            ov.show_profile_confirm = false;
-                        }
-                    });
-                },
-            );
-        }
-        ui.horizontal(|ui| {
-            if ui.button("▶ Play").clicked() {
-                ov.stepper.playing = true;
-                ov.stepper.t_target_myr = ov.simple_t_end_myr as f32;
-                ov.run_target_myr = ov.simple_t_end_myr as f64;
-                ov.run_active = true; // keep resolution policy in sync until fully migrated
-                ov.raster_dirty = true;
-                ctx.request_repaint();
-            }
-            if ui.button("⏸ Pause").clicked() {
-                ov.stepper.playing = false;
-                ov.run_active = false;
-                ov.raster_dirty = true;
-                ctx.request_repaint();
-            }
-            ui.label("steps/frame:");
-            let mut mspf = ov.stepper.max_steps_per_frame;
-            if ui.add(egui::Slider::new(&mut mspf, 1..=8)).changed() {
-                ov.stepper.max_steps_per_frame = mspf;
-            }
-        });
-
-        if ui.button("Generate world").clicked() {
-            // Simple-mode generation using area-based land solver (T-603c)
-            let plates = match ov.simple_preset {
-                1 => 10,
-                2 => 6,
-                3 => 8, // Supercontinent
-                _ => 8,
-            };
-            let continents_n = match ov.simple_preset {
-                1 => 4,
-                2 => 2,
-                3 => 0, // Supercontinent preset triggers specialized generator
-                _ => 3,
-            };
-            // Reset/normalize world state for current F & plates
-            world.plates = engine::plates::Plates::new(&world.grid, plates, ov.simple_seed);
-            world.v_en.clone_from(&world.plates.vel_en);
-            world.age_myr.fill(0.0);
-            // depth initialized during world.generate_simple; avoid zero-filling here to prevent alias in snapshots
-            world.depth_m.fill(0.0);
-            world.c.fill(0.0);
-            world.th_c_m.fill(0.0);
-            world.sediment_m.fill(0.0);
-            world.clock = engine::world::Clock { t_myr: 0.0, step_idx: 0 };
-            world.sea_level_ref = None;
-            world.boundaries = engine::boundaries::Boundaries::classify(
-                &world.grid,
-                &world.plates.plate_id,
-                &world.v_en,
-                0.005,
-            );
-            // Initialize ridge births then baseline bathymetry from age (ocean depths)
-            {
-                let mut ages_tmp = world.age_myr.clone();
-                let _ridge_stats = engine::ridge::apply_ridge(
-                    &world.grid,
-                    &world.boundaries,
-                    &mut ages_tmp,
-                    engine::ridge::RidgeParams { fringe_age_myr: 0.0 },
-                );
-                world.age_myr = ages_tmp;
-            }
-            let n_cells = world.grid.cells;
-            for i in 0..n_cells {
-                let mut d = engine::age::depth_from_age_plate(
-                    world.age_myr[i] as f64,
-                    2600.0,
-                    world.clock.t_myr,
-                    6000.0,
-                    1.0e-6,
-                ) as f32;
-                if !d.is_finite() {
-                    d = 6000.0;
-                }
-                world.depth_m[i] = d.clamp(0.0, 6000.0);
-            }
-            // Build continent template (unitless 0..1)
-            let continent_tpl: Vec<f32> = if continents_n == 0 {
-                // Supercontinent: contiguous ribbon of lobes
-                engine::continent::build_supercontinent_template(
-                    &world.grid,
-                    ov.simple_seed,
-                    5,
-                    2200.0,
-                    600.0,
-                )
-            } else {
-                let cp = engine::continent::ContinentParams {
-                    seed: ov.simple_seed,
-                    n_continents: continents_n,
-                    mean_radius_km: 2200.0,
-                    falloff_km: 600.0,
-                    plateau_uplift_m: 1.0,
-                    target_land_fraction: None,
-                };
-                let cf = engine::continent::build_continents(&world.grid, cp);
-                cf.uplift_template_m
-            };
-            // If Supercontinent, imprint broad inherited belts before amplitude solve
-            if continents_n == 0 {
-                let belts = engine::continent::build_supercontinent_belts(
-                    ov.simple_seed,
-                    engine::continent::BeltParams {
-                        half_width_km_primary: ov.belt_hw_primary_km,
-                        half_width_km_secondary: ov.belt_hw_secondary_km,
-                        uplift_primary_m: ov.belt_uplift_primary_m,
-                        uplift_secondary_m: ov.belt_uplift_secondary_m,
-                        diag_angle_deg: ov.belt_diag_deg,
-                    },
-                );
-                let imprint = engine::continent::imprint_orogenic_belts(&world.grid, &belts);
-                for (d, di) in world.depth_m.iter_mut().zip(imprint.iter()) {
-                    *d += *di;
-                }
-            }
-            // Solve amplitude for target land fraction (area-based). We'll apply uplift only; sea offset handled via world.sea.eta_m
-            let target_land = ov.simple_target_land.clamp(0.0, 0.5);
-            let (amp_m, _off_m_unused) = engine::isostasy::solve_amplitude_for_land_fraction(
-                &continent_tpl,
-                &world.depth_m,
-                &world.area_m2,
-                target_land,
-                0.0,
-                6000.0,
-                2e-2,
-                1e-4,
-                48,
-            );
-            // Apply uplift using the solved amplitude; no boost retries
-            let amp_used_m = amp_m as f32;
-            for (d, t) in world.depth_m.iter_mut().zip(continent_tpl.iter()) {
-                *d -= amp_used_m * *t;
-            }
-            // Solve η so that land fraction with elev=η−depth matches target
-            let eta_off = engine::isostasy::solve_offset_for_land_fraction(
-                &world.depth_m,
-                &world.area_m2,
-                ov.simple_target_land,
-                64,
-            );
-            // Solver returns an offset 'off' used in elevation = -(depth + off). Our convention is elev = η − depth, so η = -off.
-            world.sea.eta_m = -(eta_off as f32);
-            // Seed continents fields so subsequent steps preserve uplift.
-            // Build an area-targeted C so continents make up the target land mass at start.
-            {
-                let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
-                let target_area: f64 = (ov.simple_target_land as f64) * total_area;
-                let mut cells: Vec<(f32, f32, usize)> = continent_tpl
-                    .iter()
-                    .zip(world.area_m2.iter())
-                    .enumerate()
-                    .map(|(i, (t, a))| (*t, *a, i))
-                    .collect();
-                cells.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                world.c.fill(0.0);
-                let mut acc: f64 = 0.0;
-                for (val, a, idx) in cells {
-                    if val <= 0.0 {
-                        break;
-                    }
-                    if acc >= target_area {
-                        break;
-                    }
-                    let a64 = a as f64;
-                    let remaining = (target_area - acc).max(0.0);
-                    if remaining >= a64 {
-                        world.c[idx] = 1.0;
-                        acc += a64;
-                    } else {
-                        world.c[idx] = (remaining / a64) as f32;
-                        acc = target_area;
-                    }
-                }
-                // Thickness: realistic craton thickness over continents; 0 elsewhere
-                if continents_n == 0 {
-                    let th = engine::continent::build_craton_thickness(
-                        &world.grid,
-                        &world.c, // use binary/partial mask
-                        22.0,
-                        16.0,
-                        2.0,
-                        ov.simple_seed,
-                        1.5,
-                    );
-                    world.th_c_m.clone_from_slice(&th);
-                } else {
-                    for (i, &cval) in world.c.iter().enumerate() {
-                        world.th_c_m[i] = if cval > 0.0 { 40_000.0 } else { 0.0 };
-                    }
-                }
-                // Update plate kinds now that C exists
-                world.plates.kind = engine::plates::derive_kinds(
-                    &world.grid,
-                    &world.plates.plate_id,
-                    &world.c,
-                    0.35,
-                    0.5,
-                );
-            }
-            // Immediately apply uplift from C/th_c into depth so caps are present at t0
-            {
-                let mut uplift = vec![0.0f32; world.grid.cells];
-                engine::continent::apply_uplift_from_c_thc(&mut uplift, &world.c, &world.th_c_m);
-                for (d, u) in world.depth_m.iter_mut().zip(uplift.iter()) {
-                    *d += *u;
-                }
-                world.epoch_continents = world.epoch_continents.wrapping_add(1);
-            }
-            world.epoch_continents = world.epoch_continents.wrapping_add(1);
-            // Diagnostics and UI updates using elev = η − depth
-            // Build elev slice for guard
-            let mut elev_tmp: Vec<f32> = Vec::with_capacity(world.depth_m.len());
-            elev_tmp.extend(world.depth_m.iter().map(|&d| world.sea.eta_m - d));
-            let mut eta_inout = world.sea.eta_m;
-            match guarded_hyps_and_eta(&elev_tmp, world.sea.eta_m, &mut eta_inout) {
-                Ok((_, stats)) => {
-                    // Area-weighted land from the same elev slice used for guard
-                    let mut land_area = 0.0f64;
-                    let mut tot_area = 0.0f64;
-                    for (&z, &a) in elev_tmp.iter().zip(world.area_m2.iter()) {
-                        tot_area += a as f64;
-                        if z > 0.0 {
-                            land_area += a as f64;
-                        }
-                    }
-                    let land_cpu = if tot_area > 0.0 { (land_area / tot_area) as f32 } else { 0.0 };
-                    // Update LastGood only for sane frames
-                    let sane = stats.count_non_finite == 0
-                        && stats.min < 0.0
-                        && stats.max > 0.0
-                        && (stats.max - stats.min) < 40_000.0;
-                    if sane {
-                        if let Ok(mut w) = last_good_cell().write() {
-                            w.eta_m = world.sea.eta_m;
-                            w.land_frac = land_cpu;
-                            w.have = true;
-                        }
-                    }
-                    println!(
-                        "[draw] elev min/mean/max = {:.0}/{:.0}/{:.0} m | land={:.1}%",
-                        stats.min,
-                        stats.mean,
-                        stats.max,
-                        land_cpu * 100.0
-                    );
-                }
-                Err(reason) => {
-                    let held = match last_good_cell().read() {
-                        Ok(g) => *g,
-                        Err(_) => LastGood::default(),
-                    };
-                    let reason_s = match reason {
-                        PoisonReason::NonFinite => "NonFinite",
-                        PoisonReason::ZeroNoOcean => "ZeroNoOcean",
-                        PoisonReason::CapSlam => "CapSlam",
-                    };
-                    println!(
-                        "[draw] [skipped: poisoned={}] | land(held)={:.1}%",
-                        reason_s,
-                        (held.land_frac as f64) * 100.0
-                    );
-                }
-            }
-            // No boost retry. Diagnostics only.
-            // Elevation stats (m)
-            let mut zmin = f32::INFINITY;
-            let mut zmax = f32::NEG_INFINITY;
-            let mut zsum = 0.0f64;
-            let mut zn = 0usize;
-            for &d in &world.depth_m {
-                if d.is_finite() {
-                    let z = world.sea.eta_m - d;
-                    zmin = zmin.min(z);
-                    zmax = zmax.max(z);
-                    zsum += z as f64;
-                    zn += 1;
-                }
-            }
-            let _zmean = if zn > 0 { zsum / (zn as f64) } else { 0.0 };
-            println!(
-                "[simple] target_land={:.2} solved_eta={:+.0} m",
-                ov.simple_target_land, world.sea.eta_m
-            );
-            // hypsometry logs already emitted via guarded_hyps_and_eta above
-            // Guards (use eta-adjusted elevation for land/ocean checks)
-            let has_land = world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) > 0.0);
-            let has_ocean =
-                world.depth_m.iter().any(|&d| (world.sea.eta_m as f64 - d as f64) <= 0.0);
-            debug_assert!(has_land, "no land after solve");
-            debug_assert!(has_ocean, "no ocean after solve");
-            // Apply palette then mark dirty
-            apply_simple_palette(ov, world, ctx);
-            ov.world_dirty = true;
-            ov.color_dirty = true;
-            ov.raster_dirty = true;
-            ov.bathy_cache = None;
-            ctx.request_repaint();
-            // Sync simulation thread with this new physical baseline
-            let ws = WorldSnapshot {
-                depth_m: world.depth_m.clone(),
-                c: world.c.clone(),
-                th_c_m: world.th_c_m.clone(),
-                sea_eta_m: world.sea.eta_m,
-                plate_id: world.plates.plate_id.clone(),
-                pole_axis: world.plates.pole_axis.clone(),
-                omega_rad_yr: world.plates.omega_rad_yr.clone(),
-                v_en: world.v_en.clone(),
-                age_myr: world.age_myr.clone(),
-            };
-            let _ = tx_cmd.send(SimCommand::SyncWorld(ws));
-            // Ready: let the user hit Play to evolve in real-time (non-blocking)
-            ov.stepper.playing = false;
-            ov.run_active = false;
-            ov.run_target_myr = ov.simple_t_end_myr;
-            ov.raster_dirty = true;
-            ctx.request_repaint();
-        }
-    });
-
-    egui::CollapsingHeader::new("Time-series: Hypsometry & Caps").default_open(false).show(ui, |ui| {
-        // Live land fraction and mean elevation from current world
-        let mut land_area = 0.0f64; let mut area_sum = 0.0f64; let mut zsum = 0.0f64;
-        for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { let z = (world.sea.eta_m - d) as f64; zsum += z * (a as f64); area_sum += a as f64; if z > 0.0 { land_area += a as f64; } }
-        let land_pct_live = if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 };
-        let mean_elev_live = if area_sum > 0.0 { zsum / area_sum } else { 0.0 };
-        ui.label(format!("Live now: land={:.1}% mean elev={:.0} m", land_pct_live, mean_elev_live));
-        // Load DL-1 CSV if present for caps over time
-        if let Some(series) = crate::plot::read_dl1_series_csv("out/dl1_metrics.csv") {
-            let mut pts_caps: Vec<[f64; 2]> = Vec::new();
-            for i in 0..series.t_myr.len().min(series.cap_comp.len()) { pts_caps.push([series.t_myr[i], series.cap_comp[i]]); }
-            let line_caps = egui_plot::Line::new(egui_plot::PlotPoints::from_iter(pts_caps.iter().copied())).name("cap composite");
-            let mut pts_thc: Vec<[f64; 2]> = Vec::new(); for i in 0..series.t_myr.len().min(series.cap_thc.len()) { pts_thc.push([series.t_myr[i], series.cap_thc[i]]); }
-            let line_thc = egui_plot::Line::new(egui_plot::PlotPoints::from_iter(pts_thc.iter().copied())).name("cap th_c");
-            egui_plot::Plot::new("dl1_timeseries").legend(egui_plot::Legend::default()).show(ui, |plot_ui| {
-                plot_ui.line(line_caps);
-                plot_ui.line(line_thc);
-            });
-            // Export buttons
-            ui.horizontal(|ui| {
-                if ui.button("Export DL-1 CSV copy").clicked() { let _ = std::fs::copy("out/dl1_metrics.csv", "out/dl1_metrics_copy.csv"); }
-                if ui.button("Export plot PNG").clicked() { /* Placeholder: egui screenshot capture would be handled at app level */ }
-            });
-        } else {
-            ui.label("No DL-1 CSV found at out/dl1_metrics.csv");
-        }
-    });
-
-    egui::CollapsingHeader::new("Continents & Seeds").default_open(true).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Preset:");
-            egui::ComboBox::from_id_source("simple_preset_combo")
-                .selected_text(match ov.simple_preset {
-                    1 => "Many small",
-                    2 => "Few large",
-                    3 => "Supercontinent",
-                    _ => "Default",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut ov.simple_preset, 0, "Default");
-                    ui.selectable_value(&mut ov.simple_preset, 1, "Many small");
-                    ui.selectable_value(&mut ov.simple_preset, 2, "Few large");
-                    ui.selectable_value(&mut ov.simple_preset, 3, "Supercontinent");
-                });
-            if ui
-                .button("Pangea")
-                .on_hover_text("Set Supercontinent preset and regenerate")
-                .clicked()
-            {
-                ov.simple_preset = 3;
-                // Force a fresh world regenerate next frame via existing Generate button path
-                // by toggling world_dirty and raster_dirty; user clicks Generate World to apply.
-                ov.world_dirty = true;
-                ov.raster_dirty = true;
-            }
-        });
-        ui.add(egui::DragValue::new(&mut ov.simple_seed).speed(1));
-        ui.add(
-            egui::Slider::new(&mut ov.simple_target_land, 0.0..=0.6).text("Target land fraction"),
-        );
-        if ui.button("🎲 Randomise").on_hover_text("Reseed preset RNG").clicked() {
-            // reseed preset RNG only
-        }
-    });
-
-    egui::CollapsingHeader::new("Maps & Colours").default_open(true).show(ui, |ui| {
-        let mut changed = false;
-        let is_hyp = ov.simple_palette == 0;
-        let is_bio = ov.simple_palette == 1;
-        if ui.selectable_label(is_hyp, "Hypsometric").clicked() {
-            ov.simple_palette = 0;
-            changed = true;
-        }
-        if ui.selectable_label(is_bio, "Biomes").clicked() {
-            ov.simple_palette = 1;
-            changed = true;
-        }
-        ui.separator();
-        ui.label("GPU raster debug:");
-        changed |= ui.checkbox(&mut ov.gpu_dbg_wire, "Wireframe").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_face_tint, "Face tint").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_grid, "Grid 8x").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_tri_parity, "Tri parity").changed();
-        changed |= ui.checkbox(&mut ov.gpu_dbg_tri_index, "Tri index").changed();
-        // Simple-mode physics isolation toggles (T-646)
-        ui.separator();
-        ui.checkbox(&mut ov.freeze_eta, "Freeze sea level");
-        ui.checkbox(&mut ov.disable_erosion, "Disable erosion");
-        ui.checkbox(&mut ov.disable_flexure, "Disable flexure");
-        ui.checkbox(&mut ov.disable_subduction, "Disable subduction");
-        if changed {
-            apply_simple_palette(ov, world, ctx);
-        }
-        changed |=
-            ui.checkbox(&mut ov.dbg_cpu_bary_gpu_lattice, "CPU face -> GPU bary+lattice").changed();
-        changed |=
-            ui.checkbox(&mut ov.dbg_gpu_face_cpu_lattice, "GPU face+bary -> CPU lattice").changed();
-        changed |= ui.checkbox(&mut ov.show_parity_heat, "Parity heat").changed();
-        changed |=
-            ui.checkbox(&mut ov.force_cpu_face_pick, "Force CPU face pick (debug)").changed();
-        changed |=
-            ui.checkbox(&mut ov.dbg_rollover_probe, "Log rollover probe CSV (ROI)").changed();
-        if changed {
-            ov.raster_dirty = true;
-        }
-        if changed {
-            apply_simple_palette(ov, world, ctx);
-        }
-        ui.separator();
-        changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
-        if ov.show_plate_type {
-            // Compute simple legend: counts per class and area shares
-            let mut n_cont = 0usize;
-            let mut n_mix = 0usize;
-            let mut n_ocean = 0usize;
-            let mut area_cont: f64 = 0.0;
-            let mut area_mix: f64 = 0.0;
-            let mut area_ocean: f64 = 0.0;
-            // Reuse plate-level classification shares like overlay does
-            use std::collections::HashMap;
-            let mut area_by_plate: HashMap<u16, f64> = HashMap::new();
-            let mut area_cont_plate: HashMap<u16, f64> = HashMap::new();
-            let mut area_ocean_plate: HashMap<u16, f64> = HashMap::new();
-            for i in 0..world.grid.cells {
-                let pid = world.plates.plate_id[i];
-                let a = world.area_m2[i] as f64;
-                let c = world.c[i].clamp(0.0, 1.0) as f64;
-                *area_by_plate.entry(pid).or_insert(0.0) += a;
-                if c >= (ov.c_thresh_cont as f64) {
-                    *area_cont_plate.entry(pid).or_insert(0.0) += a;
-                }
-                if c <= (ov.c_thresh_ocean as f64) {
-                    *area_ocean_plate.entry(pid).or_insert(0.0) += a;
-                }
-            }
-            for (pid, area) in &area_by_plate {
-                let ac = area_cont_plate.get(pid).copied().unwrap_or(0.0);
-                let ao = area_ocean_plate.get(pid).copied().unwrap_or(0.0);
-                let sc = if *area > 0.0 { ac / *area } else { 0.0 };
-                let so = if *area > 0.0 { ao / *area } else { 0.0 };
-                if sc >= 0.6 {
-                    n_cont += 1;
-                    area_cont += *area;
-                } else if so >= 0.6 {
-                    n_ocean += 1;
-                    area_ocean += *area;
-                } else {
-                    n_mix += 1;
-                    area_mix += *area;
-                }
-            }
-            let area_tot: f64 = area_cont + area_mix + area_ocean;
-            if area_tot > 0.0 {
-                ui.label(format!(
-                    "Plate Type: continental={} ({:.1}%), mixed={} ({:.1}%), oceanic={} ({:.1}%)",
-                    n_cont,
-                    100.0 * area_cont / area_tot,
-                    n_mix,
-                    100.0 * area_mix / area_tot,
-                    n_ocean,
-                    100.0 * area_ocean / area_tot
-                ));
-            } else {
-                ui.label("Plate Type: no area");
-            }
-        }
-        if changed {
-            ov.color_dirty = true;
-            ov.bathy_cache = None;
-        }
-    });
-
-    egui::CollapsingHeader::new("Export").default_open(true).show(ui, |ui| {
-        let export_h = egui::Button::new("Export heightmap PNG");
-        let resp_h = ui.add_enabled(false, export_h);
-        if resp_h.hovered() {
-            resp_h.on_hover_text("Export not wired yet (no image dependency)");
-        }
-        let export_c = egui::Button::new("Export colour map PNG");
-        let resp_c = ui.add_enabled(false, export_c);
-        if resp_c.hovered() {
-            resp_c.on_hover_text("Export not wired yet (no image dependency)");
-        }
-        if ui.button("Export parity CSV").clicked() {
-            ov.export_parity_csv_requested = true;
-        }
-    });
+    // 📋 Simulation Basics (Always expanded - essential controls)
+    render_simulation_basics_unified(ui, ctx, world, ov, tx_cmd);
+    
+    // 🌍 World Generation (Expanded by default - common task)  
+    render_world_generation_unified(ui, ctx, world, ov, tx_cmd);
+    
+    // 🎨 Visual Overlays (Collapsed by default - organized by complexity)
+    render_visual_overlays_unified(ui, ctx, world, ov);
+    
+    // ⚙️ Physics Processes (Collapsed by default - advanced tuning)
+    render_physics_processes_unified(ui, ctx, world, ov);
+    
+    // 🐛 Debug & Diagnostics (Collapsed by default - expert features)
+    render_debug_diagnostics_unified(ui, ctx, world, ov);
 }
 
-fn render_advanced_panels(
+/// 📋 Simulation Basics - Essential controls always visible
+fn render_simulation_basics_unified(
     ui: &mut egui::Ui,
-    _ctx: &egui::Context,
+    ctx: &egui::Context,
     world: &mut engine::world::World,
     ov: &mut overlay::OverlayState,
+    _tx_cmd: &std::sync::mpsc::Sender<SimCommand>,
 ) {
-    egui::CollapsingHeader::new("Kinematics & Boundaries")
-        .default_open(ov.adv_open_kinematics)
+    egui::CollapsingHeader::new("📋 Simulation Basics")
+        .default_open(true)
         .show(ui, |ui| {
-            let mut changed = false;
-            changed |= ui.checkbox(&mut ov.kin_enable, "Enable rigid motion").changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut ov.kin_trail_steps, 0..=5).text("Trail steps"))
-                .changed();
-            if changed {
-                ov.bounds_cache = None;
-                ov.plates_cache = None;
-            }
-        });
-
-    egui::CollapsingHeader::new("Map Colour").default_open(ov.adv_open_map_color).show(ui, |ui| {
-        let mut changed = false;
-        let before_mode = ov.color_mode;
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut ov.color_mode, 0u8, "Hypsometric");
-            ui.radio_value(&mut ov.color_mode, 1u8, "Biome preview");
-        });
-        if ov.color_mode != before_mode {
-            changed = true;
-        }
-        ui.separator();
-        changed |= ui.checkbox(&mut ov.shade_on, "Hillshade").changed();
-        ui.add_enabled(
-            ov.shade_on,
-            egui::Slider::new(&mut ov.shade_strength, 0.0..=1.0).text("Strength"),
-        );
-        ui.horizontal(|ui| {
-            ui.add_enabled(
-                ov.shade_on,
-                egui::Slider::new(&mut ov.sun_az_deg, 0.0..=360.0).text("Sun az (deg)"),
-            );
-            ui.add_enabled(
-                ov.shade_on,
-                egui::Slider::new(&mut ov.sun_alt_deg, 0.0..=90.0).text("Sun alt (deg)"),
-            );
-        });
-        changed |= ui.checkbox(&mut ov.legend_on, "Legend").changed();
-        if changed {
-            ov.color_dirty = true;
-            ov.bathy_cache = None;
-        }
-        if ov.show_plate_type {
-            // Compute simple legend: counts per class and area shares
-            let mut n_cont = 0usize;
-            let mut n_mix = 0usize;
-            let mut n_ocean = 0usize;
-            let mut area_cont: f64 = 0.0;
-            let mut area_mix: f64 = 0.0;
-            let mut area_ocean: f64 = 0.0;
-            // Reuse plate-level classification shares like overlay does
-            use std::collections::HashMap;
-            let mut area_by_plate: HashMap<u16, f64> = HashMap::new();
-            let mut area_cont_plate: HashMap<u16, f64> = HashMap::new();
-            let mut area_ocean_plate: HashMap<u16, f64> = HashMap::new();
-            for i in 0..world.grid.cells {
-                let pid = world.plates.plate_id[i];
-                let a = world.area_m2[i] as f64;
-                let c = world.c[i].clamp(0.0, 1.0) as f64;
-                *area_by_plate.entry(pid).or_insert(0.0) += a;
-                if c >= (ov.c_thresh_cont as f64) {
-                    *area_cont_plate.entry(pid).or_insert(0.0) += a;
-                }
-                if c <= (ov.c_thresh_ocean as f64) {
-                    *area_ocean_plate.entry(pid).or_insert(0.0) += a;
-                }
-            }
-            for (pid, area) in &area_by_plate {
-                let ac = area_cont_plate.get(pid).copied().unwrap_or(0.0);
-                let ao = area_ocean_plate.get(pid).copied().unwrap_or(0.0);
-                let sc = if *area > 0.0 { ac / *area } else { 0.0 };
-                let so = if *area > 0.0 { ao / *area } else { 0.0 };
-                if sc >= 0.6 {
-                    n_cont += 1;
-                    area_cont += *area;
-                } else if so >= 0.6 {
-                    n_ocean += 1;
-                    area_ocean += *area;
-                } else {
-                    n_mix += 1;
-                    area_mix += *area;
-                }
-            }
-            let area_tot: f64 = area_cont + area_mix + area_ocean;
-            if area_tot > 0.0 {
-                ui.label(format!(
-                    "Plate Type: continental={} ({:.1}%), mixed={} ({:.1}%), oceanic={} ({:.1}%)",
-                    n_cont,
-                    100.0 * area_cont / area_tot,
-                    n_mix,
-                    100.0 * area_mix / area_tot,
-                    n_ocean,
-                    100.0 * area_ocean / area_tot
-                ));
-            } else {
-                ui.label("Plate Type: no area");
-            }
-        }
-        if changed {
-            ov.color_dirty = true;
-            ov.bathy_cache = None;
-        }
-    });
-
-    egui::CollapsingHeader::new("Flexure").default_open(ov.adv_open_flexure).show(ui, |ui| {
-        let mut changed = false;
-        changed |= ui.checkbox(&mut ov.enable_flexure, "Enable flexure (apply to depth)").changed();
-        changed |= ui.checkbox(&mut ov.show_flexure, "Show w overlay").changed();
-        changed |= ui.checkbox(&mut ov.subtract_mean_load, "Subtract mean load").changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.e_gpa, 20.0..=120.0).text("E (GPa)")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.nu, 0.15..=0.30).text("nu")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.te_km, 5.0..=50.0).text("Te (km)")).changed();
-        changed |=
-            ui.add(egui::Slider::new(&mut ov.k_winkler, 0.0..=5.0e8).text("k (N/m^3)")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.wj_omega, 0.6..=0.9).text("ω (WJ)")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.nu1, 0..=4).text("ν1")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.nu2, 0..=4).text("ν2")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.levels, 1..=8).text("Levels")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.flex_cycles, 1..=5).text("V-cycles")).changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut ov.flex_gain, 1.0..=20.0).text("Overlay gain ×"))
-            .changed();
-        changed |=
-            ui.checkbox(&mut ov.apply_gain_to_depth, "Apply gain to depth (debug)").changed();
-        let mut mp = ov.max_points_flex as u32;
-        changed |= ui.add(egui::Slider::new(&mut mp, 1000..=50_000).text("Max flex pts")).changed();
-        if changed {
-            ov.max_points_flex = mp as usize;
-            ov.flex_dirty = true;
-        }
-        ui.label(format!("residual ratio = {:.3}", ov.last_residual));
-    });
-
-    egui::CollapsingHeader::new("Surface Processes").default_open(ov.adv_open_surface).show(ui, |ui| {
-        ui.checkbox(&mut ov.surface_enable, "Enable erosion & diffusion");
-        ui.add(egui::Slider::new(&mut ov.surf_k_stream, 1.0e-7..=1.0e-5).logarithmic(true).text("k_stream"));
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut ov.surf_m_exp, 0.3..=0.8).text("m"));
-            ui.add(egui::Slider::new(&mut ov.surf_n_exp, 0.7..=1.5).text("n"));
-        });
-        ui.add(egui::Slider::new(&mut ov.surf_k_diff, 0.01..=0.5).logarithmic(true).text("κ_diff (m²/yr)"));
-        ui.add(egui::Slider::new(&mut ov.surf_k_tr, 0.0..=0.3).logarithmic(true).text("K_transport"));
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut ov.surf_p_exp, 0.8..=1.6).text("p"));
-            ui.add(egui::Slider::new(&mut ov.surf_q_exp, 0.5..=1.5).text("q"));
-        });
-        ui.add(egui::Slider::new(&mut ov.surf_rho_sed, 1200.0..=2600.0).text("ρ_sed (kg/m³)"));
-        ui.add(egui::Slider::new(&mut ov.surf_min_slope, 1.0e-5..=1.0e-3).logarithmic(true).text("min slope"));
-        let mut sc = ov.surf_subcycles;
-        let changed_sc = ui.add(egui::Slider::new(&mut sc, 1..=8).text("Subcycles")).changed();
-        if changed_sc { ov.surf_subcycles = sc; }
-        ui.add(egui::Slider::new(&mut ov.cadence_surf_every, 1..=20).text("Cadence (steps)"));
-        if let Some(stats) = world.last_surface_stats {
-            let pct = if stats.eroded_m3 > 0.0 { stats.residual_m3 / stats.eroded_m3 } else { 0.0 };
-            ui.label(format!(
-                "Erosion={:.2e} m³  Deposition={:.2e} m³  Residual={:+.2}%  max_ero={:.2} m  max_dep={:.2} m",
-                stats.eroded_m3, stats.deposited_m3, pct * 100.0, stats.max_erosion_m, stats.max_deposition_m
-            ));
-        }
-    });
-
-    egui::CollapsingHeader::new("Continents").default_open(true).show(ui, |ui| {
-        let mut changed = false;
-        changed |=
-            ui.add(egui::DragValue::new(&mut ov.cont_seed).speed(1.0).prefix("Seed ")).changed();
-        changed |= ui.add(egui::Slider::new(&mut ov.cont_n, 1..=6).text("n continents")).changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut ov.cont_radius_km, 800.0..=3500.0).text("Radius (km)"))
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut ov.cont_falloff_km, 200.0..=1200.0).text("Falloff σ (km)"))
-            .changed();
-        ui.separator();
-        ui.label("Supercontinent belts (if n=0)");
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.belt_hw_primary_km, 100.0..=800.0)
-                    .text("Primary half-width (km)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.belt_hw_secondary_km, 80.0..=600.0)
-                    .text("Secondary half-width (km)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.belt_uplift_primary_m, 0.0..=1500.0)
-                    .text("Primary uplift (m)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.belt_uplift_secondary_m, 0.0..=1000.0)
-                    .text("Secondary uplift (m)"),
-            )
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut ov.belt_diag_deg, 0.0..=60.0).text("Diagonal angle (deg)"))
-            .changed();
-        changed |= ui.checkbox(&mut ov.cont_auto_amp, "Auto amplitude to target land %").changed();
-        if ov.cont_auto_amp {
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut ov.cont_target_land_frac, 0.10..=0.60)
-                        .text("Target land %"),
-                )
-                .changed();
-        } else {
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut ov.cont_manual_amp_m, 0.0..=5000.0)
-                        .text("Manual amplitude (m)"),
-                )
-                .changed();
-        }
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.cont_max_points, 1000..=50_000)
-                    .text("Max overlay points"),
-            )
-            .changed();
-        ui.separator();
-        ui.label("Plate Type overlay");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut ov.show_plate_type, "Show Plate Type");
-            let mut mode = ov.plate_type_mode;
-            egui::ComboBox::from_id_source("plate_type_mode")
-                .selected_text(if mode == 0 { "Plate-level" } else { "Cell-level" })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut mode, 0, "Plate-level");
-                    ui.selectable_value(&mut mode, 1, "Cell-level");
+            // Resolution selector with availability indicators
+            let tiling_ok = cfg!(feature = "tiling") || ov.high_f_available;
+            let current_f = world.grid.frequency;
+            ui.horizontal(|ui| {
+                ui.label("Resolution (F):")
+                    .on_hover_text("Grid resolution - higher values give more detail but slower simulation");
+                ui.selectable_value(&mut ov.simple_f, 64, "64")
+                    .on_hover_text("Fast - Good for learning and quick experiments");
+                ui.selectable_value(&mut ov.simple_f, 128, "128")
+                    .on_hover_text("Balanced - Recommended for most simulations");
+                ui.selectable_value(&mut ov.simple_f, 256, "256")
+                    .on_hover_text("High detail - Better for detailed analysis");
+                ui.add_enabled_ui(tiling_ok, |ui| {
+                    ui.selectable_value(&mut ov.simple_f, 512, "512")
+                        .on_hover_text("Maximum detail - Requires high-end hardware");
                 });
-            if mode != ov.plate_type_mode {
-                ov.plate_type_mode = mode;
+                if !tiling_ok {
+                    ui.label(egui::RichText::new("(512 requires T-455)").small().color(egui::Color32::GRAY));
+                }
+            });
+            
+            // Rebuild world on resolution change
+            if ov.simple_f != current_f {
+                let allow = ov.simple_f <= 256 || tiling_ok;
+                if allow {
+                    let num_plates: u32 = world.plates.pole_axis.len() as u32;
+                    let num_plates = if num_plates == 0 { 8 } else { num_plates };
+                    *world = engine::world::World::new(ov.simple_f, num_plates, ov.simple_seed);
+                    ov.world_dirty = true;
+                    ov.bathy_cache = None;
+                    ov.raster_dirty = true;
+                    ctx.request_repaint();
+                }
             }
-        });
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut ov.c_thresh_cont, 0.4..=0.9).text("C_cont_thresh"));
-            ui.add(egui::Slider::new(&mut ov.c_thresh_ocean, 0.0..=0.4).text("C_ocean_thresh"));
-        });
-        ui.label(format!(
-            "land = {:.1}%  amplitude = {:.0} m",
-            ov.cont_land_frac * 100.0,
-            ov.cont_amp_applied_m
-        ));
-        if changed {
-            ov.mesh_continents = None;
-            ov.mesh_coastline = None;
-            ov.bathy_cache = None;
-            ov.world_dirty = true;
-        }
-    });
-
-    egui::CollapsingHeader::new("Subduction (bands & magnitudes)").default_open(true).show(
-        ui,
-        |ui| {
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Preset:");
-                egui::ComboBox::from_id_source("subduction_preset_combo")
-                    .selected_text(match ov.sub_preset {
-                        1 => "Strong rollback",
-                        2 => "Back-arc extension",
-                        3 => "Weak arcs",
-                        _ => "Reference",
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(ov.sub_preset == 0, "Reference").clicked() {
-                            ov.sub_preset = 0;
-                            apply_sub_preset(ov);
-                            changed = true;
-                        }
-                        if ui.selectable_label(ov.sub_preset == 1, "Strong rollback").clicked() {
-                            ov.sub_preset = 1;
-                            apply_sub_preset(ov);
-                            changed = true;
-                        }
-                        if ui.selectable_label(ov.sub_preset == 2, "Back-arc extension").clicked() {
-                            ov.sub_preset = 2;
-                            apply_sub_preset(ov);
-                            changed = true;
-                        }
-                        if ui.selectable_label(ov.sub_preset == 3, "Weak arcs").clicked() {
-                            ov.sub_preset = 3;
-                            apply_sub_preset(ov);
-                            changed = true;
-                        }
-                    });
-            });
-            ui.label("Convergence threshold and band geometry");
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut ov.sub_tau_conv_m_per_yr, 0.001..=0.02)
-                        .text("τ_conv (m/yr)"),
-                )
-                .changed();
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_trench_half_width_km, 10.0..=120.0)
-                            .text("Trench half-width (km)"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_arc_offset_km, 60.0..=300.0)
-                            .text("Arc offset (km)"),
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_arc_half_width_km, 10.0..=80.0)
-                            .text("Arc half-width (km)"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_backarc_width_km, 60.0..=300.0)
-                            .text("Back-arc width (km)"),
-                    )
-                    .changed();
-            });
+            
             ui.separator();
-            ui.label("Magnitudes (m; positive deepens, negative uplifts)");
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut ov.sub_trench_deepen_m, 500.0..=4000.0)
-                        .text("Trench deepen (m)"),
-                )
-                .changed();
+            
+            // Time controls with smart defaults
             ui.horizontal(|ui| {
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_arc_uplift_m, -1000.0..=0.0)
-                            .text("Arc uplift (m)"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_backarc_uplift_m, -1000.0..=0.0)
-                            .text("Back-arc uplift (m)"),
-                    )
-                    .changed();
+                ui.label("Time step:")
+                    .on_hover_text("Simulation time step - smaller values are more accurate but slower");
+                // Green highlight for recommended range (0.5-2.0 Myr)
+                let mut dt = ov.sim_dt_myr;
+                let slider = egui::Slider::new(&mut dt, 0.1..=5.0)
+                    .suffix(" Myr")
+                    .show_value(true);
+                let response = ui.add(slider);
+                
+                // Highlight recommended range in green
+                if dt >= 0.5 && dt <= 2.0 {
+                    response.on_hover_text("✅ Recommended range for most simulations");
+                } else if dt < 0.5 {
+                    response.on_hover_text("⚠️ Very small - will be slow but very accurate");
+                } else {
+                    response.on_hover_text("⚠️ Large step - faster but may be less stable");
+                }
+                ov.sim_dt_myr = dt;
             });
+            
+            ui.horizontal(|ui| {
+                ui.label("Target time:")
+                    .on_hover_text("How long to run the simulation");
+                ui.add(egui::DragValue::new(&mut ov.simple_t_end_myr)
+                    .speed(10.0)
+                    .suffix(" Myr")
+                    .clamp_range(0.0..=2000.0));
+            });
+            
             ui.separator();
-            ui.label("Rollback and extension mode");
+            
+            // Simulation status and controls
             ui.horizontal(|ui| {
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_rollback_offset_m, 0.0..=200_000.0)
-                            .text("Rollback offset (m)"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_rollback_rate_km_per_myr, 0.0..=40.0)
-                            .text("Rollback rate (km/Myr)"),
-                    )
-                    .changed();
+                ui.label(format!("Current: {:.1} Myr (Step {})", world.clock.t_myr, world.clock.step_idx));
+                
+                // Play/Pause button
+                if ov.run_active {
+                    if ui.button("⏸️ Pause")
+                        .on_hover_text("Pause the simulation")
+                        .clicked() {
+                        ov.run_active = false;
+                        ov.stepper.playing = false;
+                    }
+                    ui.label("🔄 Running");
+                } else {
+                    if ui.button("▶️ Play")
+                        .on_hover_text("Start/resume the simulation")
+                        .clicked() {
+                        ov.run_active = true;
+                        ov.stepper.playing = true;
+                        ov.stepper.t_target_myr = ov.simple_t_end_myr as f32;
+                    }
+                    ui.label("⏸️ Paused");
+                }
             });
-            changed |= ui
-                .checkbox(&mut ov.sub_backarc_extension_mode, "Back-arc extension mode")
-                .changed();
-            if ov.sub_backarc_extension_mode {
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut ov.sub_backarc_extension_deepen_m, 0.0..=1000.0)
-                            .text("Back-arc deepen (m)"),
-                    )
-                    .changed();
-            }
-            ui.separator();
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut ov.sub_continent_c_min, 0.4..=0.9)
-                        .text("Continental C threshold"),
-                )
-                .changed();
-            if changed {
-                ov.world_dirty = true;
-                ov.bathy_cache = None;
-            }
-        },
-    );
-
-    egui::CollapsingHeader::new("Playback & Caps").default_open(ov.adv_open_playback).show(
-        ui,
-        |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Slider::new(&mut ov.vel_scale_px_per_cm_yr, 0.1..=2.0)
-                        .text("Vel scale (px per cm/yr)"),
-                );
-                let arrows = egui::Slider::new(&mut ov.max_arrows_slider, 500..=20_000)
-                    .text("Max arrows")
-                    .step_by(500.0);
-                ui.add(arrows);
-                let bounds_cap = egui::Slider::new(&mut ov.max_bounds_slider, 500..=20_000)
-                    .text("Max boundaries")
-                    .step_by(500.0);
-                ui.add(bounds_cap);
-                let subd_cap = egui::Slider::new(&mut ov.max_subd_slider, 500..=20_000)
-                    .text("Max subduction points")
-                    .step_by(500.0);
-                ui.add(subd_cap);
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut ov.adaptive_cap, "Adaptive cap (16.6 ms target)");
-                ui.label(format!(
-                    "live arrows={} live boundaries={} live subd={}",
-                    ov.live_arrows_cap, ov.live_bounds_cap, ov.live_subd_cap
-                ));
-            });
-        },
-    );
-
-    egui::CollapsingHeader::new("Sea Level").default_open(ov.adv_open_sea_level).show(ui, |ui| {
-        let mut changed = false;
-        changed |= ui.checkbox(&mut ov.apply_sea_level, "Apply global sea level").changed();
-        ui.horizontal(|ui| {
-            if ui.button("Re-baseline L now").clicked() {
-                let area = world.area_m2.clone();
-                let _ = engine::isostasy::rebaseline(world, &area);
-                ov.world_dirty = true;
-                ov.bathy_cache = None;
-                ov.raster_dirty = true;
-            }
-            ui.checkbox(&mut ov.auto_rebaseline_l, "Auto re-baseline after continents change");
         });
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.target_ocean_fraction, 0.05..=0.95)
-                    .text("Target ocean fraction")
-                    .clamp_to_range(true),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.extra_offset_m, -4000.0..=4000.0)
-                    .text("Extra Δoffset (m)"),
-            )
-            .changed();
-        ui.separator();
-        ui.checkbox(&mut ov.lock_bathy_scale, "Lock bathy colour scale");
-        ui.add(egui::DragValue::new(&mut ov.bathy_min_max.0).speed(10.0).prefix("min "));
-        ui.add(egui::DragValue::new(&mut ov.bathy_min_max.1).speed(10.0).prefix("max "));
-        if changed {
-            ov.bathy_cache = None;
-        }
-    });
-
-    egui::CollapsingHeader::new("Hypsometry")
- 		.default_open(ov.adv_open_hypsometry)
- 		.show(ui, |ui| {
-			let mut changed = false;
-			changed |= ui.add(egui::Slider::new(&mut ov.hyps_bins, 64..=512).text("bins")).changed();
-			changed |= ui.checkbox(&mut ov.hyps_auto_domain, "auto domain").changed();
-			if !ov.hyps_auto_domain {
-				changed |= ui.add(egui::DragValue::new(&mut ov.hyps_min_m).speed(10.0).prefix("min ")).changed();
-				changed |= ui.add(egui::DragValue::new(&mut ov.hyps_max_m).speed(10.0).prefix("max ")).changed();
-			}
-			if ui.button("Export CSV").clicked() {
-				let secs = std::time::SystemTime::now()
-					.duration_since(std::time::UNIX_EPOCH)
-					.map(|d| d.as_secs())
-					.unwrap_or(0);
-				let name = format!("hypsometry_{}.csv", secs);
-				if !ov.hyps_centers_m.is_empty() && ov.hyps_centers_m.len() == ov.hyps_area_per_bin_m2.len() {
-					let mut cum: f64 = 0.0;
-					let mut s = String::from("bin_center_m,count_cells,area_m2,cumulative_area_m2\n");
-					for (i, &c) in ov.hyps_centers_m.iter().enumerate() {
-						let a = ov.hyps_area_per_bin_m2[i];
-						cum += a;
-						s.push_str(&format!("{:.6},{},{} ,{}\n", c, 0, a, cum));
-					}
-					let _ = std::fs::write(name, s);
-				}
-			}
-			ui.label(format!(
-				"[hyps] bins={} land={:.1}% mean={:.0} m median={:.0} m coast_area={:.3e} m^2 | overlay pts={} transforms pts={}",
-				ov.hyps_bins, ov.hyps_land_frac * 100.0, ov.hyps_mean_m, ov.hyps_median_m, ov.hyps_coast_area_m2,
-				ov.flex_overlay_count, ov.trans_pull_count + ov.trans_rest_count
-			));
-			if changed { ov.world_dirty = true; }
-		});
-
-    egui::CollapsingHeader::new("Transforms").default_open(ov.adv_open_transforms).show(ui, |ui| {
-        ui.label("Active if |tangential| ≥ min_tangential & |normal| ≤ τ_open");
-        ui.label("Cyan = pull-apart (deeper), Brown = restraining (shallower)");
-        ui.label("Width = half-width from the fault trace (km)");
-        let mut changed = false;
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.trans_min_tangential_m_per_yr, 0.0001..=0.03)
-                    .logarithmic(true)
-                    .text("min tangential (m/yr)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.trans_tau_open_m_per_yr, 0.002..=0.02)
-                    .logarithmic(true)
-                    .text("τ_open (m/yr)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.trans_basin_half_width_km, 10.0..=60.0)
-                    .text("Half-width (km)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.trans_basin_deepen_m, 100.0..=1000.0)
-                    .text("Basin deepen (m)"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut ov.trans_ridge_like_uplift_m, -800.0..=-50.0)
-                    .text("Restraining uplift (m)"),
-            )
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut ov.trans_max_points, 500..=20_000).text("Max points"))
-            .changed();
-        if changed {
-            ov.trans_pull = None;
-            ov.trans_rest = None;
-            ov.bathy_cache = None;
-        }
-    });
-
-    egui::CollapsingHeader::new("Debug & Cadence").default_open(false).show(ui, |ui| {
-        ui.checkbox(&mut ov.debug_enable_all, "Debug: run all passes");
-        ui.horizontal(|ui| {
-            ui.label("Profiling burst (steps)");
-            ui.add(egui::DragValue::new(&mut ov.debug_burst_steps).speed(1));
-        });
-        ui.separator();
-        ui.label("Per-pass cadence (every N steps)");
-        ui.horizontal(|ui| {
-            ui.label("advection");
-            let mut v = ov.cadence_adv_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_adv_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("transforms");
-            let mut v = ov.cadence_trf_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_trf_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("subduction");
-            let mut v = ov.cadence_sub_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_sub_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("flexure");
-            let mut v = ov.cadence_flx_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_flx_every = v.max(1);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("sea");
-            let mut v = ov.cadence_sea_every.max(1);
-            if ui.add(egui::DragValue::new(&mut v).clamp_range(1..=u32::MAX).speed(1)).changed() {
-                ov.cadence_sea_every = v.max(1);
-            }
-        });
-    });
 }
 
-fn apply_simple_palette(
-    ov: &mut overlay::OverlayState,
-    _world: &mut engine::world::World,
+/// 🌍 World Generation - Progressive complexity from presets to detailed control
+fn render_world_generation_unified(
+    ui: &mut egui::Ui,
     ctx: &egui::Context,
+    world: &mut engine::world::World,
+    ov: &mut overlay::OverlayState,
+    tx_cmd: &std::sync::mpsc::Sender<SimCommand>,
 ) {
-    ov.color_mode = if ov.simple_palette == 0 { 0 } else { 1 };
-    ov.show_bathy = true;
+    egui::CollapsingHeader::new("🌍 World Generation")
+        .default_open(true)
+        .show(ui, |ui| {
+            // Quick preset buttons for beginners
+            ui.label("Quick Presets:");
+            ui.horizontal(|ui| {
+                if ui.button("🏝️ Archipelago")
+                    .on_hover_text("Many small islands - great for learning plate tectonics")
+                    .clicked() {
+                    ov.simple_preset = 1;
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
+                }
+                if ui.button("🌍 Pangaea")
+                    .on_hover_text("Supercontinent - shows continental breakup")
+                    .clicked() {
+                    ov.simple_preset = 3;
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
+                }
+                if ui.button("🎲 Random")
+                    .on_hover_text("Balanced random world - good default")
+                    .clicked() {
+                    ov.simple_preset = 0;
+                    generate_world_with_preset(world, ov, ctx, tx_cmd);
+                }
+            });
+            
+            ui.separator();
+            
+            // Basic parameters with smart defaults
+            ui.horizontal(|ui| {
+                ui.label("Plates:")
+                    .on_hover_text("Number of tectonic plates - more plates = more complex tectonics");
+                let mut plates = match ov.simple_preset {
+                    1 => 10,  // Archipelago
+                    2 => 6,   // Continental
+                    3 => 8,   // Supercontinent  
+                    _ => 8,   // Default
+                };
+                let slider = egui::Slider::new(&mut plates, 4..=16).show_value(true);
+                let response = ui.add(slider);
+                
+                // Highlight recommended range
+                if plates >= 6 && plates <= 10 {
+                    response.on_hover_text("✅ Good balance of complexity and performance");
+                } else if plates < 6 {
+                    response.on_hover_text("⚠️ Few plates - simpler but less realistic");
+                } else {
+                    response.on_hover_text("⚠️ Many plates - complex but slower simulation");
+                }
+                
+                // Update preset if changed
+                if plates != match ov.simple_preset { 1 => 10, 2 => 6, 3 => 8, _ => 8 } {
+                    ov.simple_preset = 0; // Custom
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Land fraction:")
+                    .on_hover_text("Percentage of surface that's land vs ocean");
+                let slider = egui::Slider::new(&mut ov.simple_target_land, 0.1..=0.6)
+                    .show_value(true)
+                    .custom_formatter(|n, _| format!("{:.0}%", n * 100.0));
+                let response = ui.add(slider);
+                
+                // Highlight Earth-like range  
+                if ov.simple_target_land >= 0.25 && ov.simple_target_land <= 0.35 {
+                    response.on_hover_text("✅ Earth-like land distribution");
+                } else if ov.simple_target_land < 0.25 {
+                    response.on_hover_text("🌊 Ocean world - mostly water");
+                } else {
+                    response.on_hover_text("🏔️ Continental world - mostly land");
+                }
+            });
+            
+            // Advanced options (collapsible)
+            ui.collapsing("🔬 Advanced Options", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Random seed:")
+                        .on_hover_text("Controls random world generation - same seed = same world");
+                    ui.add(egui::DragValue::new(&mut ov.simple_seed).speed(1000));
+                    if ui.button("🎲").on_hover_text("Generate new random seed").clicked() {
+                        ov.simple_seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                    }
+                });
+                
+                ui.label("Preset details:");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut ov.simple_preset, 0, "Balanced")
+                        .on_hover_text("Good mix of land and ocean");
+                    ui.selectable_value(&mut ov.simple_preset, 1, "Archipelago")
+                        .on_hover_text("Many small continents");
+                    ui.selectable_value(&mut ov.simple_preset, 2, "Continental")
+                        .on_hover_text("Few large continents");
+                    ui.selectable_value(&mut ov.simple_preset, 3, "Supercontinent")
+                        .on_hover_text("One massive landmass");
+                });
+            });
+            
+            ui.separator();
+            
+            // Generate button
+            if ui.button("🌍 Generate New World")
+                .on_hover_text("Create a new world with current settings")
+                .clicked() {
+                generate_world_with_preset(world, ov, ctx, tx_cmd);
+            }
+        });
+}
+
+/// Helper function to generate world with current preset
+fn generate_world_with_preset(
+    world: &mut engine::world::World,
+    ov: &mut overlay::OverlayState,
+    ctx: &egui::Context,
+    tx_cmd: &std::sync::mpsc::Sender<SimCommand>,
+) {
+    let plates = match ov.simple_preset {
+        1 => 10,  // Archipelago
+        2 => 6,   // Continental
+        3 => 8,   // Supercontinent  
+        _ => 8,   // Default
+    };
+    
+    let continents_n = match ov.simple_preset {
+        1 => 4,   // Archipelago - many small continents
+        2 => 2,   // Continental - few large continents
+        3 => 0,   // Supercontinent - triggers specialized generator
+        _ => 3,   // Default - balanced
+    };
+    
+    // Reset/normalize world state for current F & plates
+    world.plates = engine::plates::Plates::new(&world.grid, plates, ov.simple_seed);
+    world.v_en.clone_from(&world.plates.vel_en);
+    world.age_myr.fill(0.0);
+    world.depth_m.fill(0.0);
+    world.c.fill(0.0);
+    world.th_c_m.fill(0.0);
+    world.sediment_m.fill(0.0);
+    world.clock = engine::world::Clock { t_myr: 0.0, step_idx: 0 };
+    world.sea_level_ref = None;
+    
+    // Classify boundaries and initialize
+    world.boundaries = engine::boundaries::Boundaries::classify(
+        &world.grid,
+        &world.plates.plate_id,
+        &world.v_en,
+        0.005,
+    );
+    
+    // Initialize ridge births then baseline bathymetry from age (ocean depths)
+    {
+        let mut ages_tmp = world.age_myr.clone();
+        let _ridge_stats = engine::ridge::apply_ridge(
+            &world.grid,
+            &world.boundaries,
+            &mut ages_tmp,
+            engine::ridge::RidgeParams { fringe_age_myr: 0.0 },
+        );
+        world.age_myr = ages_tmp;
+    }
+    
+    // Set baseline oceanic bathymetry from age
+    let n_cells = world.grid.cells;
+    for i in 0..n_cells {
+        let mut d = engine::age::depth_from_age_plate(
+            world.age_myr[i] as f64, 
+            world.plates.plate_id[i] as f64,
+            0.0, 0.0, 0.0  // Additional required parameters
+        );
+        if d < 10.0 {
+            d = 10.0; // Minimum depth
+        }
+        world.depth_m[i] = d as f32;
+    }
+    
+    // Generate realistic continents with multifractal noise
+    if continents_n > 0 {
+        generate_realistic_continents(world, ov, continents_n);
+        
+        // FALLBACK: If no continental material was created, force create some
+        let c_total_after: f32 = world.c.iter().sum();
+        if c_total_after < 0.1 {
+            println!("[world_gen] WARNING: No continental material created, applying fallback generation");
+            create_simple_fallback_continents(world, ov, continents_n);
+        }
+    }
+    
+    // CRITICAL: Apply continental uplift to create visible land elevation
+    println!("[world_gen] BEFORE uplift: depth_m range [{:.1}, {:.1}]", 
+        world.depth_m.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        world.depth_m.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+    
+    let c_total: f32 = world.c.iter().sum();
+    let th_total: f32 = world.th_c_m.iter().sum();
+    println!("[world_gen] Continental data: C_sum={:.1}, th_c_sum={:.1} m", c_total, th_total);
+    
+    engine::continent::apply_uplift_from_c_thc(&mut world.depth_m, &world.c, &world.th_c_m);
+    
+    println!("[world_gen] AFTER uplift: depth_m range [{:.1}, {:.1}]", 
+        world.depth_m.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        world.depth_m.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+    
+    // Add realistic topographic variation using multifractal noise
+    add_realistic_topography(world, ov);
+    
+    // Mark elevation-dependent systems dirty
     ov.bathy_cache = None;
+    ov.plates_cache = None;
+    ov.vel_cache = None;
+    ov.bounds_cache = None;
     ov.color_dirty = true;
+    ov.world_dirty = true;
+    ov.raster_dirty = true;
+    // Re-enable GPU raster for smooth rendering after generation
+    ov.use_gpu_raster = true;
+    ov.raster_tex = None;
+    ov.raster_tex_id = None;
+    
+    // GPU raster will provide smooth elevation colors; disable redundant CPU overlay
+    // (The unified logic in main loop will set show_bathy = !use_gpu_raster)
+    
+    // CRITICAL: Sync the generated world to the simulation thread
+    let ws = WorldSnapshot {
+        depth_m: world.depth_m.clone(),
+        c: world.c.clone(),
+        th_c_m: world.th_c_m.clone(),
+        sea_eta_m: world.sea.eta_m,
+        plate_id: world.plates.plate_id.clone(),
+        pole_axis: world.plates.pole_axis.clone(),
+        omega_rad_yr: world.plates.omega_rad_yr.clone(),
+        v_en: world.v_en.clone(),
+        age_myr: world.age_myr.clone(),
+    };
+    let _ = tx_cmd.send(SimCommand::SyncWorld(ws));
+    
+    // Force repaint immediately
     ctx.request_repaint();
 }
+
+/// Generate realistic continents with multifractal noise and plate-based seeding
+fn generate_realistic_continents(
+    world: &mut engine::world::World,
+    ov: &overlay::OverlayState,
+    continents_n: u32,
+) {
+    let _n_cells = world.grid.cells;
+    let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+    let target_land_area_m2 = ov.simple_target_land as f64 * total_area;
+    
+    // Clear existing continental data
+    world.c.fill(0.0);
+    world.th_c_m.fill(0.0);
+    
+    // Classify plates as continental or oceanic based on their properties
+    let continental_plates = classify_continental_plates(world, ov);
+    
+    println!("[world_gen] Generating {} continents on {} continental plates", continents_n, continental_plates.len());
+    
+    // Generate continents preferentially on continental plates
+    let mut rng_state = ov.simple_seed;
+    
+    for continent_id in 0..continents_n {
+        // Pick a continental plate for this continent
+        if !continental_plates.is_empty() {
+            rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let plate_idx = (rng_state % (continental_plates.len() as u64)) as usize;
+            let target_plate_id = continental_plates[plate_idx];
+            
+            // Find a good center on this continental plate
+            let center_idx = find_continental_plate_center(world, target_plate_id, rng_state);
+            
+            // Generate continent size based on preset
+            let continent_area_fraction = match ov.simple_preset {
+                1 => 0.15, // Archipelago - smaller continents
+                2 => 0.4,  // Continental - larger continents  
+                3 => 0.8,  // Supercontinent - one massive continent
+                _ => 0.25, // Balanced
+            };
+            
+            let continent_area = target_land_area_m2 * continent_area_fraction / (continents_n as f64);
+            
+            // Generate realistic continent with multifractal noise
+            generate_continent_with_noise(world, center_idx, continent_area, continent_id, rng_state, target_plate_id);
+            
+            println!("[world_gen] Continent {} placed on plate {} at cell {}", continent_id, target_plate_id, center_idx);
+        }
+    }
+}
+
+/// Classify plates as continental or oceanic based on size and position
+fn classify_continental_plates(world: &engine::world::World, _ov: &overlay::OverlayState) -> Vec<u16> {
+    let mut plate_areas = std::collections::HashMap::new();
+    let mut plate_centers = std::collections::HashMap::new();
+    let mut plate_counts = std::collections::HashMap::new();
+    
+    // Calculate area and center for each plate
+    for i in 0..world.grid.cells {
+        let plate_id = world.plates.plate_id[i];
+        let area = world.area_m2[i] as f64;
+        let pos = world.grid.pos_xyz[i];
+        
+        *plate_areas.entry(plate_id).or_insert(0.0) += area;
+        *plate_counts.entry(plate_id).or_insert(0) += 1;
+        
+        let center = plate_centers.entry(plate_id).or_insert([0.0f64; 3]);
+        center[0] += pos[0] as f64;
+        center[1] += pos[1] as f64;
+        center[2] += pos[2] as f64;
+    }
+    
+    // Normalize centers and classify plates
+    let mut continental_plates = Vec::new();
+    let total_area: f64 = world.area_m2.iter().map(|&a| a as f64).sum();
+    let mean_plate_area = total_area / (plate_areas.len() as f64);
+    
+    for (&plate_id, &area) in &plate_areas {
+        // Normalize center
+        if let Some(center) = plate_centers.get_mut(&plate_id) {
+            let count = plate_counts[&plate_id] as f64;
+            center[0] /= count;
+            center[1] /= count; 
+            center[2] /= count;
+        }
+        
+            // Classify as continental if larger than average (continental plates are typically larger)
+        if area > mean_plate_area * 0.8 {
+            continental_plates.push(plate_id);
+            println!("[world_gen] Plate {} classified as CONTINENTAL (area={:.1e} m², mean={:.1e})", 
+                plate_id, area, mean_plate_area);
+        } else {
+            println!("[world_gen] Plate {} classified as oceanic (area={:.1e} m², mean={:.1e})", 
+                plate_id, area, mean_plate_area);
+        }
+    }
+    
+    // Ensure we have at least some continental plates
+    if continental_plates.is_empty() {
+        // If no large plates, pick the largest few plates
+        let mut plate_list: Vec<_> = plate_areas.iter().collect();
+        plate_list.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        
+        let num_continental = (plate_areas.len() / 2).max(1).min(4); // 50% of plates, 1-4 range
+        for i in 0..num_continental {
+            if i < plate_list.len() {
+                continental_plates.push(*plate_list[i].0);
+            }
+        }
+    }
+    
+    continental_plates
+}
+
+/// Find a good center point on a specific continental plate
+fn find_continental_plate_center(world: &engine::world::World, target_plate_id: u16, mut rng_state: u64) -> usize {
+    // Collect all cells belonging to this plate
+    let mut plate_cells = Vec::new();
+    for i in 0..world.grid.cells {
+        if world.plates.plate_id[i] == target_plate_id {
+            plate_cells.push(i);
+        }
+    }
+    
+    if plate_cells.is_empty() {
+        return 0; // Fallback
+    }
+    
+    // Pick a random cell from this plate
+    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+    let idx = (rng_state % (plate_cells.len() as u64)) as usize;
+    plate_cells[idx]
+}
+
+/// Generate a single continent with realistic multifractal noise
+fn generate_continent_with_noise(
+    world: &mut engine::world::World,
+    center_idx: usize,
+    target_area: f64,
+    continent_id: u32,
+    rng_state: u64,
+    target_plate_id: u16,
+) {
+    if center_idx >= world.grid.cells {
+        return;
+    }
+    
+    let center_pos = world.grid.pos_xyz[center_idx];
+    
+    // Estimate continent radius from target area (spherical approximation)
+    let mean_cell_area = world.area_m2.iter().map(|&a| a as f64).sum::<f64>() / (world.grid.cells as f64);
+    let target_cells = target_area / mean_cell_area;
+    let continent_radius = (target_cells / std::f64::consts::PI).sqrt() * 0.3; // Increased scale for visibility
+    
+    println!("[world_gen] Continent {}: target_area={:.1e} m², target_cells={:.0}, radius={:.3}", 
+        continent_id, target_area, target_cells, continent_radius);
+    
+    // Multifractal noise parameters
+    let noise_scales = [0.5, 1.0, 2.0, 4.0, 8.0]; // Multiple octaves
+    let noise_weights = [1.0, 0.5, 0.25, 0.125, 0.0625]; // Decreasing weights
+    
+    for i in 0..world.grid.cells {
+        // Only place continents on the target continental plate
+        if world.plates.plate_id[i] != target_plate_id {
+            continue;
+        }
+        
+        let pos = world.grid.pos_xyz[i];
+        let distance = ((pos[0] - center_pos[0]).powi(2) + 
+                       (pos[1] - center_pos[1]).powi(2) + 
+                       (pos[2] - center_pos[2]).powi(2)).sqrt();
+        
+        if distance < (continent_radius * 2.0) as f32 {
+            // Base falloff from center
+            let base_falloff = (1.0 - (distance as f64 / (continent_radius * 1.5))).max(0.0);
+            
+            if base_falloff > 0.0 {
+                // Generate multifractal noise for realistic continental shape
+                let mut noise_value = 0.0;
+                let mut total_weight = 0.0;
+                
+                for (scale, weight) in noise_scales.iter().zip(noise_weights.iter()) {
+                    let noise_freq = scale / continent_radius;
+                    let noise_sample = simplex_noise_3d(
+                        pos[0] as f64 * noise_freq,
+                        pos[1] as f64 * noise_freq,
+                        pos[2] as f64 * noise_freq,
+                        rng_state.wrapping_add(continent_id as u64),
+                    );
+                    noise_value += noise_sample * weight;
+                    total_weight += weight;
+                }
+                
+                noise_value /= total_weight;
+                
+                // Combine base falloff with noise for realistic continental margins
+                let continental_strength = (base_falloff * (0.7 + 0.3 * noise_value)).max(0.0);
+                
+                if continental_strength > 0.05 { // Lower threshold to ensure continents are created
+                    // Continental fraction (0.6-0.9 based on noise)
+                    let c_value = (0.6 + 0.3 * continental_strength) as f32;
+                    world.c[i] = c_value.max(world.c[i]);
+                    
+                    // Continental thickness variation (20-45 km based on noise and position)
+                    let thickness_base = 30_000.0; // 30 km base (more realistic)
+                    let thickness_variation = 20_000.0 * continental_strength; // Up to 20 km variation
+                    let thickness = (thickness_base + thickness_variation) as f32;
+                    world.th_c_m[i] = thickness.max(world.th_c_m[i]);
+                    
+                    // Debug: Log first few continental cells
+                    if continent_id == 0 && world.c[i] > 0.5 {
+                        println!("[world_gen] Continental cell {}: C={:.2}, th_c={:.0}m, strength={:.2}", 
+                                i, world.c[i], world.th_c_m[i], continental_strength);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Add realistic topographic variation using multifractal noise
+fn add_realistic_topography(world: &mut engine::world::World, ov: &overlay::OverlayState) {
+    let rng_state = ov.simple_seed.wrapping_add(12345); // Different seed for topography
+    
+    for i in 0..world.grid.cells {
+        let pos = world.grid.pos_xyz[i];
+        
+        // Only add topography to continental areas
+        if world.c[i] > 0.1 {
+            // Generate multifractal elevation noise
+            let mut elevation_noise = 0.0;
+            let mut total_weight = 0.0;
+            
+            // Multiple octaves for realistic mountain ranges
+            let scales = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+            let weights = [1.0, 0.6, 0.4, 0.3, 0.2, 0.1];
+            
+            for (scale, weight) in scales.iter().zip(weights.iter()) {
+                let noise_freq = scale * 0.1; // Scale for continental features
+                let noise_sample = simplex_noise_3d(
+                    pos[0] as f64 * noise_freq,
+                    pos[1] as f64 * noise_freq, 
+                    pos[2] as f64 * noise_freq,
+                    rng_state,
+                );
+                elevation_noise += noise_sample * weight;
+                total_weight += weight;
+            }
+            
+            elevation_noise /= total_weight;
+            
+            // Scale elevation based on continental strength and thickness
+            let continental_strength = world.c[i];
+            let max_elevation = 3000.0; // 3 km maximum elevation
+            let elevation_variation = (elevation_noise * max_elevation * continental_strength as f64) as f32;
+            
+            // Apply topographic variation to depth (negative for elevation)
+            world.depth_m[i] -= elevation_variation.abs(); // Make sure land is above sea level
+        }
+    }
+}
+
+/// Simplified 3D simplex noise implementation
+fn simplex_noise_3d(x: f64, y: f64, z: f64, seed: u64) -> f64 {
+    // Simple deterministic pseudo-noise using trigonometric functions
+    // This is a simplified version - in production you'd use a proper noise library
+    
+    let mut hash = seed;
+    hash = hash.wrapping_mul(1664525).wrapping_add(1013904223);
+    
+    let a = (x * 12.9898 + y * 78.233 + z * 37.719 + hash as f64 * 0.001).sin() * 43758.5453;
+    let b = (x * 93.9898 + y * 67.345 + z * 83.217 + hash as f64 * 0.002).sin() * 47896.6789;
+    let c = (x * 23.1234 + y * 56.789 + z * 91.234 + hash as f64 * 0.003).sin() * 39217.9876;
+    
+    // Combine and normalize to [-1, 1]
+    let noise = (a.fract() + b.fract() + c.fract()) / 3.0;
+    (noise - 0.5) * 2.0
+}
+
+/// Simple fallback continent generation that definitely works
+fn create_simple_fallback_continents(
+    world: &mut engine::world::World,
+    ov: &overlay::OverlayState,
+    continents_n: u32,
+) {
+    println!("[world_gen] Creating {} fallback continents", continents_n);
+    
+    let n_cells = world.grid.cells;
+    let mut rng_state = ov.simple_seed;
+    
+    // Create simple, guaranteed-to-work continents
+    for continent_id in 0..continents_n {
+        rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let center_idx = (rng_state % (n_cells as u64)) as usize;
+        
+        // Simple circular continent - guaranteed to create material
+        let center_pos = world.grid.pos_xyz[center_idx];
+        let radius = 0.2f32; // Large enough to be visible
+        
+        let mut cells_modified = 0;
+        for i in 0..n_cells {
+            let pos = world.grid.pos_xyz[i];
+            let distance = ((pos[0] - center_pos[0]).powi(2) + 
+                           (pos[1] - center_pos[1]).powi(2) + 
+                           (pos[2] - center_pos[2]).powi(2)).sqrt();
+            
+            if distance < radius {
+                let falloff = (1.0 - (distance / radius)).max(0.0);
+                if falloff > 0.1 {
+                    world.c[i] = (0.8 * falloff).max(world.c[i]);
+                    world.th_c_m[i] = (40_000.0 * falloff).max(world.th_c_m[i]); // 40 km thick
+                    cells_modified += 1;
+                }
+            }
+        }
+        
+        println!("[world_gen] Fallback continent {} at cell {}: radius={:.2}, cells_modified={}", 
+            continent_id, center_idx, radius, cells_modified);
+    }
+    
+    let c_total: f32 = world.c.iter().sum();
+    let th_total: f32 = world.th_c_m.iter().sum();
+    println!("[world_gen] Fallback result: C_sum={:.1}, th_c_sum={:.1} m", c_total, th_total);
+}
+
+/// 🎨 Visual Overlays - Organized by complexity with keyboard shortcuts
+fn render_visual_overlays_unified(
+    ui: &mut egui::Ui,
+    _ctx: &egui::Context,
+    _world: &mut engine::world::World,
+    ov: &mut overlay::OverlayState,
+) {
+    // ============= FLAT UI STRUCTURE - NO NESTED GROUPS =============
+    
+    // Visual Overlays Section
+    egui::CollapsingHeader::new("🎨 Visual Overlays")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.show_plates, "Plate Boundaries [1]");
+                ui.checkbox(&mut ov.show_vel, "Plate Velocity [2]");
+                ui.checkbox(&mut ov.show_continents, "Continental Crust [C]");
+                ui.checkbox(&mut ov.show_bounds, "Boundary Types [3]");
+            });
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.show_subduction, "Subduction Zones [7]");
+                ui.checkbox(&mut ov.show_transforms, "Transform Faults [0]");
+                ui.checkbox(&mut ov.show_age_depth, "Age-Depth [6]");
+                ui.checkbox(&mut ov.show_plate_id, "Plate ID Colors");
+            });
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.show_triple_junctions, "Triple Junctions [5]");
+                ui.checkbox(&mut ov.show_plate_adjacency, "Plate Adjacency [4]");
+                ui.checkbox(&mut ov.show_flexure, "Flexure Response");
+                ui.checkbox(&mut ov.debug_wireframes, "Debug Wireframes");
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Color mode:");
+                ui.selectable_value(&mut ov.color_mode, 0, "Elevation");
+                ui.selectable_value(&mut ov.color_mode, 1, "Biomes");
+                ui.checkbox(&mut ov.shade_on, "Hillshading");
+                if ov.shade_on {
+                    ui.add(egui::Slider::new(&mut ov.shade_strength, 0.0..=1.0).text("Strength"));
+                }
+                ui.checkbox(&mut ov.legend_on, "Show Legend");
+            });
+            
+            // Invalidate caches when overlays change
+            if ui.ui_contains_pointer() {
+                ov.plates_cache = None;
+                ov.vel_cache = None;
+                ov.bounds_cache = None;
+                ov.color_dirty = true;
+            }
+        });
+
+    // Force Balance Parameters Section
+    egui::CollapsingHeader::new("⚖️ Force Balance Parameters")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.checkbox(&mut ov.enable_force_balance, "Enable Force Balance")
+                .on_hover_text("Controls automatic adjustment of plate rotation rates based on boundary forces");
+            
+            ui.label("Gain (dimensionless):");
+            ui.add(egui::Slider::new(&mut ov.fb_gain, 1e-12..=1e-5).logarithmic(true))
+                .on_hover_text("Primary control for plate motion responsiveness. Higher = faster rotation changes. Typical: 1e-10 to 1e-8");
+            
+            ui.label("Damping (per Myr):");
+            ui.add(egui::Slider::new(&mut ov.fb_damp_per_myr, 0.001..=1.0).logarithmic(true))
+                .on_hover_text("Stabilizes plate motion. Higher = more damping, slower changes. Typical: 0.01 to 0.1");
+            
+            ui.label("Convergent Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_conv, 0.1..=5.0))
+                .on_hover_text("Force multiplier for convergent boundaries (subduction/collision). Typical: 0.5 to 2.0");
+            
+            ui.label("Divergent Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_div, 0.1..=5.0))
+                .on_hover_text("Force multiplier for divergent boundaries (spreading ridges). Typical: 0.2 to 1.0");
+            
+            ui.label("Transform Coefficient:");
+            ui.add(egui::Slider::new(&mut ov.fb_k_trans, 0.01..=1.0))
+                .on_hover_text("Force multiplier for transform boundaries (lateral motion). Typical: 0.05 to 0.2");
+            
+            ui.label("Max Ω Change (rad/yr per step):");
+            ui.add(egui::Slider::new(&mut ov.fb_max_domega, 1e-12..=1e-6).logarithmic(true))
+                .on_hover_text("Maximum rotation rate change per time step. Prevents instability. Typical: 1e-9 to 1e-7");
+            
+            ui.label("Max Ω Total (rad/yr):");
+            ui.add(egui::Slider::new(&mut ov.fb_max_omega, 1e-9..=1e-4).logarithmic(true))
+                .on_hover_text("Maximum absolute plate rotation rate. Real plates: ~1e-7 to 1e-5 rad/yr");
+            
+            ui.label("Force Balance Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_force_balance_every, 1..=10))
+                .on_hover_text("How often to apply force balance updates. 1 = every step (dynamic), higher = less frequent. CRITICAL: Must be >0 for plates to move!");
+        });
+
+    // Plate Motion & Kinematics
+    egui::CollapsingHeader::new("🔄 Plate Motion & Kinematics")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Rigid Motion Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_rigid_motion, 1..=10))
+                .on_hover_text("How often to update plate velocities. 1=every step, higher=less frequent. Affects motion smoothness.");
+            
+            ui.label("Force Balance Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_force_balance, 1..=20))
+                .on_hover_text("How often to adjust plate rotation rates. Higher = more stable but less responsive motion.");
+        });
+
+    // Plate Boundaries & Tectonics  
+    egui::CollapsingHeader::new("🌋 Plate Boundaries & Tectonics")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Transform Faults Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_transforms, 1..=20))
+                .on_hover_text("Frequency of transform fault processing. Controls lateral plate motion and strike-slip zones.");
+            
+            ui.label("Subduction Zones Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_subduction, 1..=20))
+                .on_hover_text("Frequency of subduction processing. Controls convergent margin dynamics and volcanic arcs.");
+            
+            ui.label("Oceanic Rifting Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_rifting, 0..=50))
+                .on_hover_text("Continental breakup and oceanic rifting. 0=disabled. Controls new ocean formation.");
+            
+            ui.label("Ridge Birth Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_ridge_birth, 0..=50))
+                .on_hover_text("New spreading ridge formation. 0=disabled. Resets seafloor age at divergent boundaries.");
+        });
+
+    // Mountain Building & Collisions
+    egui::CollapsingHeader::new("🏔️ Mountain Building & Collisions")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Orogeny Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_orogeny, 1..=50))
+                .on_hover_text("Continental collision and mountain building. Creates orogenic belts when continents collide.");
+            
+            ui.label("Oceanic Accretion Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_accretion, 0..=50))
+                .on_hover_text("Growth of volcanic arcs and accretionary wedges at subduction zones. 0=disabled.");
+        });
+
+    // Isostasy & Buoyancy
+    egui::CollapsingHeader::new("⚖️ Isostasy & Buoyancy")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Flexural Response Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_flexure, 1..=10))
+                .on_hover_text("Lithospheric bending under loads. Controls crustal deflection from mountains and sediments.");
+            
+            ui.label("Isostatic Adjustment Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_isostasy, 1..=10))
+                .on_hover_text("Global sea level regulation and isostatic rebound. Maintains target land fraction.");
+            
+            ui.label("Continental Buoyancy Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_continental_buoyancy, 1..=10))
+                .on_hover_text("Buoyant response of continental crust. Controls continental elevation relative to oceans.");
+        });
+
+    // Surface Processes
+    egui::CollapsingHeader::new("🌊 Surface Processes")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Surface Processes Cadence (steps):");
+            ui.add(egui::Slider::new(&mut ov.cadence_surface_processes, 1..=50))
+                .on_hover_text("Erosion, sedimentation, and landscape evolution. Controls weathering and transport of material.");
+        });
+}
+
+/// ⚙️ Physics Processes - Progressive complexity with smart defaults
+fn render_physics_processes_unified(
+    ui: &mut egui::Ui,
+    _ctx: &egui::Context,
+    _world: &mut engine::world::World,
+    ov: &mut overlay::OverlayState,
+) {
+    egui::CollapsingHeader::new("⚙️ Physics Processes")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("Core Processes (Essential):");
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.enable_rigid_motion, "Rigid Motion")
+                    .on_hover_text("✅ Essential: plate movement and kinematics");
+                ui.checkbox(&mut ov.enable_flexure, "Flexure")
+                    .on_hover_text("✅ Essential: crustal bending under loads");
+            });
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.enable_isostasy, "Isostasy")
+                    .on_hover_text("✅ Essential: sea level regulation and crustal equilibrium");
+                ui.checkbox(&mut ov.enable_continental_buoyancy, "Continental Buoyancy")
+                    .on_hover_text("✅ Essential: continent elevation above sea level");
+            });
+            
+            ui.separator();
+            
+            ui.label("Geological Processes:");
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.enable_subduction, "Subduction")
+                    .on_hover_text("Convergent plate boundaries - where oceanic plates dive under others");
+                ui.checkbox(&mut ov.enable_transforms, "Transforms")
+                    .on_hover_text("Lateral plate motion - strike-slip faults and shear zones");
+            });
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.enable_surface_processes, "Surface Processes")
+                    .on_hover_text("Erosion and sediment transport - shapes landscapes over time");
+                ui.checkbox(&mut ov.enable_orogeny, "Orogeny")
+                    .on_hover_text("Mountain building from continent-continent collision");
+            });
+            
+            // Advanced Processes (collapsible)
+            ui.collapsing("🔬 Advanced Processes", |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut ov.enable_accretion, "Accretion")
+                        .on_hover_text("Expert: terrane attachment at convergent margins");
+                    ui.checkbox(&mut ov.enable_rifting, "Rifting")
+                        .on_hover_text("Expert: continental breakup and passive margin formation");
+                });
+                
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut ov.enable_ridge_birth, "Ridge Birth")
+                        .on_hover_text("Expert: formation of new spreading centers");
+                    ui.checkbox(&mut ov.enable_force_balance, "Force Balance")
+                        .on_hover_text("Expert: plate motion dynamics and driving forces");
+                });
+            });
+            
+            ui.separator();
+            
+            // Backend Configuration (collapsible)
+            ui.collapsing("🔬 Backend Configuration", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Flexure:")
+                        .on_hover_text("Choose computation method for crustal flexure");
+                    if ui.selectable_label(ov.flexure_backend_cpu, "CPU (Winkler)")
+                        .on_hover_text("✅ Reliable - Always works, good for learning")
+                        .clicked() {
+                        ov.flexure_backend_cpu = true;
+                    }
+                    if ui.selectable_label(!ov.flexure_backend_cpu, "GPU (Multigrid)")
+                        .on_hover_text("🔬 Advanced - Faster but requires compatible hardware")
+                        .clicked() {
+                        ov.flexure_backend_cpu = false;
+                    }
+                });
+                
+                if !ov.flexure_backend_cpu {
+                    ui.horizontal(|ui| {
+                        ui.label("GPU Levels:");
+                        ui.add(egui::Slider::new(&mut ov.flexure_gpu_levels, 1..=5)
+                            .show_value(true))
+                            .on_hover_text("Multigrid levels - more levels = more accurate but slower");
+                        ui.label("V-cycles:");
+                        ui.add(egui::Slider::new(&mut ov.flexure_gpu_cycles, 1..=8)
+                            .show_value(true))
+                            .on_hover_text("Solver iterations - more cycles = more accurate");
+                    });
+                }
+            });
+            
+            // Performance Tuning (collapsible)
+            ui.collapsing("🔬 Performance Tuning", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Cadence preset:")
+                        .on_hover_text("Balance between simulation quality and performance");
+                    ui.selectable_value(&mut ov.cadence_preset, "Balanced".to_string(), "Balanced")
+                        .on_hover_text("✅ Recommended - good quality and performance");
+                    ui.selectable_value(&mut ov.cadence_preset, "Performance".to_string(), "Performance")
+                        .on_hover_text("⚡ Faster - reduced quality for speed");
+                    ui.selectable_value(&mut ov.cadence_preset, "Quality".to_string(), "Quality")
+                        .on_hover_text("🔬 Slower - maximum quality and accuracy");
+                });
+                
+                if ov.cadence_preset == "Custom" {
+                    ui.label("Custom cadences (steps between executions):");
+                    // Custom cadence controls would go here
+                    ui.label("(Custom cadence controls - see Process Cadences panel)");
+                }
+            });
+        });
+}
+
+/// 🐛 Debug & Diagnostics - Expert features and developer tools
+fn render_debug_diagnostics_unified(
+    ui: &mut egui::Ui,
+    _ctx: &egui::Context,
+    _world: &mut engine::world::World,
+    ov: &mut overlay::OverlayState,
+) {
+    egui::CollapsingHeader::new("🐛 Debug & Diagnostics")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("🔬 Expert Features:");
+            
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ov.debug_enable_all, "Run All Passes")
+                    .on_hover_text("Force all physics processes to run every step (ignores cadences)");
+                ui.checkbox(&mut ov.disable_subduction, "Disable Subduction")
+                    .on_hover_text("Temporarily disable subduction for debugging");
+            });
+            
+            ui.separator();
+            
+            ui.label("Performance & Logging:");
+            ui.horizontal(|ui| {
+                ui.label("Profiling burst:");
+                ui.add(egui::DragValue::new(&mut ov.debug_burst_steps).speed(1))
+                    .on_hover_text("Number of steps to profile for performance analysis");
+            });
+            
+            ui.separator();
+            
+            ui.label("Export Tools:");
+            if ui.button("📄 Export Debug CSV")
+                .on_hover_text("Export current simulation state for analysis")
+                .clicked() {
+                // Export functionality would be triggered here
+            }
+            
+            if ui.button("📊 Export Performance Log")
+                .on_hover_text("Export timing and performance metrics")
+                .clicked() {
+                // Performance export would be triggered here  
+            }
+        });
+}
+
 fn log_grid_info() {
     let f: u32 = 64;
     // Build or load cache (path-agnostic in engine; here we just build).
@@ -1779,8 +1372,10 @@ fn main() {
         globe_cam: None,
     };
     let mut ov = overlay::OverlayState::default();
+    // GPU buffer manager for consistent elevation data
+    let mut gpu_buf_mgr = GpuBufferManager::new();
     // Edge-triggered snapshots state
-    let next_snapshot_t: f64 = f64::INFINITY;
+    let _next_snapshot_t: f64 = f64::INFINITY;
     let mut flex = plot_flexure::FlexureUI::default();
     let mut age_plot = plot_age_depth::AgeDepthUIState::default();
     // T-020: Construct device field buffers sized to the grid (then drop)
@@ -1821,82 +1416,110 @@ fn main() {
     let mut fps: f32 = 0.0;
     let _nplates: usize = world.plates.pole_axis.len();
 
-    // Background stepping worker plumbing
+    // Background simulation thread with unified world state sync
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
-    // Removed unused SimCtrl
-    let (tx_snap, rx_snap) = mpsc::channel::<(Vec<f32>, f32, f64)>();
-    // Simulation thread command channel and busy flag
+    
+    // Single world update channel - no separate elevation stream
+    let (tx_world, rx_world) = mpsc::channel::<WorldSnapshot>();
     let (tx_cmd, rx_cmd) = mpsc::channel::<SimCommand>();
     let sim_busy = Arc::new(AtomicBool::new(false));
     let sim_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-    // Removed unused sim_stop
-    // Capture a complete initial snapshot from the UI world to seed the simulation thread
-    let init_snapshot = WorldSnapshot {
-        depth_m: world.depth_m.clone(),
-        c: world.c.clone(),
-        th_c_m: world.th_c_m.clone(),
-        sea_eta_m: world.sea.eta_m,
-        plate_id: world.plates.plate_id.clone(),
-        pole_axis: world.plates.pole_axis.clone(),
-        omega_rad_yr: world.plates.omega_rad_yr.clone(),
-        v_en: world.v_en.clone(),
-        age_myr: world.age_myr.clone(),
-    };
+    
+    // Initialize background simulation thread
     {
-        let tx_snap_bg = tx_snap.clone();
+        let tx_world_bg = tx_world.clone();
         let sim_busy_bg = sim_busy.clone();
         let rx_cmd_bg = rx_cmd;
-        let init_ws = init_snapshot;
+        let init_world = WorldSnapshot {
+            depth_m: world.depth_m.clone(),
+            c: world.c.clone(),
+            th_c_m: world.th_c_m.clone(),
+            sea_eta_m: world.sea.eta_m,
+            plate_id: world.plates.plate_id.clone(),
+            pole_axis: world.plates.pole_axis.clone(),
+            omega_rad_yr: world.plates.omega_rad_yr.clone(),
+            v_en: world.v_en.clone(),
+            age_myr: world.age_myr.clone(),
+        };
+        
         let sim_thread = std::thread::spawn(move || {
-            // Separate simulation world to avoid blocking UI
-            let f: u32 = 64;
-            let mut sim_world = engine::world::World::new(f, 8, 12345);
-            // Seed world with the initial snapshot
-            if sim_world.depth_m.len() == init_ws.depth_m.len() {
-                sim_world.depth_m = init_ws.depth_m;
+            let mut sim_world = engine::world::World::new(64, 8, 12345);
+            
+            // Initialize from snapshot
+            if sim_world.depth_m.len() == init_world.depth_m.len() {
+                sim_world.depth_m = init_world.depth_m;
                 sim_world.depth_stage_m.clone_from(&sim_world.depth_m);
             }
-            if sim_world.c.len() == init_ws.c.len() { sim_world.c = init_ws.c; }
-            if sim_world.th_c_m.len() == init_ws.th_c_m.len() { sim_world.th_c_m = init_ws.th_c_m; }
-            sim_world.sea.eta_m = init_ws.sea_eta_m;
-            if sim_world.plates.plate_id.len() == init_ws.plate_id.len() { sim_world.plates.plate_id = init_ws.plate_id; }
-            if sim_world.plates.pole_axis.len() == init_ws.pole_axis.len() { sim_world.plates.pole_axis = init_ws.pole_axis; }
-            if sim_world.plates.omega_rad_yr.len() == init_ws.omega_rad_yr.len() { sim_world.plates.omega_rad_yr = init_ws.omega_rad_yr; }
-            if sim_world.v_en.len() == init_ws.v_en.len() { sim_world.v_en = init_ws.v_en; } else {
-                sim_world.v_en = engine::plates::velocity_en_m_per_yr(&sim_world.grid, &sim_world.plates, &sim_world.plates.plate_id);
-            }
-            if sim_world.age_myr.len() == init_ws.age_myr.len() { sim_world.age_myr = init_ws.age_myr; }
-            // Ensure boundaries consistent with current kinematics
-            sim_world.boundaries = engine::boundaries::Boundaries::classify(
-                &sim_world.grid,
-                &sim_world.plates.plate_id,
-                &sim_world.v_en,
-                0.005,
-            );
+            if sim_world.c.len() == init_world.c.len() { sim_world.c = init_world.c; }
+            if sim_world.th_c_m.len() == init_world.th_c_m.len() { sim_world.th_c_m = init_world.th_c_m; }
+            sim_world.sea.eta_m = init_world.sea_eta_m;
+            if sim_world.plates.plate_id.len() == init_world.plate_id.len() { sim_world.plates.plate_id = init_world.plate_id; }
+            if sim_world.plates.pole_axis.len() == init_world.pole_axis.len() { sim_world.plates.pole_axis = init_world.pole_axis; }
+            if sim_world.plates.omega_rad_yr.len() == init_world.omega_rad_yr.len() { sim_world.plates.omega_rad_yr = init_world.omega_rad_yr; }
+            if sim_world.v_en.len() == init_world.v_en.len() { sim_world.v_en = init_world.v_en; }
+            if sim_world.age_myr.len() == init_world.age_myr.len() { sim_world.age_myr = init_world.age_myr; }
+            sim_world.boundaries = engine::boundaries::Boundaries::classify(&sim_world.grid, &sim_world.plates.plate_id, &sim_world.v_en, 0.005);
+            
             while let Ok(cmd) = rx_cmd_bg.recv() {
                 match cmd {
-                    SimCommand::Step(cfg) => {
+                    SimCommand::Step(cfg, process_flags) => {
                         sim_busy_bg.store(true, Ordering::SeqCst);
-                        let mut elev_tmp: Vec<f32> = vec![0.0; sim_world.depth_m.len()];
-                        let mut eta = sim_world.sea.eta_m;
-                        engine::pipeline::step_full(
-                            &mut sim_world,
-                            engine::pipeline::SurfaceFields {
-                                elev_m: &mut elev_tmp,
-                                eta_m: &mut eta,
-                            },
-                            cfg,
-                        );
-                        sim_world.sea.eta_m = eta;
-                        // Compute elevation as z = eta - depth
-                        let elev_now: Vec<f32> =
-                            sim_world.depth_m.iter().map(|&d| sim_world.sea.eta_m - d).collect();
-                        let _ =
-                            tx_snap_bg.send((elev_now, sim_world.sea.eta_m, sim_world.clock.t_myr));
+                        
+                        // Convert UI flags to unified PhysicsConfig
+                        let mut config = engine::config::PhysicsConfig::simple_mode();
+                        config.dt_myr = cfg.dt_myr;
+                        config.target_land_frac = cfg.target_land_frac;
+                        config.freeze_eta = cfg.freeze_eta;
+                        
+                        // Apply process enables
+                        config.enable_rigid_motion = process_flags.enable_rigid_motion;
+                        config.enable_subduction = process_flags.enable_subduction;
+                        config.enable_transforms = process_flags.enable_transforms;
+                        config.enable_flexure = process_flags.enable_flexure;
+                        config.enable_surface_processes = process_flags.enable_surface_processes;
+                        config.enable_isostasy = process_flags.enable_isostasy;
+                        config.enable_continental_buoyancy = process_flags.enable_continental_buoyancy;
+                        config.enable_orogeny = process_flags.enable_orogeny;
+                        config.enable_accretion = process_flags.enable_accretion;
+                        config.enable_rifting = process_flags.enable_rifting;
+                        config.enable_ridge_birth = process_flags.enable_ridge_birth;
+                        
+                        // Apply flexure backend
+                        config.flexure_backend = if process_flags.flexure_backend_cpu {
+                            engine::flexure_manager::FlexureBackend::CpuWinkler
+                        } else {
+                            engine::flexure_manager::FlexureBackend::GpuMultigrid {
+                                levels: process_flags.flexure_gpu_levels,
+                                cycles: process_flags.flexure_gpu_cycles,
+                            }
+                        };
+                        
+                        // Apply cadence config
+                        config.cadence_config = process_flags.cadence_config;
+                        
+                        // Run unified pipeline step
+                        let mut pipeline = engine::unified_pipeline::UnifiedPipeline::new(config);
+                        let mode = engine::config::PipelineMode::Realtime { preserve_depth: true };
+                        let _result = pipeline.step(&mut sim_world, mode);
+                        
+                        // Send complete world state (unified approach)
+                        let ws = WorldSnapshot {
+                            depth_m: sim_world.depth_m.clone(),
+                            c: sim_world.c.clone(),
+                            th_c_m: sim_world.th_c_m.clone(),
+                            sea_eta_m: sim_world.sea.eta_m,
+                            plate_id: sim_world.plates.plate_id.clone(),
+                            pole_axis: sim_world.plates.pole_axis.clone(),
+                            omega_rad_yr: sim_world.plates.omega_rad_yr.clone(),
+                            v_en: sim_world.v_en.clone(),
+                            age_myr: sim_world.age_myr.clone(),
+                        };
+                        let _ = tx_world_bg.send(ws);
                         sim_busy_bg.store(false, Ordering::SeqCst);
                     }
                     SimCommand::SyncWorld(ws) => {
+                        // Update simulation world from UI (e.g., after Generate World)
                         if sim_world.depth_m.len() == ws.depth_m.len() {
                             sim_world.depth_m = ws.depth_m;
                             sim_world.depth_stage_m.clone_from(&sim_world.depth_m);
@@ -1917,14 +1540,11 @@ fn main() {
                 }
             }
         });
+        
         if let Ok(mut h) = sim_handle.lock() {
             *h = Some(sim_thread);
         }
     }
-    // dt now comes from ov.sim_dt_myr
-    // Removed unused stepping cadence variables
-    // Snapshots frequency (Myr)
-    // Removed unused snapshot interval
 
     event_loop
     .run(move |event, elwt| {
@@ -1958,37 +1578,35 @@ fn main() {
                                     println!("[ui] T-505 done | drawer={} | mode={}", ov.drawer_open, if ov.mode_simple { "simple" } else { "advanced" });
                                     ov.t505_logged = true;
                                 }
-                            if !ov.mode_simple {
+                            // Unified overlay shortcuts available in both Simple and Advanced modes
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { ov.show_plates = !ov.show_plates; ov.plates_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { ov.show_vel = !ov.show_vel; ov.vel_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { ov.show_bounds = !ov.show_bounds; ov.bounds_cache = None; }
+                            if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { _continents_dirty = true; } }
+                            if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
+                            
+                            // Advanced-only shortcuts (complex overlays and debug features)
+                            if ov.ui_mode.show_advanced_overlays() {
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_plate_adjacency = !ov.show_plate_adjacency; ov.net_adj_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_triple_junctions = !ov.show_triple_junctions; ov.net_tj_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { ov.show_age = !ov.show_age; ov.age_cache = None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { ov.show_bathy = !ov.show_bathy; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { ov.show_age_depth = !ov.show_age_depth; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
+                                if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::A)) { age_plot.show = !age_plot.show; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::M)) { ov.show_map_color_panel = !ov.show_map_color_panel; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::S)) { ov.surface_enable = !ov.surface_enable; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { ov.show_subduction = !ov.show_subduction; ov.subd_trench=None; ov.subd_arc=None; ov.subd_backarc=None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::Num0)) { ov.show_transforms = !ov.show_transforms; ov.trans_pull=None; ov.trans_rest=None; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::C)) { ov.show_continents = !ov.show_continents; if ov.show_continents && (ov.mesh_continents.is_none() || ov.mesh_coastline.is_none()) { _continents_dirty = true; } }
                                 if ctx.input(|i| i.key_pressed(egui::Key::L)) { ov.apply_sea_level = !ov.apply_sea_level; ov.bathy_cache = None; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::F)) { flex.show = !flex.show; if flex.show { flex.recompute(); } }
                                 if ctx.input(|i| i.key_pressed(egui::Key::G)) { ov.show_flexure = !ov.show_flexure; _flex_dirty = true; }
-                                if ctx.input(|i| i.key_pressed(egui::Key::H)) { ov.show_hud = !ov.show_hud; }
                                 if ctx.input(|i| i.key_pressed(egui::Key::Y)) { ov.show_hypsometry = !ov.show_hypsometry; }
-                            } else {
-                                // In Simple mode, force color layer on and ignore hide-map hotkeys
-                                ov.show_bathy = true;
                             }
+                            
+                            // GPU raster provides base elevation colors; disable redundant CPU bathy overlay
+                            ov.show_bathy = !ov.use_gpu_raster;
 
                             egui::TopBottomPanel::top("hud").show(ctx, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(format!("Aulé Viewer v{}", env!("CARGO_PKG_VERSION")));
-                                    ui.separator();
-                                    ui.label("Mode:");
-                                    ui.checkbox(&mut ov.mode_simple, "Simple mode");
                                     ui.separator();
                                     ui.label("View:");
                                     ui.selectable_value(&mut ov.view_mode, overlay::ViewMode::Map, "Map 2D");
@@ -2002,17 +1620,15 @@ fn main() {
                                         ov.drawer_open = !ov.drawer_open;
                                     }
                                     ui.separator();
-                                    // Live land fraction (area-weighted) using ELEV_CURR if available to match guard slice
-                                    let land_pct_now: f64 = unsafe {
-                                        if let Some(curr) = ELEV_CURR.as_ref() {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
-                                            for (&z, &a) in curr.iter().zip(world.area_m2.iter()) { area_sum += a as f64; if z as f64 > 0.0 { land_area += a as f64; } }
-                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
-                                        } else {
-                                            let mut area_sum = 0.0f64; let mut land_area = 0.0f64;
-                                            for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { area_sum += a as f64; if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } }
-                                            if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
+                                    // Live land fraction (area-weighted) directly from world data
+                                    let land_pct_now: f64 = {
+                                        let mut area_sum = 0.0f64; 
+                                        let mut land_area = 0.0f64;
+                                        for (&d, &a) in world.depth_m.iter().zip(world.area_m2.iter()) { 
+                                            area_sum += a as f64; 
+                                            if (world.sea.eta_m as f64 - d as f64) > 0.0 { land_area += a as f64; } 
                                         }
+                                        if area_sum > 0.0 { 100.0 * (land_area / area_sum) } else { 0.0 }
                                     };
                                     ui.label(format!("Land: {:.1}%", land_pct_now));
                                 });
@@ -2027,11 +1643,8 @@ fn main() {
                                     egui::ScrollArea::vertical()
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
-                                                if ov.mode_simple {
-                                                    render_simple_panels(ui, ctx, &mut world, &mut ov, &tx_cmd);
-                                                } else {
-                                                    render_advanced_panels(ui, ctx, &mut world, &mut ov);
-                                                }
+                                                // Render unified progressive UI (replaces Simple/Advanced modes)
+                                                render_unified_progressive_panels(ui, ctx, &mut world, &mut ov, &tx_cmd);
                                                 ui.separator();
                                                 ui.collapsing("Debug", |ui| {
                                                     if ui.button("Export raster debug CSV").clicked() {
@@ -2047,15 +1660,40 @@ fn main() {
                                         });
                                 });
                             }
-                            // Drain any pending simulation snapshots (non-blocking)
-                            if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                                unsafe {
-                                    if ELEV_CURR.is_none() { ELEV_CURR = Some(vec![0.0; elev.len()]); }
-                                    if let Some(curr) = ELEV_CURR.as_mut() { *curr = elev; }
-                                }
-                                world.sea.eta_m = eta;
-                                world.clock.t_myr = t_myr;
+                            // Atomic world state updates - drain ALL pending updates before rendering
+                            let mut latest_world_update: Option<WorldSnapshot> = None;
+                            while let Ok(ws) = rx_world.try_recv() {
+                                latest_world_update = Some(ws); // Keep only the most recent update
+                            }
+                            
+                            // Apply the most recent world state atomically (if any)
+                            if let Some(ws) = latest_world_update {
+                                // Update complete world state from simulation thread
+                                if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
+                                if world.c.len() == ws.c.len() { world.c = ws.c; }
+                                if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
+                                world.sea.eta_m = ws.sea_eta_m;
+                                world.clock.t_myr = ws.age_myr.iter().fold(0.0, |acc, &age| acc.max(age as f64)); // Approximate time from max age
+                                if world.plates.plate_id.len() == ws.plate_id.len() { world.plates.plate_id = ws.plate_id; }
+                                if world.plates.pole_axis.len() == ws.pole_axis.len() { world.plates.pole_axis = ws.pole_axis; }
+                                if world.plates.omega_rad_yr.len() == ws.omega_rad_yr.len() { world.plates.omega_rad_yr = ws.omega_rad_yr; }
+                                if world.v_en.len() == ws.v_en.len() { world.v_en = ws.v_en; }
+                                if world.age_myr.len() == ws.age_myr.len() { world.age_myr = ws.age_myr; }
+                                
+                                // Recompute boundaries with updated state
+                                world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                
+                                // Mark everything dirty for immediate update
                                 ov.world_dirty = true; ov.color_dirty = true;
+                                ov.plates_cache = None;
+                                ov.vel_cache = None;
+                                ov.bounds_cache = None;
+                                ov.age_cache = None;
+                                ov.bathy_cache = None;
+                                ov.net_adj_cache = None;
+                                ov.net_tj_cache = None;
+                                // Invalidate GPU buffer cache when world changes
+                                gpu_buf_mgr.invalidate_cache();
                             }
                             // Central canvas (draw only, no controls) — make transparent so 3D pass remains visible
                             egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
@@ -2068,7 +1706,7 @@ fn main() {
                                         let mesh = globe::build_globe_mesh(&gpu.device, &world.grid);
                                         let gr = globe::GlobeRenderer::new(&gpu.device, gpu.config.format, mesh.vertex_count);
                                         // Upload initial heights and LUT (render-only clamped copy)
-                                        let heights_init: Vec<f32> = elev_curr_clone()
+                                        let heights_init: Vec<f32> = elevation_curr_clone()
                                             .unwrap_or_else(|| world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect());
                                         gr.upload_heights(&gpu.queue, &heights_init);
                                         gr.write_lut_from_overlay(&gpu.queue, &ov);
@@ -2084,8 +1722,8 @@ fn main() {
                                         let ui_hijacked = ctx.is_using_pointer() || ctx.is_pointer_over_area();
                                         cam.update_from_input(&egui_ctx, ui_hijacked);
                                     }
-                                } else if ov.mode_simple {
-                                    // T-902A-GPU: compute raster path
+                                } else {
+                                    // Unified progressive UI: use GPU raster for smooth rendering
                                     if ov.use_gpu_raster {
                                         // Resolution policy: HQ when paused, LQ when running
                                         if !ov.run_active && ov.high_quality_when_paused {
@@ -2148,15 +1786,9 @@ fn main() {
                                                     | (if ov.force_cpu_face_pick { 1u32<<7 } else { 0 })
                                                     | (if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 });
                                                 let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                // Raster shader expects depth (positive down); provide depth directly
-                                                let verts: Vec<f32> = unsafe {
-                                                    if let Some(curr) = ELEV_CURR.as_ref() {
-                                                        curr.iter().map(|&z| world.sea.eta_m - z).collect()
-                                                    } else {
-                                                        world.depth_m.clone()
-                                                    }
-                                                };
-                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, &verts, &face_edge_info, &face_perm_info);
+                                                // Ensure GPU raster uses the same data as CPU overlays
+                                                let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
+                                                rg.upload_inputs(&gpu.device, &gpu.queue, &u, face_ids.clone(), face_offs.clone(), &face_geom, verts, &face_edge_info, &face_perm_info);
                                                 rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                 // If forcing CPU face pick, generate per-pixel face ids using shared picker
                                                 if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
@@ -2180,75 +1812,8 @@ fn main() {
                                                 ov.raster_dirty = false; ov.world_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
                                                 // println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                             } else {
-                                                // SIMULATION LOOP IS NOW COMMENTED OUT - will be replaced by thread command
-                                                /*
-                                                // Frame-driven stepping (non-blocking)
-                                                if ov.stepper.playing && (world.clock.t_myr as f32) < ov.stepper.t_target_myr {
-                                                    if !sim_busy.load(Ordering::SeqCst) {
-                                                        let cfg = engine::pipeline::PipelineCfg {
-                                                            dt_myr: ov.sim_dt_myr.max(0.0),
-                                                            steps_per_frame: 1,
-                                                            enable_flexure: !ov.disable_flexure,
-                                                            enable_erosion: !ov.disable_erosion,
-                                                            target_land_frac: ov.simple_target_land,
-                                                            freeze_eta: ov.freeze_eta,
-                                                            log_mass_budget: false,
-                                                            enable_subduction: !ov.disable_subduction,
-                                                            enable_rigid_motion: true,
-                                                            cadence_trf_every: ov.cadence_trf_every.max(1),
-                                                            cadence_sub_every: ov.cadence_sub_every.max(1),
-                                                            cadence_flx_every: ov.cadence_flx_every.max(1),
-                                                            cadence_sea_every: ov.cadence_sea_every.max(1),
-                                                            cadence_surf_every: ov.cadence_sea_every.max(1),
-                                                            substeps_transforms: 4,
-                                                            substeps_subduction: 4,
-                                                            use_gpu_flexure: false,
-                                                            gpu_flex_levels: ov.levels.max(1),
-                                                            gpu_flex_cycles: ov.flex_cycles.max(1),
-                                                            gpu_wj_omega: ov.wj_omega,
-                                                            subtract_mean_load: ov.subtract_mean_load,
-                                                            surf_k_stream: ov.surf_k_stream,
-                                                            surf_m_exp: ov.surf_m_exp,
-                                                            surf_n_exp: ov.surf_n_exp,
-                                                            surf_k_diff: ov.surf_k_diff,
-                                                            surf_k_tr: ov.surf_k_tr,
-                                                            surf_p_exp: ov.surf_p_exp,
-                                                            surf_q_exp: ov.surf_q_exp,
-                                                            surf_rho_sed: ov.surf_rho_sed,
-                                                            surf_min_slope: ov.surf_min_slope,
-                                                            surf_subcycles: ov.surf_subcycles.max(1),
-                                                            surf_couple_flexure: ov.surf_couple_flexure,
-                                                            sub_tau_conv_m_per_yr: ov.sub_tau_conv_m_per_yr,
-                                                            sub_trench_half_width_km: ov.sub_trench_half_width_km,
-                                                            sub_arc_offset_km: ov.sub_arc_offset_km,
-                                                            sub_arc_half_width_km: ov.sub_arc_half_width_km,
-                                                            sub_backarc_width_km: ov.sub_backarc_width_km,
-                                                            sub_trench_deepen_m: ov.sub_trench_deepen_m,
-                                                            sub_arc_uplift_m: ov.sub_arc_uplift_m,
-                                                            sub_backarc_uplift_m: ov.sub_backarc_uplift_m,
-                                                            sub_rollback_offset_m: ov.sub_rollback_offset_m,
-                                                            sub_rollback_rate_km_per_myr: ov.sub_rollback_rate_km_per_myr,
-                                                            sub_backarc_extension_mode: ov.sub_backarc_extension_mode,
-                                                            sub_backarc_extension_deepen_m: ov.sub_backarc_extension_deepen_m,
-                                                            sub_continent_c_min: ov.sub_continent_c_min,
-                                                            cadence_spawn_plate_every: 0,
-                                                            cadence_retire_plate_every: 0,
-                                                            cadence_force_balance_every: 8,
-                                                            fb_gain: 1.0e-12,
-                                                            fb_damp_per_myr: 0.2,
-                                                            fb_k_conv: 1.0,
-                                                            fb_k_div: 0.5,
-                                                            fb_k_trans: 0.1,
-                                                            fb_max_domega: 5.0e-9,
-                                                            fb_max_omega: 2.0e-7,
-                                                        };
-                                                        let _ = tx_cmd.send(SimCommand::Step(cfg));
-                                                    }
-                                                    ctx.request_repaint();
-                                                }
-                                                */
-                                                // Always raster each frame to ensure visible updates per step
-                                                if true {
+                                                // Always execute GPU raster when needed (data changed or texture missing)
+                                                if ov.raster_dirty || ov.world_dirty || ov.color_dirty || ov.raster_tex_id.is_none() {
                                                     let mut dbg = if ov.gpu_dbg_wire { 1u32 } else { 0 };
                                                     dbg |= if ov.gpu_dbg_face_tint { 1u32<<1 } else { 0 };
                                                     dbg |= if ov.gpu_dbg_grid { 1u32<<2 } else { 0 };
@@ -2258,8 +1823,8 @@ fn main() {
                                                     dbg |= if ov.force_cpu_face_pick { 1u32<<7 } else { 0 };
                                                     dbg |= if ov.dbg_cpu_bary_gpu_lattice { 1u32<<10 } else { 0 };
                                                     let u = raster_gpu::Uniforms { width: rw, height: rh, f: f_now, palette_mode: if ov.color_mode == 0 { 0 } else { 1 }, debug_flags: dbg, d_max: ov.hypso_d_max.max(1.0), h_max: ov.hypso_h_max.max(1.0), snowline: ov.hypso_snowline, eta_m: world.sea.eta_m, inv_dmax: 1.0f32/ov.hypso_d_max.max(1.0), inv_hmax: 1.0f32/ov.hypso_h_max.max(1.0) };
-                                                    // Raster path uses depth; ensure we don't seed elevation here
-                                                    // If forcing CPU face pick, generate per-pixel face ids using FACE_GEOM (A,B,C,N)
+                                                    // Ensure GPU raster uses consistent data source
+                                                    let verts = gpu_buf_mgr.get_depth_for_gpu(&world);
                                                     if ov.force_cpu_face_pick || ov.dbg_cpu_bary_gpu_lattice {
                                                         let mut cpu_faces: Vec<u32> = vec![0; (rw * rh) as usize];
                                                         let picker = GeoPicker::new();
@@ -2273,15 +1838,8 @@ fn main() {
                                                         rg.write_cpu_face_pick(&gpu.queue, &cpu_faces);
                                                     }
                                                     rg.write_uniforms(&gpu.queue, &u);
-                                                    // Raster shader expects depth (positive down); provide depth directly
-                                                    let depth_now: Vec<f32> = unsafe {
-                                                        if let Some(curr) = ELEV_CURR.as_ref() {
-                                                            curr.iter().map(|&z| world.sea.eta_m - z).collect()
-                                                        } else {
-                                                            world.depth_m.clone()
-                                                        }
-                                                    };
-                                                    rg.write_vertex_values(&gpu.queue, &depth_now);
+                                                    // Use the same vertex data for consistency
+                                                    rg.write_vertex_values(&gpu.queue, &verts);
                                                     rg.write_lut_from_overlay(&gpu.queue, &ov);
                                                     rg.dispatch(&gpu.device, &gpu.queue);
                                                     // Optional parity readback and console stats when debug bit is set
@@ -2474,39 +2032,51 @@ fn main() {
                                                         ov.export_parity_csv_requested = false;
                                                     }
                                                     if ov.raster_tex_id.is_none() { let tid = egui_renderer.register_native_texture(&gpu.device, &rg.out_view, wgpu::FilterMode::Linear); ov.raster_tex_id = Some(tid); }
-                                                    ov.raster_dirty = false; ov.world_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
+                                                    ov.raster_dirty = false; ov.color_dirty = false; ov.last_raster_at = std::time::Instant::now();
+                                                    // Don't clear world_dirty here - let overlays update first
                                                     // println!("[viewer] raster(gpu) W={} H={} | F={} | verts={} | face_tbl={} | dispatch={}x{}", rw, rh, f_now, world.depth_m.len(), 20 * ((f_now + 1) * (f_now + 2) / 2), (rw + 7) / 8, (rh + 7) / 8);
                                                 }
                                             }
-                                            // Draw GPU raster and capture its actual rect for overlays
-                                            let mut rect_img = rect;
-                                            if let Some(tid) = ov.raster_tex_id {
-                                                let avail = ui.available_size();
-                                                let resp = ui.image(egui::load::SizedTexture::new(tid, avail));
-                                                rect_img = resp.rect;
-                                            }
-                                            // Draw parity heat overlay as red dots if enabled
-                                            if ov.show_parity_heat {
-                                                if let Some(points) = &ov.parity_points {
-                                                    let rect_px = rect_img;
-                                                    // current raster size
-                                                    let (rw, rh) = ov.raster_size;
-                                                    let mut mesh = egui::epaint::Mesh::default();
-                                                    for pxy in points.iter() {
-                                                        let x = rect_px.left() + (pxy[0] as f32 + 0.5) / (rw as f32) * rect_px.width();
-                                                        let y = rect_px.top() + (pxy[1] as f32 + 0.5) / (rh as f32) * rect_px.height();
-                                                        overlay::OverlayState::mesh_add_dot(&mut mesh, egui::pos2(x, y), 1.2, egui::Color32::RED);
-                                                    }
-                                                    painter.add(egui::Shape::mesh(mesh));
+                                        }
+                                        // Draw GPU raster and capture its actual rect for overlays
+                                        let mut rect_img = rect;
+                                        if let Some(tid) = ov.raster_tex_id {
+                                            let avail = ui.available_size();
+                                            let resp = ui.image(egui::load::SizedTexture::new(tid, avail));
+                                            rect_img = resp.rect;
+                                        }
+                                        // Draw parity heat overlay as red dots if enabled
+                                        if ov.show_parity_heat {
+                                            if let Some(points) = &ov.parity_points {
+                                                let rect_px = rect_img;
+                                                // current raster size
+                                                let (rw, rh) = ov.raster_size;
+                                                let mut mesh = egui::epaint::Mesh::default();
+                                                for pxy in points.iter() {
+                                                    let x = rect_px.left() + (pxy[0] as f32 + 0.5) / (rw as f32) * rect_px.width();
+                                                    let y = rect_px.top() + (pxy[1] as f32 + 0.5) / (rh as f32) * rect_px.height();
+                                                    overlay::OverlayState::mesh_add_dot(&mut mesh, egui::pos2(x, y), 1.2, egui::Color32::RED);
                                                 }
-                                            }
-                                            // Draw overlays on top when paused (skip during playback for responsiveness)
-                                            if !ov.run_active {
-                                                let saved = ov.show_bathy; ov.show_bathy = false; overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov); ov.show_bathy = saved;
+                                                painter.add(egui::Shape::mesh(mesh));
                                             }
                                         }
+                                        // Ensure boundary classification reflects current velocities/plates
+                                        if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
+                                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                            ov.bounds_cache = None;
+                                        }
+                                        // Draw overlays on top (GPU raster provides the base elevation layer)
+                                        overlay::draw_advanced_layers(ui, &painter, rect_img, &world, &world.grid, &mut ov);
+                                        
+                                        // Clear world_dirty flag after overlays have been updated
+                                        ov.world_dirty = false;
                                     } else {
-                                        // CPU fallback raster
+                                        // CPU fallback raster (only when GPU raster is disabled)
+                                        // Keep boundary classification fresh when world changed
+                                        if ov.world_dirty && (ov.show_bounds || ov.show_plate_type || ov.show_plate_adjacency || ov.show_triple_junctions) {
+                                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
+                                            ov.bounds_cache = None;
+                                        }
                                         if ov.raster_dirty || ov.raster_tex.is_none() {
                                             let (rw, rh) = ov.raster_size;
                                             let img = raster::render_map(&world, &ov, rw, rh);
@@ -2525,10 +2095,12 @@ fn main() {
                                                 egui::Color32::WHITE,
                                             );
                                         }
+                                        // Draw overlays on top (CPU raster provides the base elevation layer)
+                                        overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
+                                        
+                                        // Clear world_dirty flag after overlays have been updated
+                                        ov.world_dirty = false;
                                     }
-                                    // UI no longer steps; background worker handles stepping
-                                } else {
-                                    overlay::draw_advanced_layers(ui, &painter, rect, &world, &world.grid, &mut ov);
                                 }
                             });
                             // Remove legacy central/top UI panels (moved to drawer)
@@ -2566,8 +2138,7 @@ fn main() {
                                 gr.write_lut_from_overlay(&gpu.queue, &ov);
                                 // If world changed, refresh vertex heights using elevation (η − depth)
                                 if ov.world_dirty {
-                                    let heights_now: Vec<f32> = elev_curr_clone()
-                                        .unwrap_or_else(|| world.depth_m.iter().map(|&d| world.sea.eta_m - d).collect());
+                                    let heights_now = gpu_buf_mgr.get_elevation_for_comparison(&world);
                                     gr.upload_heights(&gpu.queue, &heights_now);
                                 }
                                 gr.update_uniforms(
@@ -2578,7 +2149,7 @@ fn main() {
                                     dbg_flags,
                                     ov.hypso_d_max,
                                     ov.hypso_h_max,
-                                    1.0f32 / 6_371_000.0f32,
+                                    1.0f32 / get_phys_consts().r_earth_m as f32,
                                 );
                                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                     label: Some("globe pass"),
@@ -2639,10 +2210,19 @@ fn main() {
                         if dt > 0.0 { fps = 0.9 * fps + 0.1 * (1.0 / dt); }
                         // Update adaptive caps using frame time in ms
                         ov.update_adaptive_caps(dt * 1000.0);
-                        // Playback ticking
+                        // Playback ticking - rate limited to prevent visual chaos
                         if ov.stepper.playing {
-                            if !sim_busy.load(Ordering::SeqCst) {
-                                let cfg = engine::pipeline::PipelineCfg {
+                            // Rate limit simulation steps to avoid overwhelming the viewer
+                            let now = std::time::Instant::now();
+                            let should_step = if let Some(last_step_time) = ov.last_sim_step_time {
+                                now.duration_since(last_step_time).as_millis() >= 100 // Max 10 steps per second
+                            } else {
+                                true // First step
+                            };
+                            
+                            if should_step && !sim_busy.load(Ordering::SeqCst) {
+                                ov.last_sim_step_time = Some(now);
+                                let cfg = engine::config::PipelineCfg {
                                     dt_myr: ov.sim_dt_myr.max(0.0),
                                     steps_per_frame: 1,
                                     enable_flexure: !ov.disable_flexure,
@@ -2699,18 +2279,75 @@ fn main() {
                                     fb_max_domega: 5.0e-9,
                                     fb_max_omega: 2.0e-7,
                                 };
-                                let _ = tx_cmd.send(SimCommand::Step(cfg));
+                                let process_flags = ProcessFlags {
+                                    enable_rigid_motion: ov.enable_rigid_motion,
+                                    enable_subduction: ov.enable_subduction,
+                                    enable_transforms: ov.enable_transforms,
+                                    enable_flexure: ov.enable_flexure,
+                                    enable_surface_processes: ov.enable_surface_processes,
+                                    enable_isostasy: ov.enable_isostasy,
+                                    enable_continental_buoyancy: ov.enable_continental_buoyancy,
+                                    enable_orogeny: ov.enable_orogeny,
+                                    enable_accretion: ov.enable_accretion,
+                                    enable_rifting: ov.enable_rifting,
+                                    enable_ridge_birth: ov.enable_ridge_birth,
+                                    
+                                    // Flexure backend configuration
+                                    flexure_backend_cpu: ov.flexure_backend_cpu,
+                                    flexure_gpu_levels: ov.flexure_gpu_levels,
+                                    flexure_gpu_cycles: ov.flexure_gpu_cycles,
+                                    
+                                    // Unified cadence configuration
+                                    cadence_config: {
+                                        let mut config = engine::cadence_manager::CadenceConfig::new();
+                                        config.set_cadence(engine::cadence_manager::ProcessType::RigidMotion, ov.cadence_rigid_motion);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Transforms, ov.cadence_transforms);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Subduction, ov.cadence_subduction);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Flexure, ov.cadence_flexure);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::SurfaceProcesses, ov.cadence_surface_processes);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Isostasy, ov.cadence_isostasy);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::ContinentalBuoyancy, ov.cadence_continental_buoyancy);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Orogeny, ov.cadence_orogeny);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Accretion, ov.cadence_accretion);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::Rifting, ov.cadence_rifting);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::RidgeBirth, ov.cadence_ridge_birth);
+                                        config.set_cadence(engine::cadence_manager::ProcessType::ForceBalance, ov.cadence_force_balance);
+                                        config
+                                    },
+                                };
+                                let _ = tx_cmd.send(SimCommand::Step(cfg, process_flags));
                             }
                         }
-                        // Drain any snapshot from the worker and update visible world
-                        if let Ok((elev, eta, t_myr)) = rx_snap.try_recv() {
-                            unsafe {
-                                if ELEV_CURR.is_none() { ELEV_CURR = Some(vec![0.0; elev.len()]); }
-                                if let Some(curr) = ELEV_CURR.as_mut() { *curr = elev; }
-                            }
-                            world.sea.eta_m = eta;
-                            world.clock.t_myr = t_myr;
+                        // World updates now come through unified rx_world channel only
+                        
+                        // Atomic world updates - drain ALL pending updates before rendering (secondary location)
+                        let mut latest_world_update: Option<WorldSnapshot> = None;
+                        while let Ok(ws) = rx_world.try_recv() {
+                            latest_world_update = Some(ws); // Keep only the most recent update
+                        }
+                        
+                        // Apply the most recent world state atomically (if any)
+                        if let Some(ws) = latest_world_update {
+                            if world.depth_m.len() == ws.depth_m.len() { world.depth_m = ws.depth_m; }
+                            if world.c.len() == ws.c.len() { world.c = ws.c; }
+                            if world.th_c_m.len() == ws.th_c_m.len() { world.th_c_m = ws.th_c_m; }
+                            world.sea.eta_m = ws.sea_eta_m;
+                            if world.plates.plate_id.len() == ws.plate_id.len() { world.plates.plate_id = ws.plate_id; }
+                            if world.plates.pole_axis.len() == ws.pole_axis.len() { world.plates.pole_axis = ws.pole_axis; }
+                            if world.plates.omega_rad_yr.len() == ws.omega_rad_yr.len() { world.plates.omega_rad_yr = ws.omega_rad_yr; }
+                            if world.v_en.len() == ws.v_en.len() { world.v_en = ws.v_en; }
+                            if world.age_myr.len() == ws.age_myr.len() { world.age_myr = ws.age_myr; }
+                            // Recompute boundaries with updated state
+                            world.boundaries = engine::boundaries::Boundaries::classify(&world.grid, &world.plates.plate_id, &world.v_en, 0.005);
                             ov.world_dirty = true; ov.color_dirty = true; ov.raster_dirty = true;
+                            // Invalidate overlay caches so they update with new world state
+                            ov.plates_cache = None;
+                            ov.vel_cache = None;
+                            ov.bounds_cache = None;
+                            ov.age_cache = None;
+                            ov.bathy_cache = None;
+                            ov.net_adj_cache = None;
+                            ov.net_tj_cache = None;
                         }
                     }
                     _ => {}
@@ -2722,56 +2359,8 @@ fn main() {
     .unwrap_or_else(|e| panic!("run app: {e}"));
 }
 
-// Helper to apply preset values to subduction controls
-fn apply_sub_preset(ov: &mut overlay::OverlayState) {
-    match ov.sub_preset {
-        1 => {
-            // Strong rollback
-            ov.sub_rollback_offset_m = 80_000.0;
-            ov.sub_rollback_rate_km_per_myr = 20.0;
-            ov.sub_trench_deepen_m = 2200.0;
-            ov.sub_arc_uplift_m = -400.0;
-            ov.sub_backarc_uplift_m = -150.0;
-            ov.sub_backarc_extension_mode = false;
-        }
-        2 => {
-            // Back-arc extension
-            ov.sub_backarc_extension_mode = true;
-            ov.sub_backarc_extension_deepen_m = 600.0;
-            ov.sub_trench_deepen_m = 2000.0;
-            ov.sub_arc_uplift_m = -250.0;
-            ov.sub_backarc_uplift_m = 0.0;
-            ov.sub_rollback_offset_m = 40_000.0;
-            ov.sub_rollback_rate_km_per_myr = 10.0;
-        }
-        3 => {
-            // Weak arcs
-            ov.sub_trench_deepen_m = 1500.0;
-            ov.sub_arc_uplift_m = -120.0;
-            ov.sub_backarc_uplift_m = -60.0;
-            ov.sub_backarc_extension_mode = false;
-            ov.sub_rollback_offset_m = 0.0;
-            ov.sub_rollback_rate_km_per_myr = 0.0;
-        }
-        _ => {
-            // Reference
-            ov.sub_tau_conv_m_per_yr = 0.005;
-            ov.sub_trench_half_width_km = 40.0;
-            ov.sub_arc_offset_km = 140.0;
-            ov.sub_arc_half_width_km = 25.0;
-            ov.sub_backarc_width_km = 120.0;
-            ov.sub_trench_deepen_m = 1800.0;
-            ov.sub_arc_uplift_m = -300.0;
-            ov.sub_backarc_uplift_m = -120.0;
-            ov.sub_rollback_offset_m = 0.0;
-            ov.sub_rollback_rate_km_per_myr = 0.0;
-            ov.sub_backarc_extension_mode = false;
-            ov.sub_backarc_extension_deepen_m = 400.0;
-            ov.sub_continent_c_min = 0.6;
-        }
-    }
-}
 
-fn elev_curr_clone() -> Option<Vec<f32>> {
-    unsafe { ELEV_CURR.clone() }
+fn elevation_curr_clone() -> Option<Vec<f32>> {
+    // No longer using global elevation state - return None
+    None
 }
