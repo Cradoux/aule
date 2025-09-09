@@ -278,7 +278,7 @@ pub(crate) fn step_full_internal(world: &mut World, surf: SurfaceFields, cfg: Pi
              fb_params.gain, fb_params.damp_per_myr, fb_params.k_conv, fb_params.k_div, fb_params.k_trans, fb_params.max_domega, fb_params.max_omega);
     
     // Debug: Monitor plate speed saturation
-    let pre_fb_max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let _pre_fb_max_omega = world.plates.omega_rad_yr.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
     let pre_fb_max_velocity = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
     // Store plate_id to avoid borrow checker issues
     let plate_id = world.plates.plate_id.clone();
@@ -300,8 +300,8 @@ pub(crate) fn step_full_internal(world: &mut World, surf: SurfaceFields, cfg: Pi
     let max_velocity_after = world.v_en.iter().fold(0.0f32, |a, v| a.max((v[0]*v[0] + v[1]*v[1]).sqrt()));
     
     // Check for force balance saturation
-    let omega_saturated = (max_omega_after >= fb_params.max_omega * 0.95);
-    let zero_rotation = (max_omega_after < 1.0e-9);
+    let omega_saturated = max_omega_after >= fb_params.max_omega * 0.95;
+    let zero_rotation = max_omega_after < 1.0e-9;
     
     // Check for runaway acceleration
     let velocity_delta = max_velocity_after - pre_fb_max_velocity;
@@ -495,10 +495,15 @@ pub(crate) fn step_full_internal(world: &mut World, surf: SurfaceFields, cfg: Pi
     // Skip legacy semi-Lagrangian advection for C/th_c_m and age when rigid motion is enabled
     if !cfg.enable_rigid_motion {
         // 1) C and th_c_m via existing helper
-        crate::continent::advect_c_thc(
+        // Save current state as source
+        let c_src = world.c.clone();
+        let th_src = world.th_c_m.clone();
+        crate::continent::rigid_advect_c_thc_from(
             &world.grid,
-            &world.v_en,
+            &world.plates,
             dt as f64,
+            &c_src,
+            &th_src,
             &mut world.c,
             &mut world.th_c_m,
         );

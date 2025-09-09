@@ -402,82 +402,8 @@ impl PhysicsConfig {
         }
     }
     
-    /// Convert to legacy StepParams format for compatibility
-    pub fn to_step_params(&self) -> StepParams {
-        StepParams {
-            dt_myr: self.dt_myr as f64,
-            do_flexure: self.enable_flexure,
-            do_isostasy: self.enable_isostasy,
-            do_transforms: self.enable_transforms,
-            do_subduction: self.enable_subduction,
-            do_continents: self.enable_continental_buoyancy,
-            do_ridge_birth: self.enable_ridge_birth,
-            auto_rebaseline_after_continents: self.auto_rebaseline_after_continents,
-            do_rigid_motion: self.enable_rigid_motion,
-            do_orogeny: self.enable_orogeny,
-            do_accretion: self.enable_accretion,
-            do_rifting: self.enable_rifting,
-            do_surface: self.enable_surface_processes,
-            surface_params: self.surface_params,
-            advection_every: self.cadence_rigid_motion,
-            transforms_every: self.cadence_transforms,
-            subduction_every: self.cadence_subduction,
-            flexure_every: self.cadence_flexure,
-            sea_every: self.cadence_isostasy,
-            do_advection: self.enable_rigid_motion,
-            do_sea: self.enable_isostasy,
-        }
-    }
 }
 
-/// DEPRECATED: Use PhysicsConfig instead.
-/// This struct is kept temporarily for legacy code but will be removed.
-#[deprecated(note = "Use PhysicsConfig instead")]
-#[derive(Clone, Copy, Debug)]
-pub struct StepParams {
-    /// Time step in Myr
-    pub dt_myr: f64,
-    /// Apply elastic flexure response to current loads
-    pub do_flexure: bool,
-    /// Adjust global sea level to maintain reference ocean volume
-    pub do_isostasy: bool,
-    /// Apply transform pull-apart/restraining bands
-    pub do_transforms: bool,
-    /// Apply subduction trench/arc/backarc edits
-    pub do_subduction: bool,
-    /// Advect C/th_c and apply continental uplift to depth
-    pub do_continents: bool,
-    /// Reset age along divergent boundaries (ridge births)
-    pub do_ridge_birth: bool,
-    /// If true, auto re-baseline sea level after continents change.
-    pub auto_rebaseline_after_continents: bool,
-    /// Enable rigid plate motion (advect plate_id and update velocities)
-    pub do_rigid_motion: bool,
-    /// Enable collision orogeny (C–C sutures)
-    pub do_orogeny: bool,
-    /// Enable O–C accretion (arc/forearc growth)
-    pub do_accretion: bool,
-    /// Enable continental rifting and passive margins
-    pub do_rifting: bool,
-    /// Enable surface processes (erosion, diffusion, sediment transport/deposition)
-    pub do_surface: bool,
-    /// Parameter set for surface processes.
-    pub surface_params: crate::surface::SurfaceParams,
-    /// Cadence: run advection every N steps (>=1). When 1, runs each step.
-    pub advection_every: u32,
-    /// Cadence for transforms
-    pub transforms_every: u32,
-    /// Cadence for subduction
-    pub subduction_every: u32,
-    /// Cadence for flexure
-    pub flexure_every: u32,
-    /// Cadence for sea-level/isostasy
-    pub sea_every: u32,
-    /// Gate advection explicitly (combined with cadence)
-    pub do_advection: bool,
-    /// Gate sea-level explicitly (combined with cadence)
-    pub do_sea: bool,
-}
 
 /// Pipeline configuration used by Simple and Advanced modes (from pipeline.rs).
 #[derive(Clone, Copy, Debug)]

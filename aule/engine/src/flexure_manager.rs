@@ -156,8 +156,8 @@ impl FlexureManager {
         &self, 
         world: &World, 
         f_load: &[f32], 
-        levels: u32, 
-        cycles: u32
+        _levels: u32, 
+        _cycles: u32
     ) -> Result<Vec<f32>, FlexureError> {
         let n = world.grid.cells;
         if f_load.len() != n {
@@ -169,7 +169,7 @@ impl FlexureManager {
         // In a real implementation, this would call crate::flexure_gpu::FlexGpu
 
         // Apply mean load subtraction if enabled
-        let load = if self.subtract_mean_load {
+        let _load = if self.subtract_mean_load {
             let mean_load: f64 = f_load.iter().map(|&f| f as f64).sum::<f64>() / (n as f64);
             f_load.iter().map(|&f| f - mean_load as f32).collect()
         } else {

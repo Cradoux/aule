@@ -39,9 +39,9 @@ pub struct ContKey {
 pub struct StepperState {
     pub playing: bool,
     pub t_target_myr: f32,
-    pub max_steps_per_frame: u32,
-    pub min_ms_between_raster: u64,
-    pub last_raster_at: Instant,
+    pub _max_steps_per_frame: u32,
+    pub _min_ms_between_raster: u64,
+    pub _last_raster_at: Instant,
 }
 
 #[allow(dead_code)]
@@ -639,9 +639,9 @@ impl Default for OverlayState {
             stepper: StepperState {
                 playing: false,
                 t_target_myr: 0.0,
-                max_steps_per_frame: 4,
-                min_ms_between_raster: 200,
-                last_raster_at: Instant::now(),
+                _max_steps_per_frame: 4,
+                _min_ms_between_raster: 200,
+                _last_raster_at: Instant::now(),
             },
 
             hypso_d_max: 4000.0,
