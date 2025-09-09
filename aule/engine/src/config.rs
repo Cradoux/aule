@@ -392,8 +392,8 @@ impl PhysicsConfig {
             cadence_spawn_plate_every: 0, // disabled by default
             cadence_retire_plate_every: 0, // disabled by default  
             cadence_force_balance_every: 0, // disabled by default
-            fb_gain: 1.0e-6,               // Much higher gain to overcome damping
-            fb_damp_per_myr: 0.01,         // Much lower damping to allow rotation
+            fb_gain: 1.0e-9,               // Balanced gain - between frozen and runaway
+            fb_damp_per_myr: 0.1,          // Moderate damping for stability
             fb_k_conv: 1.0,
             fb_k_div: 0.5,
             fb_k_trans: 0.1,
