@@ -176,13 +176,13 @@ fn run_to_t_realtime(
                 cadence_spawn_plate_every: 0,
                 cadence_retire_plate_every: 0,
                 cadence_force_balance_every: 8,
-                fb_gain: 1.0e-8,               // Realistic force balance gain
-                fb_damp_per_myr: 0.2,
+                fb_gain: 1.0e-10,              // Much lower gain to prevent instability
+                fb_damp_per_myr: 0.5,          // Higher damping to prevent oscillation
                 fb_k_conv: 1.0,
                 fb_k_div: 0.5,
                 fb_k_trans: 0.1,
-                fb_max_domega: 1.0e-7,         // Allow realistic omega changes
-                fb_max_omega: 5.0e-6,          // Allow realistic plate rotation rates
+                fb_max_domega: 5.0e-8,         // More conservative omega changes per step
+                fb_max_omega: 1.0e-6,          // More conservative rotation rate limit
             };
             // Convert PipelineCfg to PhysicsConfig for unified pipeline
             let mut config = engine::config::PhysicsConfig::simple_mode();

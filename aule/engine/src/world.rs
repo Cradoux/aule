@@ -323,6 +323,10 @@ impl World {
     pub fn generate_simple(&mut self, preset: &SimplePreset, seed: u64) -> SimpleReport {
         // 1) Reset/normalize world state for current F & plates
         self.plates = crate::plates::Plates::new(&self.grid, preset.plates, seed);
+        // CRITICAL: Ensure all plates start with zero angular velocity to prevent persistence
+        for omega in &mut self.plates.omega_rad_yr {
+            *omega = 0.0;
+        }
         self.v_en.clone_from(&self.plates.vel_en);
         self.age_myr.fill(0.0);
         self.age_stage.clone_from(&self.age_myr);
